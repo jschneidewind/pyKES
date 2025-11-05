@@ -3,6 +3,7 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from functools import partial
 import traceback
+from typing import Optional
 
 from pyKES.database.database_experiments import ExperimentalDataset, Experiment
 
@@ -60,17 +61,24 @@ def read_in_single_experiment(file_name: str,
             'error': f"{str(e)}\n\nFull traceback:\n{tb}"
         }
 
-def read_in_experiments_multiprocessing(keywords: list, 
-                                        directory: str, 
-                                        database: ExperimentalDataset,
+def read_in_experiments_multiprocessing(database: ExperimentalDataset,
                                         metadata_retrival_function: callable,
                                         raw_data_reading_function: callable,
-                                        processing_function: callable): 
+                                        processing_function: callable,
+                                        keywords: Optional[list] = None, 
+                                        directory: Optional[str] = None,
+                                        overview_df_based_processing: Optional[bool] = False,
+                                        overview_df_experiment_column: Optional[str] = 'Experiment'): 
     """
     
     """
 
-    files = generate_list_of_files(keywords, directory)
+    if overview_df_based_processing:
+        files = database.overview_df[overview_df_experiment_column].tolist()
+    else:
+        files = generate_list_of_files(keywords, directory)
+
+    print(files)
 
     read_in_single_experiment_partial = partial(read_in_single_experiment, 
                                           database = database,
