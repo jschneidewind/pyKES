@@ -232,12 +232,81 @@ class ExperimentalDataset:
         for i, name in enumerate(self.list_experiments(), 1):
             print(f"{i}. {name}")
 
+    @classmethod
+    def merge_hdf5_files(cls, filenames: List[str], output_filename: str = None):
+        """
+        Merge multiple HDF5 files into a single ExperimentalDataset.
+        
+        Parameters
+        ----------
+        filenames : List[str]
+            List of HDF5 file paths to merge
+        output_filename : str, optional
+            Path to save the merged dataset. If None, doesn't save.
+            
+        Returns
+        -------
+        ExperimentalDataset
+            Merged dataset containing experiments from all files
+            
+        Raises
+        ------
+        ValueError
+            If duplicate experiment names are found across files
+            
+        Examples
+        --------
+        >>> merged = ExperimentalDataset.merge_hdf5_files(
+        ...     ['exp1.h5', 'exp2.h5', 'exp3.h5'],
+        ...     output_filename='merged_experiments.h5'
+        ... )
+        """
+        merged_dataset = cls()
+        overview_dfs = []
+        duplicate_experiments = []
+        
+        for filename in filenames:
+            print(f"Loading {filename}...")
+            temp_dataset = cls.load_from_hdf5(filename)
+            
+            # Check for duplicate experiment names
+            for exp_name in temp_dataset.experiments.keys():
+                if exp_name in merged_dataset.experiments:
+                    duplicate_experiments.append((exp_name, filename))
+                else:
+                    merged_dataset.add_experiment(temp_dataset.experiments[exp_name])
+            
+            # Collect overview DataFrames
+            if not temp_dataset.overview_df.empty:
+                overview_dfs.append(temp_dataset.overview_df)
+        
+        # Report duplicates
+        if duplicate_experiments:
+            print("\nWarning: Found duplicate experiments (skipped):")
+            for exp_name, filename in duplicate_experiments:
+                print(f"  - '{exp_name}' in {filename}")
+        
+        # Merge overview DataFrames
+        if overview_dfs:
+            merged_dataset.overview_df = pd.concat(overview_dfs, ignore_index=True)
+            # Remove duplicate rows if any
+            merged_dataset.overview_df = merged_dataset.overview_df.drop_duplicates()
+        
+        print(f"\nMerged dataset contains {len(merged_dataset.experiments)} experiments")
+        
+        # Save if output filename provided
+        if output_filename:
+            print(f"Saving merged dataset to {output_filename}...")
+            merged_dataset.save_to_hdf5(output_filename)
+        
+        return merged_dataset
 
 def usage_example():
-
+    """Demonstrate basic ExperimentalDataset functionality."""
+    
+    # Create a dataset and add an experiment
     dataset = ExperimentalDataset()
 
-    # Add an experiment
     exp1 = Experiment(
         experiment_name="Exp1",
         raw_data_file="data/exp1.h5",
@@ -265,8 +334,11 @@ def usage_example():
 
     print(loaded_dataset.experiments['Exp1'].processed_data['baseline_corrected']['fit_parameters'])
 
+
+
 if __name__ == '__main__':
     usage_example()
+
 
 
 
