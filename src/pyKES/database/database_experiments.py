@@ -17,6 +17,7 @@ class Experiment:
     experiment_name: str
     raw_data_file: str
     color: str
+    group: str
     metadata: Dict[str, any]
     raw_data: Dict[str, any]
     processed_data: Dict[str, any]
@@ -113,6 +114,9 @@ class ExperimentalDataset:
 
     experiments: Dict[str, 'Experiment'] = field(default_factory=dict)
     overview_df: pd.DataFrame = field(default_factory=lambda: pd.DataFrame())
+    plotting_instruction: Dict[str, Any] = field(default_factory=dict)
+    group_mapping: Dict[str, Any] = field(default_factory=dict)
+    processing_parameters: Dict[str, Any] = field(default_factory=dict)
 
     def add_experiment(self, experimental_data: 'Experiment'):
         """Add an experiment to the dataset"""
@@ -139,6 +143,14 @@ class ExperimentalDataset:
             self.overview_df.to_hdf(filename, key='overview_df', mode='w', format='table')
 
         with h5py.File(filename, 'a') as f:
+            # Save dataset-level dictionaries as attributes
+            if self.plotting_instruction:
+                f.attrs['plotting_instruction'] = json.dumps(self.plotting_instruction)
+            if self.group_mapping:
+                f.attrs['group_mapping'] = json.dumps(self.group_mapping)
+            if self.processing_parameters:
+                f.attrs['processing_parameters'] = json.dumps(self.processing_parameters)
+            
             for exp_name, experiment in self.experiments.items():
 
                 if exp_name in f:
@@ -151,6 +163,7 @@ class ExperimentalDataset:
                 exp_grp.attrs['experiment_name'] = experiment.experiment_name
                 exp_grp.attrs['raw_data_file'] = experiment.raw_data_file
                 exp_grp.attrs['color'] = experiment.color
+                exp_grp.attrs['group'] = experiment.group
 
                 # Save nested dictionaries in separate groups
                 if experiment.raw_data:
@@ -182,6 +195,14 @@ class ExperimentalDataset:
             dataset.overview_df = pd.DataFrame()
 
         with h5py.File(filename, 'r') as f:
+            # Load dataset-level dictionaries from attributes
+            if 'plotting_instruction' in f.attrs:
+                dataset.plotting_instruction = json.loads(f.attrs['plotting_instruction'])
+            if 'group_mapping' in f.attrs:
+                dataset.group_mapping = json.loads(f.attrs['group_mapping'])
+            if 'processing_parameters' in f.attrs:
+                dataset.processing_parameters = json.loads(f.attrs['processing_parameters'])
+            
             for exp_name in f.keys():
                 if exp_name == 'overview_df':  # Skip the overview_df group
                     continue
@@ -192,6 +213,7 @@ class ExperimentalDataset:
                 experiment_name = exp_group.attrs['experiment_name']
                 raw_data_file = exp_group.attrs['raw_data_file'] 
                 color = exp_group.attrs['color']
+                group = exp_group.attrs.get('group', '')  # Default to empty string if not present
                 
                 # Load nested dictionaries
                 raw_data = load_nested_dict_from_hdf5(exp_group['raw_data']) if 'raw_data' in exp_group else {}
@@ -202,6 +224,7 @@ class ExperimentalDataset:
                     experiment_name=experiment_name,
                     raw_data_file=raw_data_file,
                     color=color,
+                    group=group,
                     metadata=metadata,
                     raw_data=raw_data,
                     processed_data=processed_data
@@ -279,6 +302,18 @@ class ExperimentalDataset:
             # Collect overview DataFrames
             if not temp_dataset.overview_df.empty:
                 overview_dfs.append(temp_dataset.overview_df)
+
+            # Merge plotting_instruction dictionaries
+            if temp_dataset.plotting_instruction:
+                merged_dataset.plotting_instruction.update(temp_dataset.plotting_instruction)
+
+            # Merge group_mapping dictionaries
+            if temp_dataset.group_mapping:
+                merged_dataset.group_mapping.update(temp_dataset.group_mapping)
+
+            # Merge processing_parameters dictionaries
+            if temp_dataset.processing_parameters:
+                merged_dataset.processing_parameters.update(temp_dataset.processing_parameters)
         
         # Report duplicates
         if duplicate_experiments:
@@ -304,13 +339,20 @@ class ExperimentalDataset:
 def usage_example():
     """Demonstrate basic ExperimentalDataset functionality."""
     
+
+
     # Create a dataset and add an experiment
     dataset = ExperimentalDataset()
+    
+    # Add dataset-level attributes
+    dataset.plotting_instruction = {'xlabel': 'Time (s)', 'ylabel': 'Current (mA)'}
+    dataset.group_mapping = {'GroupA': ['Exp1'], 'GroupB': ['Exp2']}
 
     exp1 = Experiment(
         experiment_name="Exp1",
         raw_data_file="data/exp1.h5",
         color="blue",
+        group="GroupA",
         metadata={"temperature": 300, "pressure": 101325},
         raw_data={"current": np.array([0, 1, 2]), "voltage": np.array([0, 0.5, 1])},
         processed_data={"baseline_corrected": {
@@ -331,6 +373,10 @@ def usage_example():
     # Load from HDF5
     loaded_dataset = ExperimentalDataset.load_from_hdf5("experiments.h5")
     loaded_dataset.print_experiments()
+    
+    print(f"Plotting instructions: {loaded_dataset.plotting_instruction}")
+    print(f"Group mapping: {loaded_dataset.group_mapping}")
+    print(f"Exp1 group: {loaded_dataset.experiments['Exp1'].group}")
 
     print(loaded_dataset.experiments['Exp1'].processed_data['baseline_corrected']['fit_parameters'])
 

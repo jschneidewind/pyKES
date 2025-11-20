@@ -39,6 +39,7 @@ def read_in_single_experiment(file_name: str,
             experiment_name = metadata_dict['experiment_name'],
             raw_data_file = file_name,
             color = metadata_dict.get('color', 'black'),
+            group = metadata_dict.get('group', 'default'),
             metadata = metadata_dict,
             raw_data = raw_data_dict,
             processed_data = processed_data_dict
@@ -77,8 +78,6 @@ def read_in_experiments_multiprocessing(database: ExperimentalDataset,
         files = database.overview_df[overview_df_experiment_column].tolist()
     else:
         files = generate_list_of_files(keywords, directory)
-
-    print(files)
 
     read_in_single_experiment_partial = partial(read_in_single_experiment, 
                                           database = database,

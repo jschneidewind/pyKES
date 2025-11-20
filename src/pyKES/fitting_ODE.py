@@ -7,153 +7,7 @@ from pprint import pprint
 
 from pyKES.reaction_ODE import solve_ode_system, parse_reactions, calculate_excitations_per_second_competing
 from pyKES.database.database_experiments import ExperimentalDataset
-
-
-def resolve_experiment_attributes(template_dict, experiment, mode='strict'):
-    """
-    Recursively resolve attribute paths from experiment object.
-    
-    Parameters
-    ----------
-    template_dict : dict
-        Dictionary with string paths to resolve (e.g., 'processed_data/time_s')
-        or nested dictionaries containing such paths.
-    experiment : Experiment
-        Experiment object containing the data to resolve.
-    mode : {'strict', 'semi-strict', 'permissive'}, default 'permissive'
-        Resolution mode:
-        - 'strict': All paths must resolve successfully, raises error otherwise
-        - 'semi-strict': At least one top-level entry must resolve, raises error if none do
-        - 'permissive': Skip entries that cannot be resolved, return what's available
-        
-    Returns
-    -------
-    dict
-        Dictionary with resolved values. In permissive mode, excludes entries that 
-        couldn't be fully resolved. In strict/semi-strict modes, contains all requested
-        entries or raises an error.
-        
-    Raises
-    ------
-    ValueError
-        In 'strict' mode: if any path cannot be resolved
-        In 'semi-strict' mode: if no top-level entries can be resolved
-        
-    Examples
-    --------
-    >>> # Permissive mode (default) - skip missing data
-    >>> data_template = {
-    ...     '[O2]': {'x': 'processed_data/time_s', 'y': 'processed_data/O2_conc'},
-    ...     '[F]': {'x': 'processed_data/time_s', 'y': 'processed_data/F_conc'}
-    ... }
-    >>> resolved = resolve_experiment_attributes(data_template, experiment)
-    >>> # Only returns entries where all nested values resolved
-    
-    >>> # Strict mode - all must resolve
-    >>> resolved = resolve_experiment_attributes(data_template, experiment, mode='strict')
-    >>> # Raises ValueError if any path fails
-    
-    >>> # Semi-strict mode - at least one entry must work
-    >>> resolved = resolve_experiment_attributes(data_template, experiment, mode='semi-strict')
-    >>> # Raises ValueError if all entries fail, returns partial results otherwise
-    """
-
-    def resolve_path_slash(path_string, obj):
-        """Resolve a slash-separated path through object attributes and dict keys."""
-        current = obj
-        components = path_string.split('/')
-        
-        for component in components:
-            if hasattr(current, component):
-                current = getattr(current, component)
-            elif isinstance(current, dict) and component in current:
-                current = current[component]
-            else:
-                raise ValueError(f"Cannot resolve '{component}' in path '{path_string}'")
-        
-        return current    
-
-    result_dict = {}
-    failed_keys = []
-    
-    for key, value in template_dict.items():
-        try:
-            # Check if the value is a nested dictionary (but not a function spec)
-            if isinstance(value, dict) and 'function' not in value:
-                # Recursively resolve the nested dictionary with same mode
-                resolved_nested = resolve_experiment_attributes(value, experiment, mode=mode)
-                
-                # Only include if ALL nested values were resolved (same keys as template)
-                if set(resolved_nested.keys()) == set(value.keys()):
-                    result_dict[key] = resolved_nested
-                elif mode == 'strict':
-                    raise ValueError(f"Failed to resolve nested dictionary for key '{key}'")
-                else:
-                    failed_keys.append(key)
-                    
-            elif isinstance(value, str):
-                # Resolve the path string
-                result_dict[key] = resolve_path_slash(value, experiment)
-                
-            else:
-                # For other types (e.g., numbers, lists), just copy the value
-                result_dict[key] = value
-                
-        except (ValueError, KeyError, AttributeError) as e:
-            if mode == 'strict':
-                raise ValueError(f"Failed to resolve '{key}': {str(e)}") from e
-            else:
-                failed_keys.append(key)
-                continue
-    
-    # Semi-strict mode: ensure at least one entry resolved
-    if mode == 'semi-strict' and not result_dict:
-        raise ValueError(
-            f"Semi-strict mode: No entries could be resolved. "
-            f"Failed keys: {failed_keys}"
-        )
-    
-    return result_dict
-
-
-# def resolve_experiment_attributes(template_dict, experiment):
-#     """
-#     """
-
-#     def resolve_path_slash(path_string, obj):
-#         current = obj
-#         components = path_string.split('/')
-        
-#         for component in components:
-#             if hasattr(current, component):
-#                 current = getattr(current, component)
-                
-#             elif isinstance(current, dict) and component in current:
-#                 current = current[component]
-
-#             else:
-#                 raise ValueError(f"Cannot resolve '{component}' in path '{path_string}'")
-        
-#         return current    
-
-#     result_dict = {}
-
-#     for key, value in template_dict.items():
-#         # Check if the value is a nested dictionary,
-#         # with exception for 'function' key (avoiding resolving function arguments)
-#         if isinstance(value, dict) and 'function' not in value:
-#             # Recursively resolve the nested dictionary
-#             result_dict[key] = resolve_experiment_attributes(value, experiment)
-
-#         elif isinstance(value, str):
-#             # Resolve the path string
-#             result_dict[key] = resolve_path_slash(value, experiment)
-
-#         else:
-#             # For other types (e.g., numbers, lists), just copy the value
-#             result_dict[key] = value
-    
-#     return result_dict
+from pyKES.utilities.resolve_attributes import resolve_experiment_attributes
 
 def square_loss_time_series(model_data, experimental_data, **kwargs):
     '''
@@ -177,6 +31,36 @@ def square_loss_time_series(model_data, experimental_data, **kwargs):
     '''
 
     return np.sum((np.array(model_data) - np.array(experimental_data['y'])) ** 2), model_data
+
+def square_loss_time_series_normalized(model_data, experimental_data, **kwargs):
+    '''
+    Calculate the normalized square loss between model data and experimental data for time series fitting.
+
+    Parameters
+    ----------
+    model_data : array-like
+        The model data to be compared against experimental data.
+    experimental_data : dict   
+        Dictionary containing experimental data with keys 'x' and 'y'.
+    kwargs : dict, optional
+        Additional keyword arguments (not used in this function).
+
+    Returns
+    -------
+    float
+        The normalized sum of squared differences between model data and experimental data.
+    model_data : array-like
+        The model data used for the calculation.
+    '''
+
+    raw_square_loss, model_data = square_loss_time_series(model_data, experimental_data, **kwargs)
+
+    length = len(experimental_data['y'])
+    average_magnitude = np.mean(np.abs(experimental_data['y']))
+
+    normalized_error = raw_square_loss / (length * (average_magnitude ** 2 + 1e-12)) # Divide by mean squared magnitude for correct units (since raw_square_loss is squared)
+
+    return normalized_error, model_data
 
 def square_loss_max_rate_ydiff(model_data, experimental_data, times, **kwargs):
     '''
@@ -297,22 +181,24 @@ class Fitting_Model:
     >>> model.optimize()
     """
 
-    def __init__(self, reaction_network: list):
+    def __init__(self, reaction_network: list, **kwargs):
         self.reaction_network = reaction_network
-        self.fixed_rate_constants: dict = {}
-        self.rate_constants_to_optimize: dict = {}
-        self.data_to_be_fitted: dict = {}
-        self.initial_conditions: dict = {}
-        self.other_multipliers: dict = {}
-        self.times: dict = {}
-        self.experiments: list = []
-        self.loss_function = None
-        self.x0 = None
+        self.fixed_rate_constants: dict = kwargs.get('fixed_rate_constants', {})
+        self.rate_constants_to_optimize: dict = kwargs.get('rate_constants_to_optimize', {})
+        self.data_to_be_fitted: dict = kwargs.get('data_to_be_fitted', {})
+        self.initial_conditions: dict = kwargs.get('initial_conditions', {})
+        self.other_multipliers: dict = kwargs.get('other_multipliers', {})
+        self.times: dict = kwargs.get('times', {})
+        self.experiments: list = kwargs.get('experiments', [])
+        self.loss_function = kwargs.get('loss_function', None)
+        self.x0 = kwargs.get('x0', None)
 
         self.parsed_reactions, self.species = parse_reactions(self.reaction_network)
 
     def optimize(self, 
-                 workers = -1, disp = True):
+                 workers = -1, 
+                 disp = True, 
+                 print_results = True):
 
         bounds = list(self.rate_constants_to_optimize.values())
 
@@ -325,12 +211,13 @@ class Fitting_Model:
             updating = 'deferred',
             x0 = self.x0)
 
-        print(self.result)
-        print('----------------------------')
-        print('Optimized rate constants:')
-        pprint(dict(zip(self.rate_constants_to_optimize.keys(), self.result.x)))
-        print('Fixed rate constants:')
-        pprint(self.fixed_rate_constants)
+        if print_results:
+            print(self.result)
+            print('----------------------------')
+            print('Optimized rate constants:')
+            pprint(dict(zip(self.rate_constants_to_optimize.keys(), self.result.x)))
+            print('Fixed rate constants:')
+            pprint(self.fixed_rate_constants)
 
     def optimize_dual_annealing(self):
         
@@ -371,7 +258,8 @@ class Fitting_Model:
             # Get experimental data
             experimental_data = resolve_experiment_attributes(
                                     self.data_to_be_fitted, 
-                                    experiment)
+                                    experiment,
+                                    mode = 'semi-strict')
             
             for species, data in experimental_data.items():
                 model_data = model_results[experiment.experiment_name][species]
@@ -426,6 +314,8 @@ def objective_function(rate_constants_to_optimize,
     The function performs the following steps for each experiment:
     1. Combines optimized rate constants with fixed rate constants
     2. Resolves experiment-specific attributes (initial conditions, multipliers, times, data)
+        Note: data_to_be_fitted and initial_conditions is resolved in 'semi-strict' mode, 
+        meaning only at least one entry must resolved
     3. Solves the ODE system using the reaction network and rate constants
     4. Calculates error between model predictions and experimental data using the loss function
     5. Accumulates weighted errors across all experiments
@@ -463,10 +353,18 @@ def objective_function(rate_constants_to_optimize,
         full_output[experiment_name] = {}
 
         # Resolve the rate constants, initial conditions, other multipliers, and times and data to be fitted
-        initial_conditions = resolve_experiment_attributes(model.initial_conditions, experiment)
-        other_multipliers = resolve_experiment_attributes(model.other_multipliers, experiment)
-        times = resolve_experiment_attributes(model.times, experiment)
-        data_to_be_fitted = resolve_experiment_attributes(model.data_to_be_fitted, experiment)
+        initial_conditions = resolve_experiment_attributes(model.initial_conditions, 
+                                                           experiment, 
+                                                           mode = 'semi-strict')
+        other_multipliers = resolve_experiment_attributes(model.other_multipliers, 
+                                                          experiment,
+                                                          mode = 'strict')
+        times = resolve_experiment_attributes(model.times, 
+                                              experiment,
+                                              mode = 'strict')
+        data_to_be_fitted = resolve_experiment_attributes(model.data_to_be_fitted, 
+                                                          experiment,
+                                                          mode = 'semi-strict')
 
         # Solve the ODE system
         model_result = solve_ode_system(model.parsed_reactions,
