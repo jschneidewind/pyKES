@@ -22,13 +22,103 @@ class Experiment:
     raw_data: Dict[str, any]
     processed_data: Dict[str, any]
 
+# def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
+#     """
+#     Recursively save nested dictionaries to HDF5 group.
+#     Handles numpy arrays, basic Python types, and nested structures.
+#     """
+#     for key, value in data_dict.items():
+#         full_key = f"{prefix}/{key}" if prefix else key
+        
+#         if isinstance(value, np.ndarray):
+#             # Save numpy arrays directly
+#             group.create_dataset(full_key, data=value)
+            
+#         elif isinstance(value, dict):
+#             # Recursively handle nested dictionaries
+#             save_nested_dict_to_hdf5(group, value, full_key)
+            
+#         elif isinstance(value, (str, int, float, bool)):
+#             # Save basic types as attributes or small datasets
+#             if isinstance(value, str):
+#                 # Handle strings (need special encoding for HDF5)
+#                 group.create_dataset(full_key, data=value.encode('utf-8'))
+#             else:
+#                 group.create_dataset(full_key, data=value)
+                
+#         elif isinstance(value, (list, tuple)):
+#             # Try to convert to numpy array, fallback to JSON
+#             try:
+#                 arr = np.array(value)
+#                 group.create_dataset(full_key, data=arr)
+#             except:
+#                 # If can't convert to array, store as JSON string
+#                 json_str = json.dumps(value)
+#                 group.create_dataset(full_key, data=json_str.encode('utf-8'))
+#                 group[full_key].attrs['type'] = 'json'
+                
+#         else:
+#             # For other types, use JSON serialization
+#             try:
+#                 json_str = json.dumps(value)
+#                 group.create_dataset(full_key, data=json_str.encode('utf-8'))
+#                 group[full_key].attrs['type'] = 'json'
+#             except:
+#                 # Last resort: pickle (less portable but handles everything)
+#                 pickled_data = pickle.dumps(value)
+#                 group.create_dataset(full_key, data=np.frombuffer(pickled_data, dtype=np.uint8))
+#                 group[full_key].attrs['type'] = 'pickle'
+
+# def load_nested_dict_from_hdf5(group, prefix=""):
+#     """
+#     Recursively load nested dictionaries from HDF5 group.
+#     """
+#     result = {}
+    
+#     def visit_func(name, obj):
+#         if isinstance(obj, h5py.Dataset):
+#             # Remove prefix from name
+#             key = name[len(prefix):].lstrip('/') if prefix else name
+            
+#             # Handle different data types
+#             if obj.attrs.get('type') == 'json':
+#                 # JSON-encoded data
+#                 json_str = obj[()].decode('utf-8')
+#                 value = json.loads(json_str)
+#             elif obj.attrs.get('type') == 'pickle':
+#                 # Pickled data
+#                 pickled_bytes = obj[()].tobytes()
+#                 value = pickle.loads(pickled_bytes)
+#             else:
+#                 # Regular data (numpy arrays, numbers, strings)
+#                 value = obj[()]
+#                 if isinstance(value, bytes):
+#                     value = value.decode('utf-8')
+            
+#             # Build nested dictionary structure
+#             keys = key.split('/')
+#             current_dict = result
+#             for k in keys[:-1]:
+#                 if k not in current_dict:
+#                     current_dict[k] = {}
+#                 current_dict = current_dict[k]
+#             current_dict[keys[-1]] = value
+    
+#     group.visititems(visit_func)
+#     return result
+
+
 def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
     """
     Recursively save nested dictionaries to HDF5 group.
     Handles numpy arrays, basic Python types, and nested structures.
+    
+    Note: Replaces '/' in keys with '__SLASH__' to avoid HDF5 path conflicts.
     """
     for key, value in data_dict.items():
-        full_key = f"{prefix}/{key}" if prefix else key
+        # Replace '/' in keys to avoid HDF5 path interpretation issues
+        safe_key = key.replace('/', '__SLASH__')
+        full_key = f"{prefix}/{safe_key}" if prefix else safe_key
         
         if isinstance(value, np.ndarray):
             # Save numpy arrays directly
@@ -38,11 +128,15 @@ def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
             # Recursively handle nested dictionaries
             save_nested_dict_to_hdf5(group, value, full_key)
             
-        elif isinstance(value, (str, int, float, bool)):
-            # Save basic types as attributes or small datasets
+        elif isinstance(value, (str, int, float, bool, np.bool_)):
+            # Save basic types as datasets
             if isinstance(value, str):
                 # Handle strings (need special encoding for HDF5)
                 group.create_dataset(full_key, data=value.encode('utf-8'))
+            elif isinstance(value, (bool, np.bool_)):
+                # Convert bool to int for HDF5 compatibility
+                group.create_dataset(full_key, data=int(value))
+                group[full_key].attrs['type'] = 'bool'
             else:
                 group.create_dataset(full_key, data=value)
                 
@@ -72,6 +166,8 @@ def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
 def load_nested_dict_from_hdf5(group, prefix=""):
     """
     Recursively load nested dictionaries from HDF5 group.
+    
+    Note: Restores '__SLASH__' in keys back to '/' after loading.
     """
     result = {}
     
@@ -81,7 +177,10 @@ def load_nested_dict_from_hdf5(group, prefix=""):
             key = name[len(prefix):].lstrip('/') if prefix else name
             
             # Handle different data types
-            if obj.attrs.get('type') == 'json':
+            if obj.attrs.get('type') == 'bool':
+                # Restore boolean type
+                value = bool(obj[()])
+            elif obj.attrs.get('type') == 'json':
                 # JSON-encoded data
                 json_str = obj[()].decode('utf-8')
                 value = json.loads(json_str)
@@ -94,9 +193,15 @@ def load_nested_dict_from_hdf5(group, prefix=""):
                 value = obj[()]
                 if isinstance(value, bytes):
                     value = value.decode('utf-8')
+                # Convert numpy scalar types to native Python types
+                elif isinstance(value, (np.integer, np.floating)):
+                    value = value.item()
             
             # Build nested dictionary structure
             keys = key.split('/')
+            # Restore '/' characters in keys
+            keys = [k.replace('__SLASH__', '/') for k in keys]
+            
             current_dict = result
             for k in keys[:-1]:
                 if k not in current_dict:

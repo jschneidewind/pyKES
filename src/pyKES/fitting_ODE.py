@@ -273,7 +273,111 @@ class Fitting_Model:
                 
         ax.legend()
 
+    def add_fit_results_to_database(self, parent_database: ExperimentalDataset):
+        """
+        Add fit results and parameters to the database object.
+        
+        This method:
+        1. Adds fit results to each experiment's processed_data dict in the database
+        2. Adds Fitting_Model parameters to database.processing_parameters
+        
+        The fit results are stored in processed_data as:
+        - f'{species}_experimental': {'x': ..., 'y': ...}
+        - f'{species}_fit': {'x': ..., 'y': ...}
+        
+        Raises
+        ------
+        AttributeError
+            If optimization has not been run (self.result does not exist).
+        
+        Examples
+        --------
+        >>> database = ExperimentalDataset.load_from_hdf5('data.h5')
+        >>> model = Fitting_Model(reactions)
+        >>> model.optimize()
+        >>> model.add_fit_results_to_database(parent_datase = database)
+        >>> model.database.save_to_hdf5('fit_results.h5')
+        """
+        if not hasattr(self, 'result'):
+            raise AttributeError(
+                "Optimization has not been run yet. Please call optimize(), "
+                "optimize_dual_annealing(), or minimize() first."
+            )
 
+        error, model_results = objective_function(self.result.x, self, return_full = True)
+
+        experiment_list = []
+        experiment_weights = {}    
+
+        for experiment in self.experiments:
+            if isinstance(experiment, tuple): # If experiment is a tuple, unpack it
+                experiment, weight = experiment
+            else:
+                weight = 1.0
+
+            exp_name = experiment.experiment_name
+
+            experiment_list.append(exp_name)
+            experiment_weights[exp_name] = weight
+            
+            # Get experimental data
+            experimental_data = resolve_experiment_attributes(
+                                    self.data_to_be_fitted, 
+                                    experiment,
+                                    mode = 'semi-strict')
+            
+            for species, data in experimental_data.items():
+                model_data = model_results[exp_name][species]
+
+                parent_database.experiments[exp_name].processed_data[f'{species}_experimental'] = {
+                    'x': data['x'],
+                    'y': data['y']}
+                
+                parent_database.experiments[exp_name].processed_data[f'{species}_fit'] = {
+                    'x': data['x'],
+                    'y': model_data}
+
+        # Get optimized rate constants as dict
+        optimized_rate_constants = dict(
+            zip(self.rate_constants_to_optimize.keys(), self.result.x)
+        )
+        
+        # Get loss function name
+        loss_function_name = (
+            self.loss_function.__name__ if hasattr(self.loss_function, '__name__') 
+            else str(self.loss_function)
+        )
+        
+        # Add Fitting_Model parameters to processing_parameters
+        if 'fitting_model' not in parent_database.processing_parameters:
+            parent_database.processing_parameters['fitting_model'] = {}
+        
+        parent_database.processing_parameters['fitting_model'] = {
+            'reaction_network': self.reaction_network,
+            'parsed_reactions': self.parsed_reactions,
+            'species': self.species,
+            'fixed_rate_constants': self.fixed_rate_constants,
+            'rate_constants_to_optimize_bounds': self.rate_constants_to_optimize,
+            'optimized_rate_constants': optimized_rate_constants,
+            'data_to_be_fitted': self.data_to_be_fitted,
+            'initial_conditions': self.initial_conditions,
+            'other_multipliers': self.other_multipliers,
+            'times': self.times,
+            'experiments': experiment_list,
+            'loss_function': loss_function_name,
+            'optimization_result': {
+                'success': self.result.success if hasattr(self.result, 'success') else None,
+                'final_error': float(self.result.fun),
+                'n_iterations': int(self.result.nit) if hasattr(self.result, 'nit') else None,
+                'n_function_evaluations': int(self.result.nfev) if hasattr(self.result, 'nfev') else None,
+                'message': self.result.message if hasattr(self.result, 'message') else None
+            }
+        }
+
+        self.database = parent_database
+        
+        print(f"Fit results added to database for {len(experiment_list)} experiments.")
+    
 def objective_function(rate_constants_to_optimize, 
                        model: Fitting_Model, 
                        return_full = False):

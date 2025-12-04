@@ -48,20 +48,64 @@ def resolve_experiment_attributes(template_dict, experiment, mode='strict'):
     >>> # Raises ValueError if all entries fail, returns partial results otherwise
     """
 
+    # def resolve_path_slash(path_string, obj):
+    #     """Resolve a slash-separated path through object attributes and dict keys."""
+    #     current = obj
+    #     components = path_string.split('/')
+        
+    #     for component in components:
+    #         if hasattr(current, component):
+    #             current = getattr(current, component)
+    #         elif isinstance(current, dict) and component in current:
+    #             current = current[component]
+    #         else:
+    #             raise ValueError(f"Cannot resolve '{component}' in path '{path_string}'")
+        
+    #     return current   
+
     def resolve_path_slash(path_string, obj):
-        """Resolve a slash-separated path through object attributes and dict keys."""
+        """
+        Resolve a slash-separated path through object attributes and dict keys.
+        
+        Handles dict keys that contain '/' by trying the longest possible match first.
+        For example, 'metadata/Catalyst loading [wt% Rh/Cr]' will correctly resolve
+        to obj.metadata['Catalyst loading [wt% Rh/Cr]'] even though the key contains '/'.
+        """
         current = obj
         components = path_string.split('/')
         
-        for component in components:
-            if hasattr(current, component):
-                current = getattr(current, component)
-            elif isinstance(current, dict) and component in current:
-                current = current[component]
-            else:
-                raise ValueError(f"Cannot resolve '{component}' in path '{path_string}'")
+        i = 0
+        while i < len(components):
+            resolved = False
+            
+            # Try progressively longer key combinations (greedy approach)
+            # This handles dict keys that contain '/'
+            for j in range(len(components), i, -1):
+                potential_key = '/'.join(components[i:j])
+                
+                # Try as attribute first
+                if hasattr(current, potential_key):
+                    current = getattr(current, potential_key)
+                    i = j
+                    resolved = True
+                    break
+                # Then try as dict key
+                elif isinstance(current, dict) and potential_key in current:
+                    current = current[potential_key]
+                    i = j
+                    resolved = True
+                    break
+            
+            if not resolved:
+                # Could not resolve any component starting at position i
+                attempted_keys = ['/'.join(components[i:j]) for j in range(len(components), i, -1)]
+                raise ValueError(
+                    f"Cannot resolve path '{path_string}' at component '{components[i]}'. "
+                    f"Tried keys: {attempted_keys}. "
+                    f"Available: {dir(current) if hasattr(current, '__dir__') else list(current.keys()) if isinstance(current, dict) else 'N/A'}"
+                )
         
-        return current    
+        return current  
 
     result_dict = {}
     failed_keys = []
@@ -104,3 +148,33 @@ def resolve_experiment_attributes(template_dict, experiment, mode='strict'):
         )
     
     return result_dict
+
+
+def testing():
+
+    class Experiment:
+        def __init__(self):
+            self.metadata = {
+                'Catalyst loading [wt% Rh/Cr]': 5.0,
+                'Temperature_C': 350,
+                'Nested': {
+                    'Level1': {
+                        'Loading Rh/Cr': 'Deep/Value'
+                    }
+                }
+            }
+    
+    testing_exp = Experiment()
+
+    template = {
+        'loading': 'metadata/Catalyst loading [wt% Rh/Cr]',
+        'temp': 'metadata/Temperature_C',
+        'missing': 'metadata/Nonexistent Key',
+        'nested_value': 'metadata/Nested/Level1/Loading Rh/Cr',
+    }
+
+    print(resolve_experiment_attributes(template, testing_exp, mode='permissive'))
+    
+
+if __name__ == "__main__":
+    testing()

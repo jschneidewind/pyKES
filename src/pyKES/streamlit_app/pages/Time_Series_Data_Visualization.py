@@ -11,8 +11,13 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Title
-st.title("Time-Series Data Visualization")
+# Title and filename display
+col_title, col_filename = st.columns([3, 1])
+with col_title:
+    st.title("Time-Series Data Visualization")
+with col_filename:
+    if st.session_state.hdf5_filename:
+        st.markdown(f"<p style='text-align: right; font-size: 0.8em; color: gray; margin-top: 1.5em;'>{st.session_state.hdf5_filename}</p>", unsafe_allow_html=True)
 
 # Function to handle checkbox changes
 def update_selection(exp_name, value):
@@ -39,7 +44,7 @@ if st.session_state.experimental_dataset is not None:
 
     # Get group_mapping and plotting_instruction from dataset
     group_mapping = experimental_dataset.group_mapping
-    plotting_instruction = experimental_dataset.plotting_instruction
+    plotting_instruction = experimental_dataset.plotting_instruction['time_series_instructions']
     
     # Group experiments by their group attribute
     experiments_by_group = {}
@@ -139,7 +144,7 @@ if st.session_state.experimental_dataset is not None:
                 resolved_plots = resolve_experiment_attributes(
                     plotting_instruction, 
                     exp_data, 
-                    mode='strict'
+                    mode='permissible'
                 )
             except ValueError as e:
                 st.warning(f"Could not resolve plotting data for {exp_name}: {str(e)}")

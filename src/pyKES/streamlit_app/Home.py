@@ -19,11 +19,15 @@ st.sidebar.success("Select a page above.")
 # Initialize session state for shared data
 if 'experimental_dataset' not in st.session_state:
     st.session_state.experimental_dataset = None
+if 'hdf5_filename' not in st.session_state:
+    st.session_state.hdf5_filename = None
 
 uploaded_file = st.file_uploader("Upload HDF5 File", type=['h5', 'hdf5'])
 
 if uploaded_file is not None:
-    
+
+    st.session_state.hdf5_filename = uploaded_file.name
+
     try:
         # Create a temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix='.h5') as tmp_file:
@@ -52,6 +56,8 @@ else:
 
 if st.session_state.experimental_dataset is not None:
     st.title("Loaded Dataset")
+    if st.session_state.hdf5_filename:
+        st.caption(f"File: {st.session_state.hdf5_filename}")
     st.dataframe(st.session_state.experimental_dataset.overview_df, use_container_width=True)
 
 st.markdown("""
