@@ -1,6 +1,8 @@
 # pyKES Development Guidelines
 
 ## Documentation
+Use type hints for all functions, classes, and methods.
+
 Always generate docstrings for new functions, classes, and modules using the Numpydoc style. Use type hints for function parameters and return types wherever possible. Maintain an up-to-date `docs/` folder with Sphinx documentation.
 
 ## Project Overview

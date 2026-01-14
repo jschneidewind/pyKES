@@ -235,8 +235,8 @@ def plot_analysis_results(
     ax: Optional[Axes] = None,
     colors: Optional[Union[str, Dict[str, str]]] = None,
     linestyles: Optional[Union[str, Dict[str, str]]] = None,
-    marker: str = 'o',
-    markersize: float = 6,
+    marker: Union[str, Dict[str, str]] = 'o',
+    markersize: Union[float, Dict[str, float]] = 6,
     capsize: float = 3,
     figsize: Tuple[float, float] = (8, 6),
     title: Optional[str] = None,
@@ -278,10 +278,14 @@ def plot_analysis_results(
         - Single style string: used for all analysis results
         - Dict mapping analysis result names to line styles
         - None: no lines drawn (markers only)
-    marker : str, optional
-        Marker style (default: 'o').
-    markersize : float, optional
-        Size of markers (default: 6).
+    marker : str or dict, optional
+        Marker style specification. Can be:
+        - Single marker string: used for all analysis results (default: 'o')
+        - Dict mapping analysis result names to marker styles
+    markersize : float or dict, optional
+        Marker size specification. Can be:
+        - Single float: used for all analysis results (default: 6)
+        - Dict mapping analysis result names to marker sizes
     capsize : float, optional
         Size of error bar caps (default: 3).
     figsize : tuple of float, optional
@@ -395,6 +399,18 @@ def plot_analysis_results(
     else:
         linestyle_map = linestyles
     
+    # Prepare marker mapping
+    if isinstance(marker, str):
+        marker_map = {name: marker for name in analysis_results}
+    else:
+        marker_map = marker
+    
+    # Prepare markersize mapping
+    if isinstance(markersize, (int, float)):
+        markersize_map = {name: markersize for name in analysis_results}
+    else:
+        markersize_map = markersize
+    
     # Get x-axis label (use custom if provided)
     x_label = xlabel if xlabel is not None else get_x_axis_label(data)
     
@@ -416,6 +432,8 @@ def plot_analysis_results(
             x, y, yerr_lower, yerr_upper = plot_data[result_name]
             color = color_map.get(result_name, None)
             linestyle = linestyle_map.get(result_name, None)
+            result_marker = marker_map.get(result_name, 'o')
+            result_markersize = markersize_map.get(result_name, 6)
             display_label = label_map[result_name]
             
             plot_single_analysis_result(
@@ -423,8 +441,8 @@ def plot_analysis_results(
                 label=display_label,
                 color=color,
                 linestyle=linestyle,
-                marker=marker,
-                markersize=markersize,
+                marker=result_marker,
+                markersize=result_markersize,
                 capsize=capsize,
                 **kwargs
             )
@@ -470,6 +488,8 @@ def plot_analysis_results(
         x, y, yerr_lower, yerr_upper = plot_data[result_name]
         color = color_map.get(result_name, 'blue')
         linestyle = linestyle_map.get(result_name, None)
+        result_marker = marker_map.get(result_name, 'o')
+        result_markersize = markersize_map.get(result_name, 6)
         display_label = label_map[result_name]
         
         plot_single_analysis_result(
@@ -477,8 +497,8 @@ def plot_analysis_results(
             label=display_label,
             color=color,
             linestyle=linestyle,
-            marker=marker,
-            markersize=markersize,
+            marker=result_marker,
+            markersize=result_markersize,
             capsize=capsize,
             **kwargs
         )
@@ -498,6 +518,8 @@ def plot_analysis_results(
         x, y, yerr_lower, yerr_upper = plot_data[result_name]
         color = color_map.get(result_name, 'red')
         linestyle = linestyle_map.get(result_name, None)
+        result_marker = marker_map.get(result_name, 'o')
+        result_markersize = markersize_map.get(result_name, 6)
         display_label = label_map[result_name]
         
         plot_single_analysis_result(
@@ -505,8 +527,8 @@ def plot_analysis_results(
             label=display_label,
             color=color,
             linestyle=linestyle,
-            marker=marker,
-            markersize=markersize,
+            marker=result_marker,
+            markersize=result_markersize,
             capsize=capsize,
             **kwargs
         )

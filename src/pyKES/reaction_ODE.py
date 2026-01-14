@@ -3,6 +3,64 @@ from scipy.integrate import odeint
 import matplotlib.pyplot as plt
 import re
 from collections import defaultdict
+from pyKES.utilities.calculate_absorption import calculate_excitations_per_second_competing, calculate_excitations_per_second_multi_competing_fast
+
+def parse_species(side, species_set):
+    """
+    Parse one side of a chemical reaction string to extract species and their stoichiometric coefficients.
+    
+    This function processes a string representing either the reactants or products
+    side of a chemical reaction, extracting species names (enclosed in square brackets)
+    and their stoichiometric coefficients.
+    
+    Parameters
+    ----------
+    side : str
+        A string representing one side of a reaction equation.
+        Species should be enclosed in square brackets, optionally preceded by
+        a stoichiometric coefficient (integer or decimal).
+        Example: "2 [A] + 0.5 [B]"
+    species_set : set
+        A set to which discovered species names will be added.
+        This set is modified in place and also returned.
+        
+    Returns
+    -------
+    tuple
+        A tuple containing:
+        - species_count : dict
+            Dictionary mapping species names (str) to their stoichiometric
+            coefficients (float). Repeated species are summed.
+        - species_set : set
+            The updated set containing all unique species names encountered.
+            
+    Examples
+    --------
+    >>> species_set = set()
+    >>> species_count, species_set = parse_species("2 [A] + [B]", species_set)
+    >>> species_count
+    {'[A]': 2.0, '[B]': 1.0}
+    >>> species_set
+    {'[A]', '[B]'}
+    
+    >>> species_set = {'[C]'}
+    >>> species_count, species_set = parse_species("[A] + [A]", species_set)
+    >>> species_count
+    {'[A]': 2.0}
+    >>> species_set
+    {'[A]', '[C]'}
+    """
+
+    species_count = defaultdict(float)
+    species_matches = re.findall(r'(?:([\d\.]+)\s*)?(\[[^\]]+\])', side)
+
+    for count, species in species_matches:
+        count = float(count) if count else 1.0
+        species_count[species] += count
+        species_set.add(species)
+    
+    return dict(species_count), species_set
+
 
 def parse_reactions(reactions):
     '''
@@ -65,24 +123,159 @@ def parse_reactions(reactions):
         
         # Split reactants and products
         reactants_str, products_str = reaction_part.split('>')
-        
-        def parse_species(side):
-            species_count = defaultdict(float)
-            species_matches = re.findall(r'(?:([\d\.]+)\s*)?(\[[^\]]+\])', side)
-
-            for count, species in species_matches:
-                count = float(count) if count else 1.0
-                species_count[species] += count
-                species_set.add(species)
-            
-            return dict(species_count)
-        
-        reaction_dict['reactants'] = parse_species(reactants_str)
-        reaction_dict['products'] = parse_species(products_str)
+                
+        reaction_dict['reactants'], species_set = parse_species(reactants_str, species_set)
+        reaction_dict['products'], species_set = parse_species(products_str, species_set)
         
         parsed_reactions.append(reaction_dict)
     
     return parsed_reactions, sorted(species_set)
+
+
+def resolve_other_multipliers(other_multipliers,
+                              multiplier, 
+                              concentrations, 
+                              rate_constants):
+    """
+    Resolve a multiplier value by looking it up and optionally calling it as a function.
+
+    This function handles two types of multipliers:
+    1. Simple numeric values that are returned directly
+    2. Function-based multipliers defined as dictionaries with a 'function' key and
+    an 'arguments' dictionary that maps parameter names to source identifiers
+
+    For function-based multipliers, argument sources are resolved in the following
+    priority order: current concentrations, other multipliers (non-dict values),
+    then rate constants.
+
+    Parameters
+    ----------
+    other_multipliers : dict
+        Dictionary containing all multiplier definitions. Values can be either
+        numeric (float/int) or dictionaries with keys:
+        * 'function': callable, the function to invoke
+        * 'arguments': dict mapping parameter names to source identifiers
+    multiplier : str
+        The key identifying which multiplier to resolve from `other_multipliers`.
+    concentrations : dict
+        Dictionary mapping species names (str) to their current concentrations (float).
+    rate_constants : dict
+        Dictionary mapping rate constant identifiers (str) to their values (float).
+
+    Returns
+    -------
+    float
+        The resolved multiplier value, either retrieved directly or computed
+        by calling the specified function with resolved arguments.
+
+    Raises
+    ------
+    KeyError
+        If an argument source string cannot be found in `concentrations`, `other_multipliers`,
+        or `rate_constants`.
+
+    Examples
+    --------
+    >>> other_multipliers = {'photon_flux': 1e17, 
+                             'hv_func': {
+    ...                             'function': lambda x, y: x * y,
+    ...                             'arguments': {'x': 'photon_flux', 
+                                                  'y': '[RuII]'}
+    ...                                   }
+                                }
+    >>> concentrations = {'[RuII]': 10.0}
+    >>> resolve_other_multipliers(other_multipliers, 'photon_flux', concentrations, {})
+    1e17
+    >>> resolve_other_multipliers(other_multipliers, 'hv_func', concentrations, {})
+    1e18
+    """
+
+    multiplier_resolved = other_multipliers[multiplier]
+
+    # If the multiplier is a function, resolve its arguments, call it, and multiply the rate
+    if isinstance(multiplier_resolved, dict) and 'function' in multiplier_resolved:
+        arguments = multiplier_resolved['arguments']  
+
+        # resolve sources into keyword args
+        kwargs = {}
+
+        for parameter, source in arguments.items():
+            if source in concentrations:
+                kwargs[parameter] = concentrations[source]
+            elif source in other_multipliers and not isinstance(other_multipliers[source], dict):
+                kwargs[parameter] = other_multipliers[source]
+            elif source in rate_constants:
+                kwargs[parameter] = rate_constants[source]
+            else:
+                raise KeyError(f"Cannot resolve argument source '{source}' for multiplier '{multiplier}'")
+            
+        multiplier_value = multiplier_resolved['function'](**kwargs)
+
+    # If the multiplier is a number, multiply directly
+    else:
+        multiplier_value = multiplier_resolved
+
+    return multiplier_value
+
+
+def calculate_reaction_rate(reaction, 
+                            concentrations, 
+                            rate_constants, 
+                            other_multipliers = {}):
+    """
+    Calculate the rate of a single reaction given current concentrations.
+    
+    This function computes the reaction rate by multiplying the base rate constant
+    with any additional multipliers and the concentration-dependent terms from
+    the reactants.
+    
+    Parameters
+    ----------
+    reaction : dict
+        A parsed reaction dictionary containing:
+        - 'rate_constant': str, identifier for the rate constant
+        - 'reactants': dict mapping species names to stoichiometric coefficients
+        - 'other_multipliers': list of str, identifiers for additional multipliers
+    concentrations : dict
+        Dictionary mapping species names (str) to their current concentrations (float).
+    rate_constants : dict
+        Dictionary mapping rate constant identifiers (str) to their values (float).
+    other_multipliers : dict, optional
+        Dictionary mapping multiplier identifiers to values or function definitions.
+        See `resolve_other_multipliers` for the expected format of function-based
+        multipliers.
+        
+    Returns
+    -------
+    float
+        The calculated reaction rate.
+        
+    Examples
+    --------
+    >>> reaction = {'reactants': {'[A]': 1.0, '[B]': 2.0}, 
+    ...             'rate_constant': 'k1', 
+    ...             'other_multipliers': []}
+    >>> concentrations = {'[A]': 1.0, '[B]': 2.0}
+    >>> rate_constants = {'k1': 0.5}
+    >>> calculate_reaction_rate(reaction, concentrations, rate_constants)
+    2.0  # 0.5 * 1.0^1 * 2.0^2 = 0.5 * 1 * 4 = 2.0
+    """
+    # Start with base rate constant
+    rate = rate_constants[reaction['rate_constant']]
+
+    # Apply other multipliers if present
+    for multiplier in reaction['other_multipliers']:
+        multiplier_value = resolve_other_multipliers(other_multipliers,
+                                                     multiplier,
+                                                     concentrations,
+                                                     rate_constants)
+        rate *= multiplier_value
+    
+    # Calculate concentration-dependent rate
+    for reactant, stoichiometry in reaction['reactants'].items():
+        rate *= concentrations[reactant] ** stoichiometry
+    
+    return rate
 
 def build_ode_system(parsed_reactions, species, rate_constants, other_multipliers = {}):
     """
@@ -124,51 +317,25 @@ def build_ode_system(parsed_reactions, species, rate_constants, other_multiplier
         dydt = np.zeros(len(species))
         
         # Create a dictionary mapping species to their current concentrations
-        conc = {spec: y[i] for i, spec in enumerate(species)}
+        concentrations = {species: y[i] for i, species in enumerate(species)}
         
         # Compute contribution from each reaction
         for reaction in parsed_reactions:
-
-            # Start with base rate constant
-            rate = rate_constants[reaction['rate_constant']]
-
-            # Apply other multipliers if present
-            for multiplier in reaction['other_multipliers']:
-                mult = other_multipliers[multiplier]
-
-                # If the multiplier is a function, resolve its arguments, call it, and multiply the rate
-                if isinstance(mult, dict) and 'function' in mult:
-                    arguments = mult['arguments']  
-                    # resolve sources into keyword args
-                    kwargs = {}
-                    for parameter, source in arguments.items():
-                        if source in conc:
-                            kwargs[parameter] = conc[source]
-                        elif source in other_multipliers and not isinstance(other_multipliers[source], dict):
-                            kwargs[parameter] = other_multipliers[source]
-                        elif source in rate_constants:
-                            kwargs[parameter] = rate_constants[source]
-                        else:
-                            raise KeyError(f"Cannot resolve argument source '{source}' for multiplier '{multiplier}'")
-                    rate *= mult['function'](**kwargs)
-
-                # If the multiplier is a number, multiply directly
-                else:
-                    rate *= mult
-            
-            # Calculate concentration-dependent rate
-            for reactant, stoich in reaction['reactants'].items():
-                rate *= conc[reactant] ** stoich
+            # Calculate rate using the extracted function
+            rate = calculate_reaction_rate(reaction, 
+                                           concentrations, 
+                                           rate_constants, 
+                                           other_multipliers)
             
             # Update derivatives for reactants (consumption)
-            for reactant, stoich in reaction['reactants'].items():
+            for reactant, stoichiometry in reaction['reactants'].items():
                 idx = species.index(reactant)
-                dydt[idx] -= stoich * rate
+                dydt[idx] -= stoichiometry * rate
             
             # Update derivatives for products (production)
-            for product, stoich in reaction['products'].items():
+            for product, stoichiometry in reaction['products'].items():
                 idx = species.index(product)
-                dydt[idx] += stoich * rate
+                dydt[idx] += stoichiometry * rate
         
         return dydt
     
@@ -206,6 +373,7 @@ def solve_ode_system(parsed_reactions,
 
     y0 = np.zeros(len(species))  # Initial concentrations default to zero
 
+    # Set initial concentrations
     for spec, conc in initial_conditions.items():
         if spec in species:
             idx = species.index(spec)
@@ -253,94 +421,84 @@ def plot_solution(species, times, solution, exclude_species = [], ax = None):
     ax.legend()
     ax.grid(True)
 
-def calculate_excitations_per_second(photon_flux = None, 
-                                    concentration = None, 
-                                    extinction_coefficient = None,
-                                    pathlength = None):
-    """
-    Calculate the number of excitations per Ru per second based on photon flux and concentration.
 
-    Parameters
-    ----------
-    photon_flux : float
-        Photon flux in photons cm^-2 s^-1.
-    concentration : float
-        Concentration of the species in micromolar (uM).
-    extinction_coefficient : float
-        Extinction coefficient of species in M^-1 cm^-1.
-    pathlength : float
-        Path length of the sample in cm (e.g., the distance light travels through the sample).  
 
-    Returns
-    -------
-    float
-        Number of excitations per Ru per second.
-    """
-
-    AVOGADRO_NUMBER = 6.022e23  # Avogadro's number in mol^-1
-
-    concentration_M = concentration * 1e-6  # Convert concentration from uM to M
-    volume_L = (pathlength * 1) / 1000 # Assuming a unit area (1 cm2) for simplicity, converting from cm3 to L
-    photon_flux_mol = photon_flux / AVOGADRO_NUMBER  # Convert photon flux to mol/s
+def test_function():
     
-    absorbance = concentration_M * extinction_coefficient * pathlength  # Calculation of absorbance using Beer-Lambert law
-    absorbed_fraction = 1 - 10**(-absorbance)  # Fraction of photons absorbed
-
-    excitations_per_Ru = (photon_flux_mol * absorbed_fraction) / (volume_L * concentration_M)
-
-    return excitations_per_Ru
-
-def calculate_excitations_per_second_competing(photon_flux,
-                                               concentration_A,
-                                               concentration_B,
-                                               extinction_coefficient_A,
-                                               extinction_coefficient_B,
-                                               pathlength):
-    '''
-    Calculate the number of excitations per A per second for two competing species A and B.
+    reactions = ['[RuII] > [RuII-ex], k1 ; hv_functionA',
+                 '[RuII-ex] > [RuII], k8',
+                 '[RuII-ex] + [S2O8] > [RuIII] + [SO4], k7',
+                 '[RuIII] > [H2O2] + [RuII], k2 ; hv_functionB',
+                 '2 [RuIII] > [Ru-Dimer], k3',
+                 '2 [RuIII] + [Ru-Dimer] > 2 [Ru-Dimer], k4',
+                 '[H2O2] > [O2], k5',
+                 '[RuIII] > [Inactive], k6']
     
-    Parameters
-    ----------
-    photon_flux : float
-        Photon flux in photons cm^-2 s^-1.
-    concentration_A : float
-        Concentration of species A in micromolar (uM).
-    concentration_B : float
-        Concentration of species B in micromolar (uM).
-    extinction_coefficient_A : float
-        Extinction coefficient of species A in M^-1 cm^-1.
-    extinction_coefficient_B : float
-        Extinction coefficient of species B in M^-1 cm^-1.
-    pathlength : float
-        Path length of the sample in cm (e.g., the distance light travels through the sample.
-
-    Returns
-    -------
-    float
-        Number of excitations per A per second.
-        '''
+    rate_constants = {'k1': 9.995e-01,
+                      'k2': 9.886e-01,
+                      'k3': 7.407e-03,
+                      'k4': 3.437e-03,
+                      'k5': 2.739e-02,
+                      'k6': 4.762e-03,
+                      'k7': 5.918e+01,
+                      'k8': 1/650e-9}
     
-    AVOGADRO_NUMBER = 6.022e23  # Avogadro's number in mol^-1
+    initial_conditions =  {'[S2O8]': 6000,
+                           '[RuII]': 10}
+    
+    other_multipliers = {
+        'pathlength': 2.25,
+        'photon_flux': 1e17,
+        'Ru_II_extinction_coefficient': 8500,
+        'Ru_III_extinction_coefficient': 540,
+        'hv_functionA_species_of_interest': '[RuII]',
+        'hv_functionB_species_of_interest': '[RuIII]',
+        'hv_functionA': {
+            'function': calculate_excitations_per_second_multi_competing_fast,
+            'arguments': {
+                'photon_flux': 'photon_flux',
+                'concentration_[RuII]': '[RuII]',
+                'concentration_[RuIII]': '[RuIII]',
+                'extinction_coefficient_[RuII]': 'Ru_II_extinction_coefficient',
+                'extinction_coefficient_[RuIII]': 'Ru_III_extinction_coefficient',
+                'pathlength': 'pathlength',
+                'species_of_interest': 'hv_functionA_species_of_interest',
+            }
+        },
+        'hv_functionB': {
+            'function': calculate_excitations_per_second_multi_competing_fast,
+            'arguments': {
+                'photon_flux': 'photon_flux',
+                'concentration_[RuIII]': '[RuIII]',
+                'concentration_[RuII]': '[RuII]',
+                'extinction_coefficient_[RuIII]': 'Ru_III_extinction_coefficient',
+                'extinction_coefficient_[RuII]': 'Ru_II_extinction_coefficient',
+                'pathlength': 'pathlength',
+                'species_of_interest': 'hv_functionB_species_of_interest',
+            }
+        }
+    }
 
-    concentration_A_M = concentration_A * 1e-6  # Convert from uM to M
-    concentration_B_M = concentration_B * 1e-6  # Convert from uM to M
-    volume_L = (pathlength * 1) / 1000 # Assuming a unit area (1 cm2) for simplicity, converting from cm3 to L
-    photon_flux_mol = photon_flux / AVOGADRO_NUMBER  # Convert photon flux to mol/s
+    times = np.linspace(0, 300, 1000) 
 
-    mu_A = concentration_A_M * extinction_coefficient_A
-    mu_B = concentration_B_M * extinction_coefficient_B
+    parsed_reactions, species = parse_reactions(reactions)
 
-    if mu_A + mu_B > 0:
-        fractional_absorbance_A = mu_A / (mu_A + mu_B)  # Fraction of total absorbance due to A
-    else:
-        fractional_absorbance_A = 0
+    solution = solve_ode_system(parsed_reactions, 
+                                species, 
+                                rate_constants,
+                                initial_conditions,
+                                times,
+                                other_multipliers)
+    
+    plot_solution(species, times, solution, exclude_species = ['[S2O8]', '[SO4]'])
 
-    absorbance_total = (mu_A + mu_B) * pathlength  # Total absorbance
-    absorbed_fraction = 1 - 10**(-absorbance_total)  # Fraction of photons absorbed
+    print(solution[-1][species.index('[O2]')])
 
-    if concentration_A_M > 0:
-        excitations_per_A = (photon_flux_mol * absorbed_fraction * fractional_absorbance_A) / (volume_L * concentration_A_M)
-    else:
-        excitations_per_A = 0
+    plt.show()
 
-    return excitations_per_A
+
+    
+    
+
+if __name__ == "__main__":
+    test_function()
