@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import pprint as pp
 
 from pyKES.reaction_ODE import parse_reactions, solve_ode_system, plot_solution
-from pyKES.pathways import calculate_reaction_pathway_proportions, calculate_reaction_network_propagation
+from pyKES.pathways.pathways import calculate_reaction_pathway_proportions, calculate_reaction_network_propagation
 from pyKES.utilities.calculate_absorption import calculate_excitations_per_second_multi_competing, calculate_excitations_per_second_multi_competing_fast, AVOGADRO_NUMBER
 
 def main():

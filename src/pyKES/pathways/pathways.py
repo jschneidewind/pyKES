@@ -334,6 +334,9 @@ def calculate_reaction_network_propagation(concentrations,
     
     return result
 
+# -----------------------------
+# ----- Testing functions -----
+# -----------------------------
 
 def testing_function():
 
