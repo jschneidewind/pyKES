@@ -76,10 +76,14 @@ class Reaction_Model:
                     other_multipliers = self.other_multipliers,)
     
     def plot_reaction_network_propagation(self, 
+                                          ax = None,
                                           value_key = 'log_value',
                                           fanning_factor = 0.7,
                                           assumed_branching_degree = 1.7,
-                                          **kwargs):
+                                          forward_link_kwargs = {},
+                                          backward_link_kwargs = {},
+                                          **kwargs
+                                          ):
 
         self.transformed_propagation_data = transform_data_for_plotting(
             self.propagation_results,
@@ -89,6 +93,9 @@ class Reaction_Model:
         
         plot_pathway_bars(
             self.transformed_propagation_data,
+            ax = ax,
+            forward_link_kwargs = forward_link_kwargs,
+            backward_link_kwargs = backward_link_kwargs,
             **kwargs)
         
 

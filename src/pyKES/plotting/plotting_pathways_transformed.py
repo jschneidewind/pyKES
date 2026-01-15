@@ -201,6 +201,7 @@ def plot_curved_band(data,
 
 def plot_pathway_bars(data, figsize=(10, 8), 
                       colormap = 'tab20', 
+                      ax = None,
                       node_linewidth = 5,
                       label_offset = 0.15,
                       label_fontsize = 12,
@@ -217,7 +218,8 @@ def plot_pathway_bars(data, figsize=(10, 8),
     data : dict
         Pathways data with 'nodes' containing node information.
     """
-    fig, ax = plt.subplots(figsize=figsize)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
     
     # Collect unique species names and assign colors
     species_names = set()
@@ -263,7 +265,7 @@ def plot_pathway_bars(data, figsize=(10, 8),
     plt.tight_layout()
 
     if save_figure:
-        plt.savefig(f"{file_name}.pdf")
+        fig.savefig(f"{file_name}.pdf")
 
 
 

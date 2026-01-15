@@ -96,6 +96,7 @@ def calculate_excitations_per_second_competing(photon_flux,
 def calculate_excitations_per_second_multi_competing_fast(species_of_interest,
                                                           photon_flux,
                                                           pathlength,
+                                                          concentration_unit = 'uM',
                                                           concentrations=None,
                                                           extinction_coefficients=None,
                                                           **kwargs):
@@ -157,7 +158,17 @@ def calculate_excitations_per_second_multi_competing_fast(species_of_interest,
     ...     extinction_coefficient_C=1500
     ... )
     """
-    
+    # Concentration conversion factors, from supplied unit to M
+    concentration_conversion_factors = {
+        'uM': 1e-6,  # micromolar to M
+        'mM': 1e-3,  # millimolar to M
+        'M': 1.0      # molar to M
+    }
+    if concentration_unit not in concentration_conversion_factors:
+        raise ValueError(f"Unsupported concentration unit '{concentration_unit}'. Supported units: {list(concentration_conversion_factors.keys())}")
+
+    conversion_factor = concentration_conversion_factors[concentration_unit]
+
     # Initialize dicts if not provided
     concentrations = dict(concentrations) if concentrations else {}
     extinction_coefficients = dict(extinction_coefficients) if extinction_coefficients else {}
@@ -174,7 +185,7 @@ def calculate_excitations_per_second_multi_competing_fast(species_of_interest,
     volume_L = (pathlength * 1) / 1000 # Assuming a unit area (1 cm2) for simplicity, converting from cm3 to L
     photon_flux_mol = photon_flux / AVOGADRO_NUMBER  # Convert photon flux to mol/s
 
-    concentrations_M = {species: conc * 1e-6 for species, conc in concentrations.items()}  # Convert from uM to M
+    concentrations_M = {species: conc * conversion_factor for species, conc in concentrations.items()}  # Convert to M
     mu_values = {species: concentrations_M[species] * extinction_coefficients[species] 
                  for species in concentrations.keys()}
 
@@ -192,7 +203,6 @@ def calculate_excitations_per_second_multi_competing_fast(species_of_interest,
         excitations_per_species = (photon_flux_mol * absorbed_fraction * fractional_mu) / (volume_L * concentrations_M[species_of_interest])
     else:
         excitations_per_species = 0
-
     
     return excitations_per_species
 
@@ -202,6 +212,7 @@ def calculate_excitations_per_second_multi_competing(species_of_interest,
                                                      concentrations,
                                                      extinction_coefficients,
                                                      pathlength,
+                                                     concentration_unit = 'uM',
                                                      return_full = False):
     
     """
@@ -269,7 +280,19 @@ def calculate_excitations_per_second_multi_competing(species_of_interest,
     ... )
     >>> absorbed_dict['transmitted']  # Fraction of light transmitted through sample
     """
-    
+
+    # Concentration conversion factors, from supplied unit to M
+    concentration_conversion_factors = {
+        'uM': 1e-6,  # micromolar to M
+        'mM': 1e-3,  # millimolar to M
+        'M': 1.0      # molar to M
+    }
+    if concentration_unit not in concentration_conversion_factors:
+        raise ValueError(f"Unsupported concentration unit '{concentration_unit}'. Supported units: {list(concentration_conversion_factors.keys())}")
+
+    conversion_factor = concentration_conversion_factors[concentration_unit]
+
+    # Calculate volume and photon flux in mol/s
     volume_L = (pathlength * 1) / 1000 # Assuming a unit area (1 cm2) for simplicity, converting from cm3 to L  
     photon_flux_mol = photon_flux / AVOGADRO_NUMBER  # Convert photon flux to mol/s
 
@@ -283,7 +306,7 @@ def calculate_excitations_per_second_multi_competing(species_of_interest,
 
     # Convert to numpy arrays with consistent order
     concentrations_array = np.array([concentrations[species] for species in species_list])
-    concentrations_array_M = concentrations_array * 1e-6  # Convert from uM to M
+    concentrations_array_M = concentrations_array * conversion_factor # Convert to M
     extinction_coefficients_array = np.array([extinction_coefficients[species] for species in species_list])
 
     # Calculate absorption
