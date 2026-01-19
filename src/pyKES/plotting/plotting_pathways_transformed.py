@@ -202,6 +202,8 @@ def plot_curved_band(data,
 def plot_pathway_bars(data, figsize=(10, 8), 
                       colormap = 'tab20', 
                       ax = None,
+                      excluded_nodes = [],
+                      excluded_links = [],
                       node_linewidth = 5,
                       label_offset = 0.15,
                       label_fontsize = 12,
@@ -234,6 +236,9 @@ def plot_pathway_bars(data, figsize=(10, 8),
         # Only plot nodes that have y_min and y_max
         if 'y_min' not in node or 'y_max' not in node:
             continue
+
+        if node_id in excluded_nodes:
+            continue
         
         level = node['level']
         y_min = node['y_min']
@@ -250,6 +255,13 @@ def plot_pathway_bars(data, figsize=(10, 8),
                 va='center', ha = 'center', fontweight='bold', color = color)
     
     for link in data['links']:
+
+        if link['source'] in excluded_nodes or link['target'] in excluded_nodes:
+            continue
+
+        # Check if link should be excluded by (source, target) tuple
+        if (link['source'], link['target']) in excluded_links:
+            continue
 
         target = data['nodes'][link['target']]
         color_of_target = color_map[target['name']]

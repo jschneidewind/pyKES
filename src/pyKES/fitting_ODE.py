@@ -8,6 +8,7 @@ from pprint import pprint
 from pyKES.reaction_ODE import solve_ode_system, parse_reactions, calculate_excitations_per_second_competing
 from pyKES.database.database_experiments import ExperimentalDataset
 from pyKES.utilities.resolve_attributes import resolve_experiment_attributes
+from pyKES.utilities.make_json_serializable import make_json_serializable
 
 def square_loss_time_series(model_data, experimental_data, **kwargs):
     '''
@@ -361,7 +362,7 @@ class Fitting_Model:
             'optimized_rate_constants': optimized_rate_constants,
             'data_to_be_fitted': self.data_to_be_fitted,
             'initial_conditions': self.initial_conditions,
-            'other_multipliers': self.other_multipliers,
+            'other_multipliers': make_json_serializable(self.other_multipliers),
             'times': self.times,
             'experiments': experiment_list,
             'loss_function': loss_function_name,

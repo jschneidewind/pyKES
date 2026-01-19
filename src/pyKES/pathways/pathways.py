@@ -186,6 +186,7 @@ def propagate_species(species,
         # Get products and their stoichiometries
         for product, stoichiometry in reaction['products'].items():
             product_amount = amount * proportion * stoichiometry
+            #product_amount = amount * proportion
             
             # Recursively propagate this product
             product_tree = propagate_species(
@@ -214,6 +215,7 @@ def calculate_reaction_network_propagation(concentrations,
                                            extinction_coefficients,
                                            photon_flux,
                                            pathlength,
+                                           concentration_unit = 'uM',
                                            other_multipliers={}):
     """
     Calculate the full propagation through a photochemical reaction network.
@@ -302,6 +304,7 @@ def calculate_reaction_network_propagation(concentrations,
         concentrations=absorbing_concentrations,
         extinction_coefficients=extinction_coefficients,
         pathlength=pathlength,
+        concentration_unit = concentration_unit,
         return_full=True
     )
     
@@ -378,7 +381,7 @@ def testing_propagation():
     reactions = ['[A] > [A-excited], k1',
                  '[A-excited] > [A], k2',
                  '[A-excited] > [B], k3',
-                 '[B] > [A], k4',
+                 '[B] > 2 [A], k4',
                  '[B] > [B-excited], k5',
                  '[B-excited] > [B], k6',
                  '[B-excited] > [C], k7',]
@@ -502,5 +505,5 @@ def test_propagate_species_function():
 
 if __name__ == '__main__':
     #testing_function()
-    testing_propagation()
-    #test_propagate_species_function()
+    #testing_propagation()
+    test_propagate_species_function()

@@ -50,7 +50,8 @@ class Reaction_Model:
                                                  timepoint: float,
                                                  absorbing_species_with_extinction_coefficients: dict,
                                                  photon_flux: float,
-                                                 pathlength: float,):
+                                                 pathlength: float,
+                                                 concentration_unit: str):
         # Storing photon flux and pathlength
         self.photon_flux = photon_flux
         self.pathlength = pathlength    
@@ -73,6 +74,7 @@ class Reaction_Model:
                     extinction_coefficients = self.extinction_coefficients,
                     photon_flux = self.photon_flux,
                     pathlength = self.pathlength,
+                    concentration_unit = concentration_unit,
                     other_multipliers = self.other_multipliers,)
     
     def plot_reaction_network_propagation(self, 
@@ -80,6 +82,8 @@ class Reaction_Model:
                                           value_key = 'log_value',
                                           fanning_factor = 0.7,
                                           assumed_branching_degree = 1.7,
+                                          excluded_nodes = [],
+                                          excluded_links = [],
                                           forward_link_kwargs = {},
                                           backward_link_kwargs = {},
                                           **kwargs
@@ -94,6 +98,8 @@ class Reaction_Model:
         plot_pathway_bars(
             self.transformed_propagation_data,
             ax = ax,
+            excluded_nodes = excluded_nodes,
+            excluded_links = excluded_links,
             forward_link_kwargs = forward_link_kwargs,
             backward_link_kwargs = backward_link_kwargs,
             **kwargs)
@@ -204,7 +210,7 @@ def full_testing():
                            rate_constants = rate_constants,
                            initial_conditions = initial_conditions,
                            other_multipliers = other_multipliers,
-                           times = times)
+                           times = times,)
     
     model.solve_ode()
 
@@ -212,7 +218,8 @@ def full_testing():
         timepoint = 10,
         absorbing_species_with_extinction_coefficients = absorbing_species_with_extinction_coefficients,
         photon_flux = PHOTON_FLUX,
-        pathlength = PATHLENGTH,)
+        pathlength = PATHLENGTH,
+        concentration_unit = 'uM',)
     
     model.plot_solution()
     model.plot_reaction_network_propagation(forward_link_kwargs = {'alpha': 0.6},)
