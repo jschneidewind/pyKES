@@ -2,13 +2,29 @@ import pandas as pd
 import numpy as np
 import h5py
 from dataclasses import dataclass, asdict, field
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 import json
 import pickle
 
+# Bump when the on-disk layout changes in a way older readers cannot ignore
+# (renamed/removed groups, changed required attributes). Purely additive
+# changes to processing_parameters or per-experiment dicts do not require
+# a bump.
+SCHEMA_VERSION = "1.0"
 
-def import_overview_excel(file_name, sheet_name):
-    df = pd.read_excel(file_name, sheet_name = sheet_name)
+
+def import_overview_excel(file_name, 
+                          sheet_name,
+                          dtype = None):
+    
+    '''
+    Import the overview Excel sheet as a DataFrame.
+    '''
+
+    df = pd.read_excel(file_name, 
+                       sheet_name = sheet_name, 
+                       dtype = dtype)
+
     return df
 
 @dataclass
@@ -21,92 +37,6 @@ class Experiment:
     metadata: Dict[str, any]
     raw_data: Dict[str, any]
     processed_data: Dict[str, any]
-
-# def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
-#     """
-#     Recursively save nested dictionaries to HDF5 group.
-#     Handles numpy arrays, basic Python types, and nested structures.
-#     """
-#     for key, value in data_dict.items():
-#         full_key = f"{prefix}/{key}" if prefix else key
-        
-#         if isinstance(value, np.ndarray):
-#             # Save numpy arrays directly
-#             group.create_dataset(full_key, data=value)
-            
-#         elif isinstance(value, dict):
-#             # Recursively handle nested dictionaries
-#             save_nested_dict_to_hdf5(group, value, full_key)
-            
-#         elif isinstance(value, (str, int, float, bool)):
-#             # Save basic types as attributes or small datasets
-#             if isinstance(value, str):
-#                 # Handle strings (need special encoding for HDF5)
-#                 group.create_dataset(full_key, data=value.encode('utf-8'))
-#             else:
-#                 group.create_dataset(full_key, data=value)
-                
-#         elif isinstance(value, (list, tuple)):
-#             # Try to convert to numpy array, fallback to JSON
-#             try:
-#                 arr = np.array(value)
-#                 group.create_dataset(full_key, data=arr)
-#             except:
-#                 # If can't convert to array, store as JSON string
-#                 json_str = json.dumps(value)
-#                 group.create_dataset(full_key, data=json_str.encode('utf-8'))
-#                 group[full_key].attrs['type'] = 'json'
-                
-#         else:
-#             # For other types, use JSON serialization
-#             try:
-#                 json_str = json.dumps(value)
-#                 group.create_dataset(full_key, data=json_str.encode('utf-8'))
-#                 group[full_key].attrs['type'] = 'json'
-#             except:
-#                 # Last resort: pickle (less portable but handles everything)
-#                 pickled_data = pickle.dumps(value)
-#                 group.create_dataset(full_key, data=np.frombuffer(pickled_data, dtype=np.uint8))
-#                 group[full_key].attrs['type'] = 'pickle'
-
-# def load_nested_dict_from_hdf5(group, prefix=""):
-#     """
-#     Recursively load nested dictionaries from HDF5 group.
-#     """
-#     result = {}
-    
-#     def visit_func(name, obj):
-#         if isinstance(obj, h5py.Dataset):
-#             # Remove prefix from name
-#             key = name[len(prefix):].lstrip('/') if prefix else name
-            
-#             # Handle different data types
-#             if obj.attrs.get('type') == 'json':
-#                 # JSON-encoded data
-#                 json_str = obj[()].decode('utf-8')
-#                 value = json.loads(json_str)
-#             elif obj.attrs.get('type') == 'pickle':
-#                 # Pickled data
-#                 pickled_bytes = obj[()].tobytes()
-#                 value = pickle.loads(pickled_bytes)
-#             else:
-#                 # Regular data (numpy arrays, numbers, strings)
-#                 value = obj[()]
-#                 if isinstance(value, bytes):
-#                     value = value.decode('utf-8')
-            
-#             # Build nested dictionary structure
-#             keys = key.split('/')
-#             current_dict = result
-#             for k in keys[:-1]:
-#                 if k not in current_dict:
-#                     current_dict[k] = {}
-#                 current_dict = current_dict[k]
-#             current_dict[keys[-1]] = value
-    
-#     group.visititems(visit_func)
-#     return result
-
 
 def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
     """
@@ -222,23 +152,69 @@ class ExperimentalDataset:
     plotting_instruction: Dict[str, Any] = field(default_factory=dict)
     group_mapping: Dict[str, Any] = field(default_factory=dict)
     processing_parameters: Dict[str, Any] = field(default_factory=dict)
+    schema_version: Optional[str] = None
 
     def add_experiment(self, experimental_data: 'Experiment'):
         """Add an experiment to the dataset"""
         self.experiments[experimental_data.experiment_name] = experimental_data
 
-    # def update_metadata(self, file_name):
+    def update_overview_df(self,
+                        incoming_df: pd.DataFrame,
+                        key_column: str) -> None:
+        """
+        Merge an incoming overview DataFrame into the existing overview_df.
 
-    #     new_overview_df = import_overview_excel(file_name)
-    #     self.overview_df = new_overview_df
+        Parameters
+        ----------
+        incoming_df : pd.DataFrame
+            New overview data to merge in.
+        key_column : str
+            Column used to match experiments between the two DataFrames.
 
-    #     for experiment_name, experiment_data in self.experiments.items():
-    #         new_experimental_metadata = get_experimental_metadata(experiment_name, self.overview_df)
+        Returns
+        -------
+        None
+        """
+        if self.overview_df.empty:
+            self.overview_df = incoming_df.copy()
+            self.overview_df["Processed"] = "False"
+            return
 
-    #         experiment_data.experiment_metadata = ExperimentMetadata(**new_experimental_metadata, 
-    #                                         color = get_experiment_color(new_experimental_metadata['experiment_name']))
-            
-    #         self.insert_experiment_results_in_df(experiment_data)
+        existing_df = self.overview_df.copy().set_index(key_column)
+        incoming_df = incoming_df.copy().set_index(key_column)
+
+        overlapping_keys = existing_df.index.intersection(incoming_df.index)
+
+        existing_only = existing_df.drop(index=overlapping_keys)
+        incoming_only = incoming_df.drop(index=overlapping_keys)
+
+        # Looping over overlapping keys to check for differences and merge accordingly
+        merged_rows = []
+        for key in overlapping_keys:
+            existing_row = existing_df.loc[key]
+            incoming_row = incoming_df.loc[key]
+
+            shared_cols = existing_row.index.intersection(incoming_row.index)
+            shared_cols = shared_cols.drop("Processed", errors="ignore")
+
+            # If shared columns are identical, merge by taking existing values and filling in any new columns from incoming
+            if existing_row[shared_cols].equals(incoming_row[shared_cols]):
+                merged_row = existing_row.combine_first(incoming_row)
+            # If there are differences, use incoming row 
+            else:
+                merged_row = incoming_row
+
+            merged_row.name = key
+            merged_rows.append(merged_row)
+
+        merged_df = pd.DataFrame(merged_rows)
+        merged_df.index.name = key_column
+
+        self.overview_df = pd.concat(
+            [existing_only, incoming_only, merged_df],
+            axis=0,
+            sort=False
+        ).reset_index()
 
     def save_to_hdf5(self, filename: str):
         """
@@ -248,6 +224,10 @@ class ExperimentalDataset:
             self.overview_df.to_hdf(filename, key='overview_df', mode='w', format='table')
 
         with h5py.File(filename, 'a') as f:
+            # Always stamp the schema version so older / mismatched readers
+            # can detect format drift.
+            f.attrs['schema_version'] = SCHEMA_VERSION
+
             # Save dataset-level dictionaries as attributes
             if self.plotting_instruction:
                 f.attrs['plotting_instruction'] = json.dumps(self.plotting_instruction)
@@ -300,6 +280,14 @@ class ExperimentalDataset:
             dataset.overview_df = pd.DataFrame()
 
         with h5py.File(filename, 'r') as f:
+            # Load schema version (None for legacy files written before
+            # versioning existed).
+            schema_version_attr = f.attrs.get('schema_version')
+            if isinstance(schema_version_attr, bytes):
+                dataset.schema_version = schema_version_attr.decode('utf-8')
+            elif schema_version_attr is not None:
+                dataset.schema_version = str(schema_version_attr)
+
             # Load dataset-level dictionaries from attributes
             if 'plotting_instruction' in f.attrs:
                 dataset.plotting_instruction = json.loads(f.attrs['plotting_instruction'])
