@@ -423,7 +423,7 @@ def update_subset_selection(
             del st.session_state.selected_subsets[subset_key]
 
 
-def sync_from_multiselect() -> None:
+def sync_from_multiselect(multiselect_key: str) -> None:
     """
     Synchronize selected_subsets state from the multiselect widget.
     
@@ -433,12 +433,12 @@ def sync_from_multiselect() -> None:
     Examples
     --------
     >>> # Called automatically when multiselect widget changes
-    >>> st.session_state.multiselect_widget = ['Intensity||10.0', 'Intensity||20.0']
+    >>> st.session_state["analysis_selected_subsets"] = ['Intensity||10.0', 'Intensity||20.0']
     >>> sync_from_multiselect()
     >>> len(st.session_state.selected_subsets)
     2
     """
-    selected_subset_keys = st.session_state.multiselect_widget
+    selected_subset_keys = st.session_state[multiselect_key]
     # Rebuild selected_subsets dict based on selection
     new_selected = {}
     for subset_key in selected_subset_keys:
@@ -499,14 +499,15 @@ def render_group_selection_sidebar(
                     continue
                 
                 is_selected = subset_key in st.session_state.selected_subsets
+                checkbox_key = f"analysis_subset_checkbox_{subset_key}"
+                st.session_state[checkbox_key] = is_selected
                 
                 # Create checkbox for subset
                 st.checkbox(
                     subset_label,
-                    value=is_selected,
-                    key=f"checkbox_{subset_key}",
+                    key=checkbox_key,
                     on_change=update_subset_selection,
-                    args=(subset_key, exp_names, not is_selected)
+                    args=(subset_key, exp_names, checkbox_key)
                 )
 
 
@@ -646,14 +647,17 @@ def render_control_panel(
         # Multiselect for selected subsets overview
         all_subset_keys = list(st.session_state.all_subsets.keys())
         subset_display_labels = create_subset_display_labels(all_subset_keys)
+
+        multiselect_key = "analysis_selected_subsets"
+        st.session_state[multiselect_key] = list(st.session_state.selected_subsets.keys())
         
         st.multiselect(
             "Selected Experiments",
             options=all_subset_keys,
-            default=list(st.session_state.selected_subsets.keys()),
             format_func=lambda x: subset_display_labels.get(x, x),
-            key="multiselect_widget",
-            on_change=sync_from_multiselect
+            key=multiselect_key,
+            on_change=sync_from_multiselect,
+            args=(multiselect_key,)
         )
     
     with ctrl_col2:

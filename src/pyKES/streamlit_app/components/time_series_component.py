@@ -5,16 +5,17 @@ from pyKES.utilities.resolve_attributes import resolve_experiment_attributes
 
 
 # Function to handle checkbox changes
-def update_selection(exp_name, value):
-    if value and exp_name not in st.session_state.selected_experiments:
+def update_selection(exp_name: str, checkbox_key: str) -> None:
+    selected = st.session_state[checkbox_key]
+    if selected and exp_name not in st.session_state.selected_experiments:
         st.session_state.selected_experiments.append(exp_name)
-    elif not value and exp_name in st.session_state.selected_experiments:
+    elif not selected and exp_name in st.session_state.selected_experiments:
         st.session_state.selected_experiments.remove(exp_name)
 
 # Function to handle multiselect changes
-def sync_from_multiselect():
+def sync_from_multiselect(multiselect_key: str) -> None:
     # This gets called when the multiselect value changes
-    selected_names = st.session_state.multiselect_widget
+    selected_names = st.session_state[multiselect_key]
     st.session_state.selected_experiments = selected_names
 
 def render_time_series():
@@ -50,6 +51,8 @@ def render_time_series():
     if 'selected_plot_types' not in st.session_state:
         st.session_state.selected_plot_types = []
 
+    multiselect_key = "time_series_selected_experiments"
+
     # Get group_mapping and plotting_instruction from dataset
     group_mapping = experimental_dataset.group_mapping
     plotting_instruction = experimental_dataset.plotting_instruction['time_series_instructions']
@@ -78,6 +81,8 @@ def render_time_series():
                 for exp_name, exp_data in sorted(experiments_in_group, key=lambda x: x[0]):
                     
                     is_selected = exp_name in st.session_state.selected_experiments
+                    checkbox_key = f"time_series_checkbox_{exp_name}"
+                    st.session_state[checkbox_key] = is_selected
                     
                     # Build checkbox label with metadata
                     checkbox_label = exp_name
@@ -101,10 +106,9 @@ def render_time_series():
                     # Create checkbox for experiment
                     st.checkbox(
                         checkbox_label,
-                        value=is_selected,
-                        key=f"checkbox_{exp_name}",
+                        key=checkbox_key,
                         on_change=update_selection,
-                        args=(exp_name, not is_selected)
+                        args=(exp_name, checkbox_key)
                     )
     
     with col2:
@@ -116,12 +120,13 @@ def render_time_series():
         with ctrl_col1:
             # Multiselect for selected experiments overview
             all_experiment_names = sorted(experimental_dataset.experiments.keys())
+            st.session_state[multiselect_key] = list(st.session_state.selected_experiments)
             st.multiselect(
                 "Selected Experiments",
                 options=all_experiment_names,
-                default=st.session_state.selected_experiments,
-                key="multiselect_widget",
-                on_change=sync_from_multiselect
+                key=multiselect_key,
+                on_change=sync_from_multiselect,
+                args=(multiselect_key,)
             )
         
         with ctrl_col2:
