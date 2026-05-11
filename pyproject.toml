@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "pyKES"
-version = "0.1.1"
+version = "0.1.2"
 description = "Python package for kinetic modelling of chemical reaction networks."
 keywords = ["kinetics", "photocatalysis", "water-splitting", "reaction-networks", "ode"]
 authors = [
