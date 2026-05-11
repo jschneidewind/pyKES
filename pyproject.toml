@@ -1,17 +1,29 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.11.13,<0.12"]
+build-backend = "uv_build"
 
 [project]
 name = "pyKES"
 version = "0.1.0"
 description = "Python package for kinetic modelling of chemical reaction networks."
+keywords = ["kinetics", "photocatalysis", "water-splitting", "reaction-networks", "ode"]
 authors = [
     {name = "Jacob Schneidewind", email = "pyH2A.pypi@gmail.com"},
 ]
-license = {text = "MIT"}
+license = "MIT"
 readme = "README.md"
 requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
 dependencies = [
     "streamlit",
     "pandas",
@@ -26,3 +38,14 @@ dependencies = [
 [project.urls]
 "Homepage" = "https://github.com/jschneidewind/pyKES"
 "Bug Tracker" = "https://github.com/jschneidewind/pyKES/issues"
+"Source" = "https://github.com/jschneidewind/pyKES"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pyKES*"]
+
+[tool.uv.build-backend]
+module-name = "pyKES"
