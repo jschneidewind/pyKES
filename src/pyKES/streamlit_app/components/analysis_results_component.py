@@ -387,9 +387,9 @@ def initialize_session_state() -> None:
 
 
 def update_subset_selection(
-    subset_key: str, 
-    experiments_in_subset: List[str], 
-    value: bool
+    subset_key: str,
+    experiments_in_subset: List[str],
+    checkbox_state_key: str
 ) -> None:
     """
     Handle checkbox state changes for experiment subsets.
@@ -414,13 +414,20 @@ def update_subset_selection(
     >>> 'Intensity||10.0' in st.session_state.selected_subsets
     True
     """
+    # The checkbox callback passes the checkbox's session-state key (string).
+    # Read the actual boolean state from `st.session_state` so we correctly
+    # detect both check and uncheck events.
+    value = bool(st.session_state.get(checkbox_state_key, False))
+
     if value:
-        # Add all experiments in subset
         st.session_state.selected_subsets[subset_key] = experiments_in_subset
     else:
-        # Remove subset
         if subset_key in st.session_state.selected_subsets:
             del st.session_state.selected_subsets[subset_key]
+
+    # Keep the multiselect widget in sync with checkbox-driven changes.
+    multiselect_key = "analysis_selected_subsets"
+    st.session_state[multiselect_key] = list(st.session_state.selected_subsets.keys())
 
 
 def sync_from_multiselect(multiselect_key: str) -> None:

@@ -5,6 +5,7 @@ from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Any, Union, Optional
 import json
 import pickle
+from io import StringIO
 
 # Bump when the on-disk layout changes in a way older readers cannot ignore
 # (renamed/removed groups, changed required attributes). Purely additive
@@ -142,6 +143,64 @@ def load_nested_dict_from_hdf5(group, prefix=""):
     group.visititems(visit_func)
     return result
 
+
+def write_df_to_hdf(h5_file: h5py.File, df: pd.DataFrame, key: str = 'overview_df') -> None:
+    """Write a DataFrame to HDF5 with h5py-native serialization.
+
+    Parameters
+    ----------
+    h5_file : h5py.File
+        Open HDF5 file handle.
+    df : pd.DataFrame
+        DataFrame to serialize.
+    key : str, default='overview_df'
+        Group name under which the DataFrame payload is stored.
+
+    Returns
+    -------
+    None
+    """
+    if key in h5_file:
+        del h5_file[key]
+
+    df_group = h5_file.create_group(key)
+    payload = df.to_json(orient='split', date_format='iso')
+    df_group.create_dataset('json', data=np.bytes_(payload))
+    df_group.attrs['serialization_format'] = 'pandas_json_split'
+
+
+def read_df_from_hdf(h5_file: h5py.File, key: str = 'overview_df') -> pd.DataFrame:
+    """Read a DataFrame previously written by ``write_df_to_hdf``.
+
+    Parameters
+    ----------
+    h5_file : h5py.File
+        Open HDF5 file handle.
+    key : str, default='overview_df'
+        Group name from which the DataFrame payload is loaded.
+
+    Returns
+    -------
+    pd.DataFrame
+        Deserialized DataFrame. Returns an empty DataFrame if key is absent.
+    """
+    if key not in h5_file:
+        return pd.DataFrame()
+
+    df_group = h5_file[key]
+    if 'json' not in df_group:
+        print("overview_df exists but is not in h5py JSON format; returning empty DataFrame")
+        return pd.DataFrame()
+
+    raw_payload = df_group['json'][()]
+
+    if isinstance(raw_payload, bytes):
+        payload = raw_payload.decode('utf-8')
+    else:
+        payload = str(raw_payload)
+
+    return pd.read_json(StringIO(payload), orient='split')
+
 @dataclass
 class ExperimentalDataset:
     """
@@ -220,10 +279,10 @@ class ExperimentalDataset:
         """
         Save experiments to HDF5 file.
         """
-        if not self.overview_df.empty:
-            self.overview_df.to_hdf(filename, key='overview_df', mode='w', format='table')
+        with h5py.File(filename, 'w') as f:
+            if not self.overview_df.empty:
+                write_df_to_hdf(f, self.overview_df, key='overview_df')
 
-        with h5py.File(filename, 'a') as f:
             # Always stamp the schema version so older / mismatched readers
             # can detect format drift.
             f.attrs['schema_version'] = SCHEMA_VERSION
@@ -273,13 +332,9 @@ class ExperimentalDataset:
 
         dataset = cls()
 
-        try:
-            dataset.overview_df = pd.read_hdf(filename, key='overview_df')
-        except (KeyError, ValueError):
-            print("No overview DataFrame found in file")
-            dataset.overview_df = pd.DataFrame()
-
         with h5py.File(filename, 'r') as f:
+            dataset.overview_df = read_df_from_hdf(f, key='overview_df')
+
             # Load schema version (None for legacy files written before
             # versioning existed).
             schema_version_attr = f.attrs.get('schema_version')
@@ -435,7 +490,10 @@ def usage_example():
 
 
     # Create a dataset and add an experiment
-    dataset = ExperimentalDataset()
+    dataset = ExperimentalDataset(overview_df=pd.DataFrame({
+        'Experiment': ['Exp1', 'Exp2'],
+        'Description': ['First experiment', 'Second experiment']
+    }))
     
     # Add dataset-level attributes
     dataset.plotting_instruction = {'xlabel': 'Time (s)', 'ylabel': 'Current (mA)'}
@@ -461,10 +519,10 @@ def usage_example():
     dataset.add_experiment(exp1)
 
     # Save to HDF5
-    dataset.save_to_hdf5("experiments.h5")
+    dataset.save_to_hdf5("src/tests/experiments.h5")
 
     # Load from HDF5
-    loaded_dataset = ExperimentalDataset.load_from_hdf5("experiments.h5")
+    loaded_dataset = ExperimentalDataset.load_from_hdf5("src/tests/experiments.h5")
     loaded_dataset.print_experiments()
     
     print(f"Plotting instructions: {loaded_dataset.plotting_instruction}")
@@ -472,7 +530,7 @@ def usage_example():
     print(f"Exp1 group: {loaded_dataset.experiments['Exp1'].group}")
 
     print(loaded_dataset.experiments['Exp1'].processed_data['baseline_corrected']['fit_parameters'])
-
+    print(loaded_dataset.overview_df)
 
 
 if __name__ == '__main__':
