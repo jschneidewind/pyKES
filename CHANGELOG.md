@@ -4,10 +4,10 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project aims to follow Semantic Versioning.
 
-## [Unreleased]
+## [0.1.3]
 
 ### Added
-- Placeholder for upcoming changes.
+- `pyKES.utilities.max_rate`: robust maximum-rate extraction from noisy kinetic time series (`extract_max_rate`, `MaxRateResult`, `plot_max_rate`). Combines multi-scale artifact masking, an exact O(n) Matern-5/2 state-space Gaussian-process smoother (Kalman filter + RTS smoother) with maximum-likelihood hyperparameters, a sustained-window maximum-rate definition with uncertainty, a rolling-regression cross-check and automatic quality flags.
 
 ## [0.1.0] - 2026-05-11
 

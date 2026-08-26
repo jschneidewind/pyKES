@@ -43,13 +43,24 @@ pip install -e <path-to-pyKES>
 
 ## Coding principles
 
-When editing or adding code in this repo, follow these rules:
+When editing or adding code in this repo, follow these rules. [src/pyKES/reaction_ODE.py](src/pyKES/reaction_ODE.py) is the style benchmark.
 
-1. **Reduce nesting.** Break logic into small, self-contained functions instead of deep `if` / `with` / `try` ladders. The function's name should make its job obvious.
+1. **Reduce nesting.** Break logic into small, self-contained functions instead of deep `if` / `with` / `try` ladders. The function's name should make its job obvious. But avoid excessive fragmentation: a helper must have one clear, nameable job.
 2. **NumPy-style docstrings on every function.** Brief `Parameters` / `Returns` blocks. Skip `Examples` unless they materially clarify usage. Don't repeat type hints in prose.
-3. **Meaningful comments only.** Explain the *why* — hidden constraints, invariants, surprising decisions, references to bugs/tickets. Don't restate what well-named code already shows.
+3. **Meaningful comments only.** Explain the *why* — hidden constraints, invariants, surprising decisions, references to bugs/tickets. Don't restate what well-named code already shows. Separate logical blocks within a function with blank lines.
 4. **Fail-fast.** Avoid broad `try/except` and silent fallbacks. Let exceptions propagate; in Streamlit they surface to the user as a traceback. Validate inputs at construction boundaries (`__post_init__`) and trust internal invariants thereafter. `try/finally` for resource cleanup is fine; `try/except: pass` is not.
 5. **Be short.** Prefer concise, self-explanatory code over defensive scaffolding. Three clear lines beat ten lines of speculative robustness.
+6. **Full-word names.** No single-letter or abbreviated variable names, even for mathematical quantities: `filtered_covariances`, not `P_f`; `lengthscale`, not `ell`. Function names are verbs describing the job (`parse_reactions`, `detect_artifacts`).
+7. **No magic numbers.** Statistical factors, thresholds, and window sizes become named module-level constants with a short explanatory comment, grouped into commented sections at the top of the module (see [src/pyKES/utilities/max_rate.py](src/pyKES/utilities/max_rate.py)).
+8. **No nested function definitions.** Keep every function at module level; pass extra data through parameters (e.g. `scipy.optimize.minimize(..., args=...)`) instead of closures. Exception: existing ODE-builder closures required by solver APIs.
+9. **Avoid `while` loops.** Prefer vectorized NumPy scans (boolean arrays, `np.convolve`, `np.searchsorted`, prefix sums) or bounded `for` loops; sequential recursions (e.g. Kalman filters) use `for`.
+
+## Documentation, tests, changelog
+
+- Non-trivial modules get a companion document in [docs/](docs/) (e.g. [docs/max_rate.md](docs/max_rate.md)): explain how the code works in detail, readable also for non-specialists — motivation, pipeline stages, parameter guidance, validation.
+- Tests live in [src/tests/](src/tests/). For numerical/analysis code, test against synthetic data with known ground truth (never against files that only exist locally), and validate new numerical algorithms against a reference implementation during development.
+- New features get an entry under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
+- Include a small `test_function()` demo with `if __name__ == "__main__":` at the bottom of runnable analysis modules, mirroring `reaction_ODE.py`.
 
 ## Running
 
