@@ -18,20 +18,36 @@ The pipeline runs in four stages:
 
 See docs/max_rate.md for a detailed explanation of every stage.
 
+Inputs and outputs are `Quantity` objects: `time` carries the dimension
+time, `values` the dimension substance, and every physical field of the
+returned `MaxRateResult` is a `Quantity` as well (the maximum rate, for
+instance, has the dimension substance / time). All internal math runs on
+plain floats in seconds and moles.
+
 Typical use::
 
+    from pyKES.utilities.unit_handler import Quantity
     from pyKES.utilities.max_rate import extract_max_rate
 
-    result = extract_max_rate(time, values)
-    print(result.max_rate, result.max_rate_std, result.flags)
+    result = extract_max_rate(Quantity(time_seconds, 's'), Quantity(amount_umol, 'umol'))
+    print(result.max_rate.unit['umol / h'], result.max_rate_std, result.flags)
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import numpy as np
 from scipy.ndimage import binary_dilation, median_filter
 from scipy.optimize import minimize
+
+from pyKES.utilities.unit_handler import Quantity
+
+# --- Calculation units --------------------------------------------------------
+# Every stage of the pipeline works on plain floats in these units: Quantity
+# inputs are reduced to magnitudes on entry and results are re-wrapped on exit.
+TIME_UNIT = 's'
+AMOUNT_UNIT = 'mol'
+RATE_UNIT = 'mol / s'
 
 # --- Statistical conversion factors ----------------------------------------
 MAD_TO_STD = 1.4826                  # median absolute deviation -> standard deviation (Gaussian)
@@ -72,26 +88,130 @@ RESIDUAL_AUTOCORRELATION_WARNING = 0.9
 LENGTHSCALE_BOUND_FACTOR = 2.0       # flag if the lengthscale sits within this factor of its lower bound
 
 
+def quantity_magnitude(quantity, unit, name):
+    """
+    Read the numeric magnitude of a `Quantity` in one of the calculation units.
+
+    Parameters
+    ----------
+    quantity : Quantity
+        Value to reduce to a magnitude.
+    unit : str
+        Target unit; a dimension mismatch raises inside the unit handler.
+    name : str
+        Argument name, used only in the error message.
+
+    Returns
+    -------
+    float or ndarray
+        The magnitude expressed in `unit`.
+    """
+    if not isinstance(quantity, Quantity):
+        raise TypeError(f"{name} must be a Quantity compatible with '{unit}', "
+                        f'got {type(quantity).__name__}')
+
+    return quantity.unit[unit]
+
+
+def resolve_window(window, median_time_step, duration):
+    """
+    Resolve the sustained-rate window to a length in seconds.
+
+    Parameters
+    ----------
+    window : Quantity or None
+        User-supplied window (dimension time); the default is used when None.
+    median_time_step : float
+        Median time step of the series, in seconds.
+    duration : float
+        Total duration of the series, in seconds.
+
+    Returns
+    -------
+    float
+        Window length in seconds.
+    """
+    if window is None:
+        return max(WINDOW_MEDIAN_STEPS * median_time_step, WINDOW_SPAN_FRACTION * duration)
+
+    return float(quantity_magnitude(window, TIME_UNIT, 'window'))
+
+
+def resolve_lengthscale_bounds(lengthscale_bounds, median_time_step, duration):
+    """
+    Resolve the Gaussian-process lengthscale bounds to seconds.
+
+    Parameters
+    ----------
+    lengthscale_bounds : tuple of Quantity or None
+        (lower, upper) bounds with dimension time; the default is used when None.
+    median_time_step : float
+        Median time step of the series, in seconds.
+    duration : float
+        Total duration of the series, in seconds.
+
+    Returns
+    -------
+    tuple of float
+        (lower, upper) bounds in seconds.
+    """
+    if lengthscale_bounds is None:
+        return (max(LENGTHSCALE_MIN_STEPS * median_time_step,
+                    LENGTHSCALE_MIN_SPAN_FRACTION * duration),
+                LENGTHSCALE_MAX_SPAN_FRACTION * duration)
+
+    lower, upper = lengthscale_bounds
+    return (float(quantity_magnitude(lower, TIME_UNIT, 'lengthscale_bounds')),
+            float(quantity_magnitude(upper, TIME_UNIT, 'lengthscale_bounds')))
+
+
+def hyperparameter_magnitudes(hyperparameters):
+    """
+    Reduce a reused hyperparameter dict of Quantities to plain floats.
+
+    Accepts what `MaxRateResult.hyperparameters` holds, so a fit can be
+    handed straight back to `extract_max_rate`.
+
+    Parameters
+    ----------
+    hyperparameters : dict of Quantity
+        ``lengthscale`` (time), ``signal_std`` and ``noise_std`` (substance).
+
+    Returns
+    -------
+    dict of float
+        The same entries in seconds and moles.
+    """
+    return {
+        'lengthscale': float(quantity_magnitude(hyperparameters['lengthscale'], TIME_UNIT,
+                                                'lengthscale')),
+        'signal_std': float(quantity_magnitude(hyperparameters['signal_std'], AMOUNT_UNIT,
+                                               'signal_std')),
+        'noise_std': float(quantity_magnitude(hyperparameters['noise_std'], AMOUNT_UNIT,
+                                              'noise_std')),
+    }
+
+
 def validate_time_series(time, values):
     """
-    Convert inputs to clean, time-sorted arrays with strictly increasing time.
+    Convert Quantity inputs to clean, time-sorted arrays in the calculation units.
 
     Non-finite entries and duplicate time stamps are dropped.
 
     Parameters
     ----------
-    time : array_like
-        Sample times.
-    values : array_like
-        Measured values.
+    time : Quantity
+        Sample times (dimension time).
+    values : Quantity
+        Measured amounts (dimension substance).
 
     Returns
     -------
     tuple of ndarray
-        The cleaned (time, values) arrays.
+        The cleaned (time, values) arrays, in seconds and moles.
     """
-    time = np.asarray(time, dtype=float).ravel()
-    values = np.asarray(values, dtype=float).ravel()
+    time = np.asarray(quantity_magnitude(time, TIME_UNIT, 'time'), dtype=float).ravel()
+    values = np.asarray(quantity_magnitude(values, AMOUNT_UNIT, 'values'), dtype=float).ravel()
 
     if time.shape != values.shape:
         raise ValueError(f'time and values differ in length: {time.shape} vs {values.shape}')
@@ -643,7 +763,7 @@ def calculate_rolling_slopes(time, values, mask, window):
     return slopes
 
 
-def collect_quality_flags(result, lengthscale_bounds):
+def collect_quality_flags(result, time, lengthscale_bounds):
     """
     Collect human-review flags for a finished extraction.
 
@@ -651,38 +771,45 @@ def collect_quality_flags(result, lengthscale_bounds):
     ----------
     result : MaxRateResult
         Populated result.
+    time : ndarray
+        Sample times in seconds; the result does not store them.
     lengthscale_bounds : tuple of float
-        Bounds used during hyperparameter fitting.
+        Bounds in seconds used during hyperparameter fitting.
 
     Returns
     -------
     list of str
         Flags; empty when nothing is suspicious.
     """
-    flags = []
-    time = result.time
+    max_rate = result.max_rate.unit[RATE_UNIT]
+    max_rate_std = result.max_rate_std.unit[RATE_UNIT]
+    t_max_rate = result.t_max_rate.unit[TIME_UNIT]
+    window = result.window.unit[TIME_UNIT]
+    crosscheck = result.max_rate_crosscheck.unit[RATE_UNIT]
 
-    if (result.t_max_rate < time[0] + result.window
-            or result.t_max_rate > time[-1] - result.window):
+    flags = []
+
+    if t_max_rate < time[0] + window or t_max_rate > time[-1] - window:
         flags.append('max_rate_at_boundary')
 
-    if result.hyperparameters['lengthscale'] < LENGTHSCALE_BOUND_FACTOR * lengthscale_bounds[0]:
+    if result.hyperparameters['lengthscale'].unit[TIME_UNIT] \
+            < LENGTHSCALE_BOUND_FACTOR * lengthscale_bounds[0]:
         flags.append('lengthscale_at_lower_bound')
 
-    if result.max_rate_std > HIGH_UNCERTAINTY_FRACTION * abs(result.max_rate):
+    if max_rate_std > HIGH_UNCERTAINTY_FRACTION * abs(max_rate):
         flags.append('high_uncertainty')
 
     if result.diagnostics['outlier_fraction'] > OUTLIER_FRACTION_WARNING:
         flags.append('many_outliers_masked')
 
-    if np.isfinite(result.max_rate_crosscheck):
-        difference = abs(result.max_rate - result.max_rate_crosscheck)
-        combined_std = np.hypot(result.max_rate_std, result.diagnostics['crosscheck_std'])
-        if difference > DISAGREEMENT_RELATIVE * abs(result.max_rate) \
+    if np.isfinite(crosscheck):
+        difference = abs(max_rate - crosscheck)
+        combined_std = np.hypot(max_rate_std, result.diagnostics['crosscheck_std'].unit[RATE_UNIT])
+        if difference > DISAGREEMENT_RELATIVE * abs(max_rate) \
                 and difference > DISAGREEMENT_SIGMA * combined_std:
             flags.append('estimator_disagreement')
 
-    if result.max_rate_instantaneous > INSTANTANEOUS_SPIKE_FACTOR * result.max_rate:
+    if result.max_rate_instantaneous.unit[RATE_UNIT] > INSTANTANEOUS_SPIKE_FACTOR * max_rate:
         flags.append('instantaneous_rate_spike')
 
     if result.diagnostics['residual_lag1_autocorr'] > RESIDUAL_AUTOCORRELATION_WARNING:
@@ -696,32 +823,42 @@ class MaxRateResult:
     """
     Result of `extract_max_rate`.
 
+    Every physical field is a `Quantity`: rates carry the dimension
+    substance / time, amounts substance, and times time. Read them in any
+    compatible unit through the lazy lookup, e.g.
+    ``result.max_rate.unit['umol / h']``.
+
     ``max_rate`` is the robust headline number: the largest rate sustained
-    over ``window`` time units. ``max_rate_instantaneous`` is the peak of
-    the smoothed derivative; it is upward-biased for noisy series (maximum
-    of a noisy estimate) and more artifact-sensitive, so treat it as
-    secondary. ``max_rate_crosscheck`` is the smoothing-free rolling
-    least-squares slope of the raw data over the same window as
-    ``max_rate``; large disagreement raises a flag.
+    over ``window``. ``max_rate_instantaneous`` is the peak of the smoothed
+    derivative; it is upward-biased for noisy series (maximum of a noisy
+    estimate) and more artifact-sensitive, so treat it as secondary.
+    ``max_rate_crosscheck`` is the smoothing-free rolling least-squares
+    slope of the raw data over the same window as ``max_rate``; large
+    disagreement raises a flag.
+
+    The input series is deliberately *not* stored: a result is meant to be
+    saved alongside the dataset it was computed from, and duplicating the
+    time and value arrays there would double the stored series for nothing.
+    `plot_max_rate` therefore takes the inputs again. The per-sample arrays
+    that are kept (``smooth``, ``rate``, their uncertainties and
+    ``outlier_mask``) exist nowhere else.
     """
 
-    max_rate: float
-    max_rate_std: float
-    t_max_rate: float
-    window: float
-    max_rate_instantaneous: float
-    max_rate_instantaneous_std: float
-    t_max_rate_instantaneous: float
-    max_rate_crosscheck: float
-    time: np.ndarray
-    values: np.ndarray
+    max_rate: Quantity
+    max_rate_std: Quantity
+    t_max_rate: Quantity
+    window: Quantity
+    max_rate_instantaneous: Quantity
+    max_rate_instantaneous_std: Quantity
+    t_max_rate_instantaneous: Quantity
+    max_rate_crosscheck: Quantity
     outlier_mask: np.ndarray
-    smooth: np.ndarray
-    smooth_std: np.ndarray
-    rate: np.ndarray
-    rate_std: np.ndarray
-    hyperparameters: Dict[str, float]
-    diagnostics: Dict[str, float]
+    smooth: Quantity
+    smooth_std: Quantity
+    rate: Quantity
+    rate_std: Quantity
+    hyperparameters: Dict[str, Quantity]
+    diagnostics: Dict[str, Any]
     flags: List[str] = field(default_factory=list)
 
 
@@ -731,32 +868,36 @@ def extract_max_rate(time, values, window=None, outlier_threshold=6.0,
     """
     Extract the maximum rate of a kinetic time series with uncertainty.
 
+    All calculations run in moles and seconds; the returned Quantities can
+    be read back in any compatible unit.
+
     Parameters
     ----------
-    time : array_like
-        Sample times (any units; rates are in value units per time unit).
-    values : array_like
-        Measured signal, e.g. concentration.
-    window : float, optional
-        Length of the sustained-rate window in time units. Defaults to
+    time : Quantity
+        Sample times (dimension time).
+    values : Quantity
+        Measured amounts, e.g. evolved H2 (dimension substance).
+    window : Quantity, optional
+        Length of the sustained-rate window (dimension time). Defaults to
         max(25 median time steps, 2 % of the series duration).
     outlier_threshold : float
         Robust z-score on detrended increments above which samples are
         masked as artifacts.
     outlier_pad : int
         Samples additionally masked on each side of a detected artifact.
-    lengthscale_bounds : tuple of float, optional
-        (lower, upper) bounds for the Gaussian-process lengthscale.
-        Defaults to (max(20 median time steps, 0.2 % of duration),
-        duration / 2). The lower bound guards against fitting correlated
-        sensor noise as signal.
+    lengthscale_bounds : tuple of Quantity, optional
+        (lower, upper) bounds for the Gaussian-process lengthscale
+        (dimension time). Defaults to (max(20 median time steps, 0.2 % of
+        duration), duration / 2). The lower bound guards against fitting
+        correlated sensor noise as signal.
     max_fit_points : int
         Points used (after decimation) for hyperparameter optimization.
         The final smoothing pass always uses every point.
-    hyperparameters : dict, optional
+    hyperparameters : dict of Quantity, optional
         ``lengthscale``, ``signal_std``, ``noise_std`` to reuse from a
         previous fit, skipping the optimization (useful for batches of
-        similar experiments).
+        similar experiments). Pass ``MaxRateResult.hyperparameters``
+        straight back.
 
     Returns
     -------
@@ -769,24 +910,20 @@ def extract_max_rate(time, values, window=None, outlier_threshold=6.0,
     median_time_step = float(np.median(np.diff(time)))
     duration = time[-1] - time[0]
 
-    if window is None:
-        window = max(WINDOW_MEDIAN_STEPS * median_time_step, WINDOW_SPAN_FRACTION * duration)
+    window = resolve_window(window, median_time_step, duration)
     if not 0 < window < duration:
-        raise ValueError(f'window {window} outside series duration {duration}')
+        raise ValueError(f'window {window} s outside series duration {duration} s')
 
-    if lengthscale_bounds is None:
-        lengthscale_bounds = (max(LENGTHSCALE_MIN_STEPS * median_time_step,
-                                  LENGTHSCALE_MIN_SPAN_FRACTION * duration),
-                              LENGTHSCALE_MAX_SPAN_FRACTION * duration)
+    lengthscale_bounds = resolve_lengthscale_bounds(lengthscale_bounds, median_time_step, duration)
 
     # Stage 1: mask artifacts, then fit the Gaussian-process hyperparameters
     mask = detect_artifacts(values, outlier_threshold, outlier_pad)
     mean_value = float(np.mean(values[~mask]))
     values_centered = values - mean_value
 
-    if hyperparameters is None:
-        hyperparameters = fit_hyperparameters(time, values_centered, mask,
-                                              lengthscale_bounds, max_fit_points)
+    hyperparameters = fit_hyperparameters(time, values_centered, mask,
+                                          lengthscale_bounds, max_fit_points) \
+        if hyperparameters is None else hyperparameter_magnitudes(hyperparameters)
 
     # Stage 2: smooth the full series; the state directly holds the curve
     # value, the rate, and their uncertainties
@@ -827,43 +964,57 @@ def extract_max_rate(time, values, window=None, outlier_threshold=6.0,
     residual_autocorrelation = float(np.corrcoef(residuals[:-1], residuals[1:])[0, 1]) \
         if len(residuals) > 2 else np.nan
 
+    max_rolling_slope = float(np.nanmax(rolling_slopes)) \
+        if np.any(np.isfinite(rolling_slopes)) else np.nan
+
     diagnostics = {
         'log_likelihood': float(log_likelihood),
         'outlier_fraction': float(mask.mean()),
         'residual_lag1_autocorr': residual_autocorrelation,
-        'median_dt': median_time_step,
-        'max_rolling_slope': float(np.nanmax(rolling_slopes))
-            if np.any(np.isfinite(rolling_slopes)) else np.nan,
-        'crosscheck_std': float(crosscheck_std),
+        'median_dt': Quantity(median_time_step, TIME_UNIT),
+        'max_rolling_slope': Quantity(max_rolling_slope, RATE_UNIT),
+        'crosscheck_std': Quantity(float(crosscheck_std), RATE_UNIT),
     }
 
     result = MaxRateResult(
-        max_rate=float(windowed_rates[best_window]),
-        max_rate_std=float(windowed_rate_stds[best_window]),
-        t_max_rate=float(centers[best_window]),
-        window=float(window),
-        max_rate_instantaneous=float(rate[best_instantaneous]),
-        max_rate_instantaneous_std=float(rate_std[best_instantaneous]),
-        t_max_rate_instantaneous=float(time[best_instantaneous]),
-        max_rate_crosscheck=float(crosscheck),
-        time=time, values=values, outlier_mask=mask,
-        smooth=smooth, smooth_std=np.sqrt(smooth_variance),
-        rate=rate, rate_std=rate_std,
-        hyperparameters=hyperparameters, diagnostics=diagnostics,
+        max_rate = Quantity(float(windowed_rates[best_window]), RATE_UNIT),
+        max_rate_std = Quantity(float(windowed_rate_stds[best_window]), RATE_UNIT),
+        t_max_rate = Quantity(float(centers[best_window]), TIME_UNIT),
+        window = Quantity(float(window), TIME_UNIT),
+        max_rate_instantaneous = Quantity(float(rate[best_instantaneous]), RATE_UNIT),
+        max_rate_instantaneous_std = Quantity(float(rate_std[best_instantaneous]), RATE_UNIT),
+        t_max_rate_instantaneous = Quantity(float(time[best_instantaneous]), TIME_UNIT),
+        max_rate_crosscheck = Quantity(float(crosscheck), RATE_UNIT),
+        outlier_mask = mask,
+        smooth = Quantity(smooth, AMOUNT_UNIT),
+        smooth_std = Quantity(np.sqrt(smooth_variance), AMOUNT_UNIT),
+        rate = Quantity(rate, RATE_UNIT),
+        rate_std = Quantity(rate_std, RATE_UNIT),
+        hyperparameters = {'lengthscale': Quantity(hyperparameters['lengthscale'], TIME_UNIT),
+                         'signal_std': Quantity(hyperparameters['signal_std'], AMOUNT_UNIT),
+                         'noise_std': Quantity(hyperparameters['noise_std'], AMOUNT_UNIT)},
+        diagnostics = diagnostics,
     )
-    result.flags = collect_quality_flags(result, lengthscale_bounds)
+    result.flags = collect_quality_flags(result, time, lengthscale_bounds)
 
     return result
 
 
-def plot_max_rate(result, axes=None):
+def plot_max_rate(result, time, values, axes=None):
     """
     Plot a two-panel diagnostic figure: data with smooth fit, and rate with confidence band.
+
+    The input series is not stored on the result, so it is passed in again
+    here; it is re-validated so that it lines up with the smoothed curve.
 
     Parameters
     ----------
     result : MaxRateResult
         Result to visualize.
+    time : Quantity
+        The sample times the result was computed from (dimension time).
+    values : Quantity
+        The measured amounts the result was computed from (dimension substance).
     axes : tuple of matplotlib.axes.Axes, optional
         (data axis, rate axis); a new figure is created when omitted.
 
@@ -877,32 +1028,39 @@ def plot_max_rate(result, axes=None):
     if axes is None:
         _, axes = plt.subplots(2, 1, sharex=True, figsize=(9, 7))
     data_axis, rate_axis = axes
-    time, mask = result.time, result.outlier_mask
+
+    time, values = validate_time_series(time, values)
+    mask = result.outlier_mask
+    smooth = result.smooth.unit[AMOUNT_UNIT]
+    rate = result.rate.unit[RATE_UNIT]
+    rate_std = result.rate_std.unit[RATE_UNIT]
+    max_rate = result.max_rate.unit[RATE_UNIT]
+    max_rate_std = result.max_rate_std.unit[RATE_UNIT]
+    t_max_rate = result.t_max_rate.unit[TIME_UNIT]
 
     # Upper panel: raw data, masked artifacts, smoothed curve and the max-rate window
-    data_axis.plot(time, result.values, '.', ms=1.5, color='0.6', label='data')
+    data_axis.plot(time, values, '.', ms=1.5, color='0.6', label='data')
     if mask.any():
-        data_axis.plot(time[mask], result.values[mask], 'x', ms=3, color='crimson',
+        data_axis.plot(time[mask], values[mask], 'x', ms=3, color='crimson',
                        label='masked artifacts')
-    data_axis.plot(time, result.smooth, color='C0', lw=1.5, label='GP smooth')
+    data_axis.plot(time, smooth, color='C0', lw=1.5, label='GP smooth')
 
-    half_window = 0.5 * result.window
-    window_times = np.array([result.t_max_rate - half_window, result.t_max_rate + half_window])
-    window_values = np.interp(window_times, time, result.smooth)
+    half_window = 0.5 * result.window.unit[TIME_UNIT]
+    window_times = np.array([t_max_rate - half_window, t_max_rate + half_window])
+    window_values = np.interp(window_times, time, smooth)
     data_axis.plot(window_times, window_values, color='C3', lw=2.5, label='max rate window')
-    data_axis.set_ylabel('signal')
+    data_axis.set_ylabel(f'amount / {AMOUNT_UNIT}')
     data_axis.legend(fontsize=8)
 
     # Lower panel: rate curve with confidence band and the extracted maximum
-    rate_axis.plot(time, result.rate, color='C0', lw=1.2, label='rate (GP derivative)')
-    rate_axis.fill_between(time, result.rate - 2 * result.rate_std,
-                           result.rate + 2 * result.rate_std,
+    rate_axis.plot(time, rate, color='C0', lw=1.2, label='rate (GP derivative)')
+    rate_axis.fill_between(time, rate - 2 * rate_std, rate + 2 * rate_std,
                            color='C0', alpha=0.25, lw=0, label='±2σ')
-    rate_axis.axhline(result.max_rate, color='C3', ls='--', lw=1,
-                      label=f'max rate = {result.max_rate:.3g} ± {result.max_rate_std:.2g}')
-    rate_axis.axvline(result.t_max_rate, color='C3', ls=':', lw=1)
-    rate_axis.set_xlabel('time')
-    rate_axis.set_ylabel('rate')
+    rate_axis.axhline(max_rate, color='C3', ls='--', lw=1,
+                      label=f'max rate = {max_rate:.3g} ± {max_rate_std:.2g} {RATE_UNIT}')
+    rate_axis.axvline(t_max_rate, color='C3', ls=':', lw=1)
+    rate_axis.set_xlabel(f'time / {TIME_UNIT}')
+    rate_axis.set_ylabel(f'rate / {RATE_UNIT}')
     rate_axis.legend(fontsize=8)
 
     if result.flags:
@@ -915,25 +1073,28 @@ def test_function():
 
     import matplotlib.pyplot as plt
 
-    # Synthetic experiment: induction period, linear H2 evolution, one
-    # bubble artifact whose instantaneous slope is 75x the true rate
+    # Synthetic experiment: induction period, linear H2 evolution in umol,
+    # one bubble artifact whose instantaneous slope is 75x the true rate
     rng = np.random.default_rng(0)
-    time = np.arange(0.0, 8000.0, 1.0)
-    signal = 0.02 * np.clip(time - 1000.0, 0.0, None)
+    time_seconds = np.arange(0.0, 8000.0, 1.0)
+    signal = 0.02 * np.clip(time_seconds - 1000.0, 0.0, None)
 
-    artifact = np.zeros_like(time)
+    artifact = np.zeros_like(time_seconds)
     artifact[5000:5010] = np.linspace(0.0, 15.0, 10)
-    artifact[5010:] = 15.0 * np.exp(-(time[5010:] - time[5010]) / 100.0)
+    artifact[5010:] = 15.0 * np.exp(-(time_seconds[5010:] - time_seconds[5010]) / 100.0)
 
-    values = signal + artifact + 0.2 * rng.standard_normal(len(time))
+    time = Quantity(time_seconds, 's')
+    values = Quantity(signal + artifact + 0.2 * rng.standard_normal(len(time_seconds)), 'umol')
 
     result = extract_max_rate(time, values)
 
-    print(f'max rate: {result.max_rate:.4f} ± {result.max_rate_std:.4f} '
-          f'(true 0.0200) at t = {result.t_max_rate:.0f}')
-    print(f'cross-check: {result.max_rate_crosscheck:.4f}, flags: {result.flags}')
+    print(f"max rate: {result.max_rate.unit['umol / s']:.4f} "
+          f"± {result.max_rate_std.unit['umol / s']:.4f} umol/s "
+          f"(true 0.0200) at t = {result.t_max_rate.unit['s']:.0f} s")
+    print(f"in umol/h: {result.max_rate.unit['umol / h']:.2f}")
+    print(f"cross-check: {result.max_rate_crosscheck.unit['umol / s']:.4f}, flags: {result.flags}")
 
-    plot_max_rate(result)
+    plot_max_rate(result, time, values)
     plt.show()
 
 

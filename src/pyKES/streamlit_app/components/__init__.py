@@ -11,6 +11,7 @@ Available Components
 - render_data_upload: Configurable data upload page with file handlers
 - render_analysis_results: Analysis results visualization page
 - render_time_series: Time-series data visualization page
+- render_results_table: Tabular view of numerical analysis results
 
 Example Usage
 -------------
@@ -26,10 +27,12 @@ from .home_component import render_home
 from .data_upload_component import render_data_upload
 from .analysis_results_component import render_analysis_results
 from .time_series_component import render_time_series
+from .results_table_component import render_results_table
 
 __all__ = [
     'render_home',
     'render_data_upload',
     'render_analysis_results',
     'render_time_series',
+    'render_results_table',
 ]

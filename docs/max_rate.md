@@ -7,15 +7,44 @@ how certain are we about it?**
 
 ```python
 from pyKES.utilities.max_rate import extract_max_rate, plot_max_rate
+from pyKES.utilities.unit_handler import Quantity
 
-result = extract_max_rate(time, concentration)
+time = Quantity(time_seconds, 's')          # any unit of dimension time
+amount = Quantity(evolved_h2_umol, 'umol')  # any unit of dimension substance
 
-print(result.max_rate)       # highest sustained rate, in signal units per time unit
-print(result.max_rate_std)   # its standard deviation
-print(result.flags)          # empty list = nothing suspicious
+result = extract_max_rate(time, amount)
 
-plot_max_rate(result)        # two-panel diagnostic figure
+print(result.max_rate)                      # Quantity, dimension substance / time
+print(result.max_rate.unit['umol / h'])     # read it in whatever unit you want
+print(result.max_rate_std)                  # its standard deviation
+print(result.flags)                         # empty list = nothing suspicious
+
+plot_max_rate(result, time, amount)         # two-panel diagnostic figure
 ```
+
+## 0. Units
+
+Inputs and outputs are [`Quantity`](../src/pyKES/utilities/unit_handler/quantity.py)
+objects, so a result carries its own units and nothing depends on what the
+caller happened to record in:
+
+- **`time`** must have the dimension *time*, **`values`** the dimension
+  *substance*. Anything else (a bare NumPy array, a mass, a length) raises
+  immediately — there is no "assume seconds" fallback.
+- Optional time-valued arguments (`window`, `lengthscale_bounds`,
+  the reused `hyperparameters`) are Quantities too.
+- Internally everything is reduced to plain floats in **moles and seconds**
+  (`AMOUNT_UNIT`, `TIME_UNIT`, `RATE_UNIT` at the top of the module), which is
+  what all the formulas below operate on.
+- Every physical field of the result is wrapped back up as a `Quantity`, rates
+  in `mol / s`. Use `.unit['<unit>']` to convert; the lookup is lazy and cached.
+
+The result deliberately does **not** store the input `time` and `values`
+arrays. Results are meant to be saved next to the dataset they were computed
+from, and keeping a second copy of every series there would double the file for
+no information gain — so `plot_max_rate` takes the inputs again. The per-sample
+arrays it does keep (`smooth`, `rate`, their uncertainties, `outlier_mask`)
+exist nowhere else.
 
 It is designed for real sensor data: thousands of points per curve, different
 noise levels, induction periods, drifting baselines, and sensor artifacts such
@@ -239,28 +268,33 @@ A flag does not mean the number is wrong — it means a human should look at the
 
 | Field | Content |
 |---|---|
-| `max_rate`, `max_rate_std`, `t_max_rate` | Sustained maximum rate, its std, and the window-centre time |
-| `window` | Window length actually used (time units) |
-| `max_rate_instantaneous`, `..._std`, `t_max_rate_instantaneous` | Peak of the rate curve |
-| `max_rate_crosscheck` | Rolling-regression slope at the same window |
-| `time`, `values` | The cleaned input series |
-| `outlier_mask` | Boolean array, True where samples were masked |
-| `smooth`, `smooth_std` | Smoothed curve with uncertainty |
-| `rate`, `rate_std` | Rate curve with uncertainty |
-| `hyperparameters` | Fitted `lengthscale`, `signal_std`, `noise_std` |
-| `diagnostics` | Log-likelihood, outlier fraction, residual autocorrelation, … |
-| `flags` | Quality flags (section 6) |
+| Field | Content | Dimension |
+|---|---|---|
+| `max_rate`, `max_rate_std`, `t_max_rate` | Sustained maximum rate, its std, and the window-centre time | substance / time, time |
+| `window` | Window length actually used | time |
+| `max_rate_instantaneous`, `..._std`, `t_max_rate_instantaneous` | Peak of the rate curve | substance / time, time |
+| `max_rate_crosscheck` | Rolling-regression slope at the same window | substance / time |
+| `outlier_mask` | Boolean array, True where samples were masked | — |
+| `smooth`, `smooth_std` | Smoothed curve with uncertainty | substance |
+| `rate`, `rate_std` | Rate curve with uncertainty | substance / time |
+| `hyperparameters` | Fitted `lengthscale` (time), `signal_std`, `noise_std` (substance) | Quantities |
+| `diagnostics` | Log-likelihood, outlier fraction, residual autocorrelation (plain floats); `median_dt`, `max_rolling_slope`, `crosscheck_std` (Quantities) | mixed |
+| `flags` | Quality flags (section 6) | — |
+
+The input series is not among the fields — see section 0. Every `Quantity`
+field converts on demand, e.g. `result.rate.unit['umol / minute']` for the whole
+rate curve at once.
 
 ## 8. Parameters and batch use
 
 ```python
-extract_max_rate(time, values,
-                 window=None,             # sustained-rate window; None = auto
+extract_max_rate(time, values,           # Quantities: dimension time, substance
+                 window=None,             # Quantity (time); None = auto
                  outlier_threshold=6.0,   # jump z-score for masking
                  outlier_pad=10,          # extra masked samples around artifacts
-                 lengthscale_bounds=None, # (min, max) for the GP lengthscale
+                 lengthscale_bounds=None, # (min, max) Quantities for the GP lengthscale
                  max_fit_points=1500,     # decimation for hyperparameter fitting
-                 hyperparameters=None)    # reuse a previous fit
+                 hyperparameters=None)    # reuse a previous fit (dict of Quantities)
 ```
 
 - **`window`** is the one parameter worth thinking about (section 5).

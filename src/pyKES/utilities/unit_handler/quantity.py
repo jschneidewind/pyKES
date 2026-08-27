@@ -495,5 +495,9 @@ def test_quantity():
 
     #print(format_with_reference('kg/(J*m)', ['H2', None, 'electricity']))  # Should show 'kg[H2] / J[energy]'
 
+    temp = Quantity(25, 'degC')
+    print(temp.unit['K'])
+
+
 if __name__ == "__main__":
     test_quantity()

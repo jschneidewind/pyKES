@@ -35,7 +35,7 @@ external_repo/
 
 3. `Home.py` and the `pages/*.py` files are one-line delegations to the
    reusable pyKES components (`render_home`, `render_data_upload`,
-   `render_analysis_results`, `render_time_series`).
+   `render_analysis_results`, `render_time_series`, `render_results_table`).
 
 ## Run
 
