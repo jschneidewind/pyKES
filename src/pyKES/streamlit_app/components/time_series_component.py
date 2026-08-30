@@ -190,18 +190,6 @@ def render_time_series():
                     mode = 'lines'
                     marker = None
                     line = dict(color=exp_color, width=2)
-
-                if 'x_point' in plot_data and 'y_point' in plot_data:
-                    # Add point marker for specific points
-                    fig.add_trace(go.Scatter(
-                        x=[plot_data['x_point']],
-                        y=[plot_data['y_point']],
-                        mode='markers',
-                        marker=dict(color='red', size=8, symbol='circle'),
-                        name=f"{exp_name} - {plot_type} Point",
-                        hovertemplate=hover_template,
-                        hoverlabel=dict(font_color='red')
-                    ))
                 
                 # Add trace
                 fig.add_trace(go.Scatter(
@@ -214,6 +202,18 @@ def render_time_series():
                     hovertemplate=hover_template,
                     hoverlabel=dict(font_color=exp_color)
                 ))
+
+                if 'x_point' in plot_data and 'y_point' in plot_data:
+                    # Add point marker for specific points
+                    fig.add_trace(go.Scatter(
+                        x=[plot_data['x_point']],
+                        y=[plot_data['y_point']],
+                        mode='markers',
+                        marker=dict(color='red', size=12, symbol='circle'),
+                        name=f"{exp_name} - {plot_type} Point",
+                        hovertemplate=hover_template,
+                        hoverlabel=dict(font_color='red')
+                    ))
         
         # Update layout
         fig.update_layout(
