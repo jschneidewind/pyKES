@@ -1,20 +1,55 @@
 """Robust extraction of maximum rates from noisy kinetic time series.
 
-The pipeline runs in four stages:
+Real sensor traces carry two very different kinds of disturbance. Short
+artifacts (bubbles, spikes, level shifts) hit a handful of samples and are
+far away from everything around them. Low-frequency artifacts (thermal
+drift of the optode, stirring beats, slow baseline waves) are as smooth as
+the kinetics themselves and cannot be told apart from them sample by
+sample. A smoother that fits one length scale to the whole trace has to
+compromise between the two, and on noisy traces it settles on a length
+scale short enough to track the slow disturbance -- which then dominates
+the derivative and inflates the maximum rate.
 
-1. Artifact masking: samples corrupted by sensor artifacts (bubbles,
-   spikes, level shifts) are detected from abnormally large jumps and
-   excluded from fitting.
-2. Smoothing: a Matern-5/2 Gaussian process is fitted to the data with an
-   exact O(n) Kalman filter + RTS smoother, yielding the smoothed curve,
-   its time derivative (the rate) and uncertainties for both.
-3. Rate extraction: the headline number is the largest rate sustained over
-   a time window, read from the smoothed curve. Short artifacts can have
-   instantaneous slopes an order of magnitude above the true kinetic rate,
-   so the sustained-window definition is what makes the result robust.
-4. Cross-checking: a rolling linear regression of the raw data provides a
-   smoothing-free second opinion, and automatic quality flags mark curves
-   that need human review.
+The pipeline therefore separates the two disturbances by *structure*
+rather than by amplitude:
+
+1. Noise characterization: a robust second-difference variogram measures
+   how much of the scatter is uncorrelated (white) and how much is
+   correlated, and over what time the correlated part decorrelates. Being
+   a median statistic on a trend-free quantity, it is not misled by the
+   kinetics and not moved by the occasional artifact.
+2. Smoothing: the data are modelled as the sum of a slow kinetic component
+   (Matern-5/2), a stationary nuisance component pinned to what stage 1
+   measured (Matern-3/2) and white noise, fitted by exact O(n) Kalman
+   filtering and RTS smoothing. Recurring low-frequency structure then has
+   an explanation that costs the kinetic component nothing, so the kinetic
+   length scale stays long and the reported rate is the derivative of the
+   kinetic component alone.
+3. Excursion rejection: every sample is predicted twice, once from the data
+   well before it and once from the data well after it. Where the data
+   disagree with both predictions while the two agree with each other, the
+   trace has left its own curve and come back -- a bubble. Across a genuine
+   transition the two sides disagree instead, and nothing is rejected. The
+   model is then refitted without the excursions, which matters because a
+   single bubble is enough to pull the kinetic length scale down to its own
+   width.
+4. Robust reweighting: two IRLS passes inflate the observation variance of
+   whatever the fit still does not explain. Nothing is deleted outright, so
+   a sharp but genuine feature can never be cut out of the series the way
+   hard masking cuts it.
+5. Rate extraction: the headline number is the largest rate sustained over
+   a time window, read from the kinetic component.
+6. Cross-checking: a rolling weighted regression of the raw data provides
+   a smoothing-free second opinion, and automatic quality flags mark
+   curves that need human review.
+
+The modelling assumption behind stages 2 and 3 is that the kinetics are the
+slowest structure in the trace: a one-off sharp transition (onset,
+light-off) is kinetic and must survive, but structure that *recurs* on a
+time scale shorter than the overall rise and decay is instrumental. The
+nuisance component is deliberately generic -- a short-correlation-time
+Matern process, not an oscillator -- so it absorbs any low-frequency
+disturbance, periodic or not.
 
 See docs/max_rate.md for a detailed explanation of every stage.
 
@@ -37,8 +72,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 import numpy as np
-from scipy.ndimage import binary_dilation, median_filter
-from scipy.optimize import minimize
+from scipy.ndimage import median_filter
+from scipy.optimize import least_squares, minimize
 
 from pyKES.utilities.unit_handler import Quantity
 
@@ -51,41 +86,64 @@ RATE_UNIT = 'mol / s'
 
 # --- Statistical conversion factors ----------------------------------------
 MAD_TO_STD = 1.4826                  # median absolute deviation -> standard deviation (Gaussian)
-STATE_DIMENSION = 3                  # Matern-5/2 state: (value, first derivative, second derivative)
+SIGNAL_STATE_DIMENSION = 3           # Matern-5/2 state: (value, first derivative, second derivative)
+NUISANCE_STATE_DIMENSION = 2         # Matern-3/2 state: (value, first derivative)
+STATE_DIMENSION = SIGNAL_STATE_DIMENSION + NUISANCE_STATE_DIMENSION
 
-# --- Artifact detection ------------------------------------------------------
-JUMP_DETECTION_LAGS = (1, 5)         # sample lags at which increments are tested for jumps
-TREND_WINDOW_MAX_SAMPLES = 101       # rolling-median window for the local kinetic trend
-NOISE_WINDOW_MAX_SAMPLES = 601       # rolling-median window for the local noise level
-GLOBAL_NOISE_FLOOR_FRACTION = 0.5    # local noise level may not drop below this fraction of the global one
-MAX_MASKED_FRACTION = 0.5            # if detection would mask more than this, assume it misfired
+# --- Noise characterization (robust variogram) -------------------------------
+VARIOGRAM_LAG_COUNT = 24             # log-spaced lags probed by the variogram
+VARIOGRAM_MAX_LAG_FRACTION = 0.05    # longest lag, as a fraction of the series duration
+VARIOGRAM_MIN_SAMPLES = 40           # a lag is only used if this many differences remain
+CORRELATED_NOISE_SIGNIFICANCE = 0.1  # correlated noise below this variance ratio counts as absent
+NUISANCE_MIN_LENGTHSCALE_STEPS = 3.0 # a nuisance decorrelating faster than this is just white noise
+NUISANCE_ABSENT_FRACTION = 1e-3      # residual nuisance amplitude, as a fraction of the white noise
+# A nuisance allowed to decorrelate slowly stops being distinguishable from
+# kinetics and starts absorbing the curvature of the reaction curve itself.
+# Measured instrument disturbances sit an order of magnitude below this cap.
+NUISANCE_LENGTHSCALE_MAX_FRACTION = 0.02
 
-# --- Transient (bubble) mask growth -----------------------------------------
-TRANSIENT_ZSCORE_FACTOR = 2.0        # only jumps this many times above threshold start mask growth
-TRANSIENT_RETURN_TOLERANCE_STD = 4.0 # signal counts as "back on trend" within this many noise stds
-TRANSIENT_OFFSET_GATE_STD = 8.0      # growth only starts if the far side is offset by at least this
-TRANSIENT_SETTLED_SAMPLES = 5        # consecutive on-trend samples that end a transient
-TRANSIENT_GROWTH_CAP_SAMPLES = 300   # minimum growth range; scales up with series length
-ANCHOR_FIT_SAMPLES = 200             # samples used to fit the extrapolation line before a transient
-ANCHOR_FIT_MIN_SAMPLES = 20          # minimum samples for that fit
-
-# --- Rate windows and hyperparameter defaults -------------------------------
-WINDOW_MEDIAN_STEPS = 25             # default window: at least this many median time steps ...
-WINDOW_SPAN_FRACTION = 0.02          # ... and at least this fraction of the series duration
-LENGTHSCALE_MIN_STEPS = 20           # lengthscale floor in median time steps (guards against noise fitting)
+# --- Gaussian-process model --------------------------------------------------
+KINETIC_SEPARATION_FACTOR = 2.0      # kinetic length scale floor, in nuisance correlation times
+NUISANCE_AMPLITUDE_FRACTION = 0.5    # nuisance std may not exceed this fraction of the trace's robust spread
+LENGTHSCALE_MIN_STEPS = 20           # length scale floor in median time steps (guards against noise fitting)
 LENGTHSCALE_MIN_SPAN_FRACTION = 0.002
 LENGTHSCALE_MAX_SPAN_FRACTION = 0.5
+
+# --- Robust reweighting ------------------------------------------------------
+ROBUST_PASSES = 2                    # IRLS refits after the first smoothing pass
+ROBUST_WEIGHT_FLOOR = 1e-4           # smallest weight, i.e. largest variance inflation
+GROSS_OUTLIER_THRESHOLD = 8.0        # pre-fit rejection of spikes, in robust stds of a median-filter residual
+GROSS_OUTLIER_WINDOW_STEPS = 11      # width of that median filter, in samples
+OUTLIER_WEIGHT_THRESHOLD = 0.5       # weights below this are reported in `outlier_mask`
+
+# --- Excursion rejection (two-sided predictive test) -------------------------
+ARTIFACT_GAP_FRACTION = 0.02         # blind gap of the two-sided predictive test, as a fraction of the duration
+ARTIFACT_GAP_MIN_STEPS = 15          # ... and at least this many time steps
+ARTIFACT_GAP_NUISANCE_FACTOR = 3.0   # ... and this many nuisance correlation times
+ARTIFACT_GAP_MAX_FRACTION = 0.2      # the gap may never exceed this fraction of the samples
+ARTIFACT_STIFFNESS_FACTOR = 8.0      # the reference curve must be this much smoother than the gap is wide
+ARTIFACT_PASSES = 2                  # repeats of the two-sided test; each one cleans the filter it uses
+ARTIFACT_GROWTH_CAP_FACTOR = 5.0     # an excursion may be grown this many gaps before it counts as permanent
+ARTIFACT_RETURN_TOLERANCE = 1.0      # growth stops once the deviation is back within this many stds
+ARTIFACT_SETTLED_SAMPLES = 5         # ... for this many consecutive samples
+
+# --- Rate windows ------------------------------------------------------------
+WINDOW_MEDIAN_STEPS = 25             # default window: at least this many median time steps ...
+WINDOW_SPAN_FRACTION = 0.02          # ... and at least this fraction of the series duration ...
+WINDOW_MAX_SPAN_FRACTION = 0.1       # ... but never more than this fraction of it
 MIN_WINDOW_POINTS = 10               # rolling regression needs at least this many points per window
-MIN_UNMASKED_WINDOW_FRACTION = 0.5   # windows with less unmasked data than this are not trusted
+MIN_WINDOW_WEIGHT_FRACTION = 0.5     # windows with less effective weight than this are not trusted
 
 # --- Quality-flag thresholds -------------------------------------------------
 HIGH_UNCERTAINTY_FRACTION = 0.5      # flag if the uncertainty exceeds this fraction of the max rate
-OUTLIER_FRACTION_WARNING = 0.05      # flag if more than this fraction of samples was masked
+OUTLIER_FRACTION_WARNING = 0.05      # flag if more than this fraction of samples was downweighted
 DISAGREEMENT_RELATIVE = 0.2          # estimators must differ by more than this fraction ...
 DISAGREEMENT_SIGMA = 3.0             # ... and this many combined standard deviations to flag
 INSTANTANEOUS_SPIKE_FACTOR = 3.0     # flag if the instantaneous max exceeds this multiple of the windowed max
+CORRELATED_NOISE_RATE_FRACTION = 1.0 # flag if the nuisance slope scale reaches this fraction of the max rate
+SIGNIFICANCE_SIGMA = 3.0             # flag if the max rate is not this many stds above zero
 RESIDUAL_AUTOCORRELATION_WARNING = 0.9
-LENGTHSCALE_BOUND_FACTOR = 2.0       # flag if the lengthscale sits within this factor of its lower bound
+LENGTHSCALE_BOUND_FACTOR = 1.05      # flag if the length scale sits within this factor of its lower bound
 
 
 def quantity_magnitude(quantity, unit, name):
@@ -113,9 +171,36 @@ def quantity_magnitude(quantity, unit, name):
     return quantity.unit[unit]
 
 
+def robust_scale(values):
+    """
+    Median-absolute-deviation estimate of a standard deviation.
+
+    Parameters
+    ----------
+    values : ndarray
+        Sample of a roughly zero-centred quantity.
+
+    Returns
+    -------
+    float
+        Robust standard deviation; zero for a constant input.
+    """
+    return float(MAD_TO_STD * np.median(np.abs(values - np.median(values))))
+
+
 def resolve_window(window, median_time_step, duration):
     """
     Resolve the sustained-rate window to a length in seconds.
+
+    The default is a fraction of the duration, held above a minimum number of
+    samples and below a maximum fraction of the run. The sample floor and the
+    duration cap cross at exactly
+    ``WINDOW_MEDIAN_STEPS / WINDOW_MAX_SPAN_FRACTION`` samples, so the rule is
+    continuous: on longer series the cap never binds and the window is
+    sampling-limited as before, while on shorter ones it is the duration that
+    sets it. Without the cap a coarsely sampled short run gets a window a third
+    of the experiment wide, which averages the maximum together with whatever
+    follows it.
 
     Parameters
     ----------
@@ -132,37 +217,52 @@ def resolve_window(window, median_time_step, duration):
         Window length in seconds.
     """
     if window is None:
-        return max(WINDOW_MEDIAN_STEPS * median_time_step, WINDOW_SPAN_FRACTION * duration)
+        return min(max(WINDOW_MEDIAN_STEPS * median_time_step,
+                       WINDOW_SPAN_FRACTION * duration),
+                   WINDOW_MAX_SPAN_FRACTION * duration)
 
     return float(quantity_magnitude(window, TIME_UNIT, 'window'))
 
 
-def resolve_lengthscale_bounds(lengthscale_bounds, median_time_step, duration):
+def resolve_lengthscale_bounds(lengthscale_bounds, median_time_step, duration,
+                               nuisance_lengthscale):
     """
-    Resolve the Gaussian-process lengthscale bounds to seconds.
+    Resolve the bounds of the kinetic Gaussian-process length scale, in seconds.
+
+    The lower bound is what keeps the kinetic component from tracking
+    correlated noise: it is raised to a multiple of the measured nuisance
+    correlation time whenever that is the stronger constraint. On traces
+    with white noise only, the nuisance correlation time collapses to about
+    one time step and the bound reduces to the sampling-based default.
 
     Parameters
     ----------
     lengthscale_bounds : tuple of Quantity or None
-        (lower, upper) bounds with dimension time; the default is used when None.
+        (lower, upper) bounds with dimension time. When given, they are used
+        verbatim and the nuisance-derived floor is not applied.
     median_time_step : float
         Median time step of the series, in seconds.
     duration : float
         Total duration of the series, in seconds.
+    nuisance_lengthscale : float
+        Correlation time of the correlated noise, in seconds.
 
     Returns
     -------
     tuple of float
         (lower, upper) bounds in seconds.
     """
-    if lengthscale_bounds is None:
-        return (max(LENGTHSCALE_MIN_STEPS * median_time_step,
-                    LENGTHSCALE_MIN_SPAN_FRACTION * duration),
-                LENGTHSCALE_MAX_SPAN_FRACTION * duration)
+    if lengthscale_bounds is not None:
+        lower, upper = lengthscale_bounds
+        return (float(quantity_magnitude(lower, TIME_UNIT, 'lengthscale_bounds')),
+                float(quantity_magnitude(upper, TIME_UNIT, 'lengthscale_bounds')))
 
-    lower, upper = lengthscale_bounds
-    return (float(quantity_magnitude(lower, TIME_UNIT, 'lengthscale_bounds')),
-            float(quantity_magnitude(upper, TIME_UNIT, 'lengthscale_bounds')))
+    lower = max(LENGTHSCALE_MIN_STEPS * median_time_step,
+                LENGTHSCALE_MIN_SPAN_FRACTION * duration,
+                KINETIC_SEPARATION_FACTOR * nuisance_lengthscale)
+    upper = LENGTHSCALE_MAX_SPAN_FRACTION * duration
+
+    return (min(lower, 0.5 * upper), upper)
 
 
 def hyperparameter_magnitudes(hyperparameters):
@@ -175,21 +275,19 @@ def hyperparameter_magnitudes(hyperparameters):
     Parameters
     ----------
     hyperparameters : dict of Quantity
-        ``lengthscale`` (time), ``signal_std`` and ``noise_std`` (substance).
+        ``lengthscale`` and ``nuisance_lengthscale`` (time), ``signal_std``,
+        ``nuisance_std`` and ``noise_std`` (substance).
 
     Returns
     -------
     dict of float
         The same entries in seconds and moles.
     """
-    return {
-        'lengthscale': float(quantity_magnitude(hyperparameters['lengthscale'], TIME_UNIT,
-                                                'lengthscale')),
-        'signal_std': float(quantity_magnitude(hyperparameters['signal_std'], AMOUNT_UNIT,
-                                               'signal_std')),
-        'noise_std': float(quantity_magnitude(hyperparameters['noise_std'], AMOUNT_UNIT,
-                                              'noise_std')),
-    }
+    units = {'lengthscale': TIME_UNIT, 'nuisance_lengthscale': TIME_UNIT,
+             'signal_std': AMOUNT_UNIT, 'nuisance_std': AMOUNT_UNIT, 'noise_std': AMOUNT_UNIT}
+
+    return {name: float(quantity_magnitude(hyperparameters[name], unit, name))
+            for name, unit in units.items()}
 
 
 def validate_time_series(time, values):
@@ -233,175 +331,195 @@ def validate_time_series(time, values):
     return time, values
 
 
-def detect_artifacts(values, jump_threshold, mask_padding):
+def matern32_correlation(lag, lengthscale):
     """
-    Build a boolean mask of samples corrupted by sensor artifacts.
-
-    At dense sampling, genuine kinetics change the signal by much less than
-    the noise level per sample, while bubbles and spikes change it by many
-    robust standard deviations within a few samples. Increments are
-    therefore tested against the local trend at several lags, so that both
-    single-sample spikes and jumps spread over a handful of samples (each
-    step individually below threshold) are caught. Gross jumps additionally
-    trigger `grow_transient_mask`, which masks the slowly relaxing tail of
-    a bubble transient.
+    Correlation function of a Matern-3/2 process.
 
     Parameters
     ----------
-    values : ndarray
-        Measured values.
-    jump_threshold : float
-        Robust z-score above which an increment is flagged as a jump.
-    mask_padding : int
-        Extra samples masked on each side of every detected artifact.
+    lag : ndarray
+        Time separations.
+    lengthscale : float
+        Correlation length scale.
 
     Returns
     -------
-    ndarray of bool
-        True for samples to exclude from fitting.
+    ndarray
+        Correlation at each lag.
+    """
+    scaled_lag = np.sqrt(3.0) * np.abs(lag) / lengthscale
+
+    return (1.0 + scaled_lag) * np.exp(-scaled_lag)
+
+
+def second_difference_variogram(time, values):
+    """
+    Measure the scatter of second differences over a range of lags.
+
+    The second difference ``y(t + h) - 2 y(t) + y(t - h)`` annihilates any
+    linear trend, so at short lags it sees only noise; a robust (median
+    based) scale keeps spikes and one-off steps from dominating. The way
+    that scale grows with the lag is the fingerprint that separates white
+    from correlated noise: white noise gives a flat variogram, correlated
+    noise a curve that rises until the lag exceeds its correlation time.
+
+    Parameters
+    ----------
+    time, values : ndarray
+        Sample times and values.
+
+    Returns
+    -------
+    tuple of ndarray
+        Lags in time units and the robust variance of the second
+        differences at each lag.
     """
     number_of_samples = len(values)
-    differences = np.diff(values)
+    median_time_step = float(np.median(np.diff(time)))
 
-    # Windows scale with series length so that short or coarsely sampled
-    # series keep them narrow enough to track genuine curvature.
-    trend_window = min(TREND_WINDOW_MAX_SAMPLES, max(11, number_of_samples // 20) | 1, len(differences))
-    noise_window = min(NOISE_WINDOW_MAX_SAMPLES, max(31, number_of_samples // 4) | 1)
+    max_lag = min(int(VARIOGRAM_MAX_LAG_FRACTION * (time[-1] - time[0]) / median_time_step),
+                  (number_of_samples - VARIOGRAM_MIN_SAMPLES) // 2)
+    if max_lag < 2:
+        return np.array([median_time_step]), np.array([robust_scale(np.diff(values)) ** 2 * 3.0])
 
-    trend = median_filter(differences, size=trend_window, mode='nearest')
-    cumulative_trend = np.concatenate([[0.0], np.cumsum(trend)])
-    noise_std = MAD_TO_STD * np.median(np.abs(differences - trend)) / np.sqrt(2.0)
+    lag_steps = np.unique(np.geomspace(1, max_lag, VARIOGRAM_LAG_COUNT).astype(int))
 
-    mask = np.zeros(number_of_samples, dtype=bool)
-    jump_zscores = np.zeros(number_of_samples)
+    variances = np.array([robust_scale(values[2 * lag:] - 2.0 * values[lag:-lag]
+                                       + values[:-2 * lag]) ** 2
+                          for lag in lag_steps])
 
-    for lag in JUMP_DETECTION_LAGS:
-        if lag >= number_of_samples:
-            break
-
-        # Increment over `lag` samples, minus the increment the local kinetic trend predicts
-        increments = (values[lag:] - values[:-lag]) - (cumulative_trend[lag:] - cumulative_trend[:-lag])
-
-        local_noise = MAD_TO_STD * median_filter(np.abs(increments), size=min(noise_window, len(increments)),
-                                                 mode='nearest')
-        global_noise = MAD_TO_STD * np.median(np.abs(increments))
-        noise_level = np.maximum(np.maximum(local_noise, GLOBAL_NOISE_FLOOR_FRACTION * global_noise),
-                                 np.finfo(float).tiny)
-
-        zscores = np.abs(increments) / noise_level
-        np.maximum(jump_zscores[:-lag], zscores, out=jump_zscores[:-lag])
-
-        # Mask both endpoints of every flagged increment, plus lag samples of margin
-        jump_starts = np.zeros(number_of_samples, dtype=bool)
-        jump_starts[:-lag][zscores > jump_threshold] = True
-        mask |= binary_dilation(jump_starts, structure=np.ones(2 * lag + 1, dtype=bool))
-
-    if mask.any():
-        # Only gross jumps mark true transients; marginally flagged samples
-        # (e.g. at a sharp kinetic onset) stay point-masked without growth.
-        mask = grow_transient_mask(values, mask, noise_std, jump_zscores,
-                                   TRANSIENT_ZSCORE_FACTOR * jump_threshold)
-
-    if mask_padding > 0 and mask.any():
-        mask = binary_dilation(mask, iterations=mask_padding)
-
-    # Never mask most of the series; fall back to no masking if detection misfires
-    if mask.sum() > MAX_MASKED_FRACTION * number_of_samples:
-        return np.zeros(number_of_samples, dtype=bool)
-
-    return mask
+    return lag_steps * median_time_step, variances
 
 
-def grow_transient_mask(values, mask, noise_std, jump_zscores, gross_jump_threshold):
+def variogram_residuals(log_parameters, lags, variances):
     """
-    Extend masked jumps over the full extent of each bubble-like transient.
+    Log-space residuals of the noise model against a measured variogram.
 
-    Bubble artifacts start with an abrupt jump but relax back to the curve
-    slowly; the relaxation tail looks locally smooth and survives jump
-    detection. For each masked run that starts with a gross jump and whose
-    far side is still clearly offset from the trend line extrapolated from
-    before the jump, samples stay masked until the signal returns to that
-    trend line. Growth that never finds its way back is reverted: a
-    deviation that persists is a genuine kinetic regime change (onset,
-    light-off), not a transient artifact. Growth runs forward only, because
-    the clean anchor is always on the near side of an abrupt jump;
-    extrapolating backwards from the far side can cross the true curve and
-    fake a "return to trend" at a genuine sharp onset.
+    The model is white noise plus a Matern-3/2 correlated component plus the
+    curvature of the underlying kinetics, which enters the second difference
+    as ``f'' h**2`` and therefore contributes a term growing with the fourth
+    power of the lag.
+
+    Parameters
+    ----------
+    log_parameters : ndarray
+        Logarithms of (white variance, correlated variance, correlation time,
+        curvature coefficient).
+    lags : ndarray
+        Lags of the measured variogram.
+    variances : ndarray
+        Measured second-difference variances.
+
+    Returns
+    -------
+    ndarray
+        Differences of logarithms, one per lag.
+    """
+    white_variance, correlated_variance, lengthscale, curvature = np.exp(log_parameters)
+
+    model = (6.0 * white_variance
+             + correlated_variance * (6.0 - 8.0 * matern32_correlation(lags, lengthscale)
+                                      + 2.0 * matern32_correlation(2.0 * lags, lengthscale))
+             + curvature * lags ** 4)
+
+    return np.log(model) - np.log(variances)
+
+
+def estimate_noise_structure(time, values):
+    """
+    Split the scatter of a trace into a white and a correlated component.
+
+    Fits the variogram model of `variogram_residuals` to the measured
+    second-difference variogram. The correlated component survives only if it
+    is actually resolvable: it has to carry a meaningful share of the variance
+    *and* decorrelate slowly enough to be told apart from white noise at this
+    sampling. Otherwise it is folded into the white noise, which switches the
+    nuisance component of the Gaussian process off in all but name.
+
+    Parameters
+    ----------
+    time, values : ndarray
+        Sample times and values.
+
+    Returns
+    -------
+    dict
+        ``white_std``, ``correlated_std`` and ``correlated_lengthscale``.
+    """
+    median_time_step = float(np.median(np.diff(time)))
+    lags, variances = second_difference_variogram(time, values)
+
+    white_variance_initial = max(variances[0] / 6.0, np.finfo(float).tiny)
+    correlated_variance_initial = max(variances.max() / 6.0 - white_variance_initial,
+                                      0.01 * white_variance_initial)
+    lengthscale_initial = float(np.sqrt(lags[0] * lags[-1]))
+    curvature_initial = variances[-1] / lags[-1] ** 4
+
+    lengthscale_upper = max(NUISANCE_LENGTHSCALE_MAX_FRACTION * (time[-1] - time[0]),
+                            2.0 * median_time_step)
+    bounds = (np.log([1e-6 * white_variance_initial, 1e-6 * correlated_variance_initial,
+                      median_time_step, 1e-12 * curvature_initial]),
+              np.log([1e3 * white_variance_initial, 1e4 * correlated_variance_initial,
+                      lengthscale_upper, 1e6 * curvature_initial]))
+    initial_guess = np.clip(np.log([white_variance_initial, correlated_variance_initial,
+                                    lengthscale_initial, curvature_initial]), *bounds)
+
+    fit = least_squares(variogram_residuals, initial_guess, args=(lags, variances), bounds=bounds)
+    white_variance, correlated_variance, lengthscale, _ = np.exp(fit.x)
+
+    # A correlated component carrying too little variance to resolve, or one
+    # that decorrelates within a few samples, is indistinguishable from white
+    # noise at this sampling; calling it white is the identifiable choice.
+    # Keeping its amplitude as a nuisance instead would hand the fit a state
+    # one or two samples wide that interpolates the measurement noise point by
+    # point, leaving residuals -- and with them the scale the robust
+    # reweighting calibrates against -- near zero. A short, coarsely sampled
+    # series lands here, because its variogram has too few lags to separate
+    # the two components at all.
+    unresolved = (correlated_variance < CORRELATED_NOISE_SIGNIFICANCE * white_variance
+                  or lengthscale < NUISANCE_MIN_LENGTHSCALE_STEPS * median_time_step)
+    if unresolved:
+        white_variance += correlated_variance
+        # Not zero: a nuisance block with no prior variance is singular and
+        # the smoother cannot solve through it.
+        correlated_variance = NUISANCE_ABSENT_FRACTION ** 2 * white_variance
+        lengthscale = median_time_step
+
+    return {'white_std': float(np.sqrt(white_variance)),
+            'correlated_std': float(np.sqrt(correlated_variance)),
+            'correlated_lengthscale': float(lengthscale)}
+
+
+def gross_outlier_weights(values, noise_std):
+    """
+    Pre-fit weights that reject only spikes far away from their neighbours.
+
+    A short median filter follows any kinetics and any low-frequency
+    disturbance, so what remains in its residual is spikes. The threshold is
+    deliberately loose: this stage only keeps gross outliers from distorting
+    the hyperparameter fit, and the IRLS passes afterwards do the actual
+    downweighting from the fitted model.
 
     Parameters
     ----------
     values : ndarray
         Measured values.
-    mask : ndarray of bool
-        Initial jump mask (a grown copy is returned).
     noise_std : float
-        Robust per-sample noise standard deviation.
-    jump_zscores : ndarray
-        Per-sample robust z-score of the detrended increments.
-    gross_jump_threshold : float
-        Minimum z-score within a masked run for it to be treated as a transient.
+        White-noise standard deviation from `estimate_noise_structure`.
 
     Returns
     -------
-    ndarray of bool
-        The grown mask.
+    ndarray
+        Weight per sample, either one or `ROBUST_WEIGHT_FLOOR`.
     """
-    number_of_samples = len(values)
-    growth_cap = max(TRANSIENT_GROWTH_CAP_SAMPLES, number_of_samples // 20)
-    noise_std = max(noise_std, np.finfo(float).tiny)
-    return_tolerance = TRANSIENT_RETURN_TOLERANCE_STD * noise_std
-    offset_gate = TRANSIENT_OFFSET_GATE_STD * noise_std
+    window = min(GROSS_OUTLIER_WINDOW_STEPS, len(values) // 4 | 1)
+    residuals = values - median_filter(values, size=window, mode='nearest')
 
-    mask = mask.copy()
-    run_edges = np.diff(np.concatenate([[0], mask.astype(np.int8), [0]]))
-    run_starts = np.nonzero(run_edges == 1)[0]
-    run_stops = np.nonzero(run_edges == -1)[0]
+    scale = max(robust_scale(residuals), noise_std, np.finfo(float).tiny)
+    weights = np.ones(len(values))
+    weights[np.abs(residuals) > GROSS_OUTLIER_THRESHOLD * scale] = ROBUST_WEIGHT_FLOOR
 
-    for run_start, run_stop in zip(run_starts, run_stops):
-        if np.max(jump_zscores[run_start:run_stop]) < gross_jump_threshold:
-            continue
-
-        anchor = run_start - 1
-        if anchor < 0 or mask[anchor]:
-            continue
-
-        # Extrapolating hundreds of samples within a few noise standard
-        # deviations needs a precise slope: fit a line to the unmasked
-        # samples preceding the anchor.
-        fit_indices = np.arange(max(0, anchor - ANCHOR_FIT_SAMPLES + 1), anchor + 1)
-        fit_indices = fit_indices[~mask[fit_indices]]
-        if len(fit_indices) < ANCHOR_FIT_MIN_SAMPLES:
-            continue
-        slope, intercept = np.polyfit(fit_indices - anchor, values[fit_indices], 1)
-
-        # No persistent offset after the run means the transient already
-        # recovered (or was a pure spike); nothing to grow
-        predicted_at_stop = intercept + slope * (run_stop - anchor)
-        if abs(values[run_stop] - predicted_at_stop) < offset_gate:
-            continue
-
-        # Scan the samples after the run: the transient ends at the first
-        # occurrence of enough consecutive samples back on the trend line
-        tail_indices = np.arange(run_stop, min(number_of_samples, run_stop + growth_cap))
-        predicted_tail = intercept + slope * (tail_indices - anchor)
-        on_trend = np.abs(values[tail_indices] - predicted_tail) <= return_tolerance
-
-        settled_counts = np.convolve(on_trend.astype(int), np.ones(TRANSIENT_SETTLED_SAMPLES, dtype=int),
-                                     mode='valid')
-        settled_positions = np.nonzero(settled_counts == TRANSIENT_SETTLED_SAMPLES)[0]
-
-        if len(settled_positions) == 0:
-            # The signal never returns to the trend line: the gross jump is a
-            # genuine regime change (onset, light-off), not a transient. Any
-            # marginal jump flags in the scanned range are then collateral of
-            # the same sharp feature, so unmask them.
-            marginal = tail_indices[jump_zscores[tail_indices] < gross_jump_threshold]
-            mask[marginal] = False
-            continue
-
-        mask[tail_indices[:settled_positions[0]]] = True
-
-    return mask
+    return weights
 
 
 def matern52_state_space_matrices(time_steps, lengthscale, signal_variance):
@@ -419,7 +537,7 @@ def matern52_state_space_matrices(time_steps, lengthscale, signal_variance):
     time_steps : ndarray
         Time differences between consecutive samples.
     lengthscale : float
-        Kernel lengthscale (how quickly the underlying curve can change).
+        Kernel length scale (how quickly the underlying curve can change).
     signal_variance : float
         Kernel variance (how far the curve can wander from its mean).
 
@@ -447,10 +565,11 @@ def matern52_state_space_matrices(time_steps, lengthscale, signal_variance):
     # The feedback matrix has the triple eigenvalue -decay_rate, so
     # (feedback + decay_rate * I) is nilpotent and the matrix exponential
     # truncates exactly after the quadratic term.
-    nilpotent_part = feedback + decay_rate * np.eye(STATE_DIMENSION)
+    nilpotent_part = feedback + decay_rate * np.eye(SIGNAL_STATE_DIMENSION)
     nilpotent_steps = nilpotent_part[None, :, :] * time_steps[:, None, None]
     transitions = np.exp(-decay_rate * time_steps)[:, None, None] * (
-        np.eye(STATE_DIMENSION)[None] + nilpotent_steps + 0.5 * (nilpotent_steps @ nilpotent_steps))
+        np.eye(SIGNAL_STATE_DIMENSION)[None] + nilpotent_steps
+        + 0.5 * (nilpotent_steps @ nilpotent_steps))
 
     process_noises = stationary_covariance[None] - \
         transitions @ stationary_covariance[None] @ np.transpose(transitions, (0, 2, 1))
@@ -458,29 +577,123 @@ def matern52_state_space_matrices(time_steps, lengthscale, signal_variance):
     return transitions, process_noises, stationary_covariance
 
 
-def run_kalman_filter(values_centered, transitions, process_noises, stationary_covariance,
-                      noise_variance, mask):
+def matern32_state_space_matrices(time_steps, lengthscale, signal_variance):
     """
-    Run the forward Kalman filter, observing the first state component.
+    Build the discrete-time state-space representation of a Matern-3/2 Gaussian process.
 
-    Masked samples are treated as missing: the state is propagated but not
-    updated, so the filter simply bridges over them.
+    The two-dimensional analogue of `matern52_state_space_matrices`; its
+    state holds the function value and its first derivative. Matern-3/2 is
+    used for the nuisance component because it is rougher than Matern-5/2
+    and therefore a better catch-all for whatever low-frequency disturbance
+    the instrument adds.
+
+    Parameters
+    ----------
+    time_steps : ndarray
+        Time differences between consecutive samples.
+    lengthscale : float
+        Kernel length scale.
+    signal_variance : float
+        Kernel variance.
+
+    Returns
+    -------
+    tuple
+        Transition matrices, process noise covariances and the stationary
+        covariance, shaped as in `matern52_state_space_matrices`.
+    """
+    decay_rate = np.sqrt(3.0) / lengthscale
+
+    stationary_covariance = np.array([[signal_variance, 0.0],
+                                      [0.0, signal_variance * decay_rate ** 2]])
+
+    # (feedback + decay_rate * I) squares to zero here, so the exponential
+    # truncates after the linear term.
+    nilpotent_part = np.array([[decay_rate, 1.0], [-decay_rate ** 2, -decay_rate]])
+    transitions = np.exp(-decay_rate * time_steps)[:, None, None] * (
+        np.eye(NUISANCE_STATE_DIMENSION)[None] + nilpotent_part[None] * time_steps[:, None, None])
+
+    process_noises = stationary_covariance[None] - \
+        transitions @ stationary_covariance[None] @ np.transpose(transitions, (0, 2, 1))
+
+    return transitions, process_noises, stationary_covariance
+
+
+def combined_state_space_matrices(time_steps, hyperparameters):
+    """
+    Stack the kinetic and nuisance state spaces into one block-diagonal model.
+
+    The two components are independent a priori, so their transition and
+    process-noise matrices simply sit in separate blocks; only the
+    observation couples them, because the sensor sees their sum.
+
+    Parameters
+    ----------
+    time_steps : ndarray
+        Time differences between consecutive samples.
+    hyperparameters : dict of float
+        ``lengthscale``, ``signal_std``, ``nuisance_lengthscale`` and
+        ``nuisance_std``.
+
+    Returns
+    -------
+    tuple
+        Transition matrices, process noise covariances and the stationary
+        covariance of the combined 5-dimensional state.
+    """
+    signal_transitions, signal_noises, signal_stationary = matern52_state_space_matrices(
+        time_steps, hyperparameters['lengthscale'], hyperparameters['signal_std'] ** 2)
+    nuisance_transitions, nuisance_noises, nuisance_stationary = matern32_state_space_matrices(
+        time_steps, hyperparameters['nuisance_lengthscale'], hyperparameters['nuisance_std'] ** 2)
+
+    number_of_steps = len(time_steps)
+    transitions = np.zeros((number_of_steps, STATE_DIMENSION, STATE_DIMENSION))
+    process_noises = np.zeros_like(transitions)
+    stationary_covariance = np.zeros((STATE_DIMENSION, STATE_DIMENSION))
+
+    signal_block = slice(0, SIGNAL_STATE_DIMENSION)
+    nuisance_block = slice(SIGNAL_STATE_DIMENSION, STATE_DIMENSION)
+
+    transitions[:, signal_block, signal_block] = signal_transitions
+    transitions[:, nuisance_block, nuisance_block] = nuisance_transitions
+    process_noises[:, signal_block, signal_block] = signal_noises
+    process_noises[:, nuisance_block, nuisance_block] = nuisance_noises
+    stationary_covariance[signal_block, signal_block] = signal_stationary
+    stationary_covariance[nuisance_block, nuisance_block] = nuisance_stationary
+
+    return transitions, process_noises, stationary_covariance
+
+
+# The sensor observes the sum of the kinetic and the nuisance value, i.e. the
+# two value components of the combined state.
+KINETIC_VALUE_INDEX = 0
+KINETIC_RATE_INDEX = 1
+NUISANCE_VALUE_INDEX = SIGNAL_STATE_DIMENSION
+
+
+def run_kalman_filter(values_centered, transitions, process_noises, stationary_covariance,
+                      noise_variances):
+    """
+    Run the forward Kalman filter over the combined state.
+
+    Every sample is used; suspect samples enter with an inflated observation
+    variance rather than being skipped, which keeps the filter well
+    conditioned and avoids the unsupported bridges that hard masking leaves
+    behind.
 
     Parameters
     ----------
     values_centered : ndarray
         Mean-subtracted observations.
     transitions, process_noises, stationary_covariance : ndarray
-        Output of `matern52_state_space_matrices`.
-    noise_variance : float
-        Observation noise variance.
-    mask : ndarray of bool
-        True for observations to skip.
+        Output of `combined_state_space_matrices`.
+    noise_variances : ndarray
+        Observation noise variance per sample.
 
     Returns
     -------
     tuple
-        - log_likelihood : float, marginal log-likelihood of the unmasked observations.
+        - log_likelihood : float, marginal log-likelihood of the observations.
         - filtered_means, filtered_covariances : ndarray, state estimates after each update.
         - predicted_means, predicted_covariances : ndarray, one-step-ahead state estimates.
     """
@@ -505,19 +718,24 @@ def run_kalman_filter(values_centered, transitions, process_noises, stationary_c
         predicted_means[sample] = state_mean
         predicted_covariances[sample] = state_covariance
 
-        # Update with the observation (first state component is the curve value)
-        if not mask[sample]:
-            innovation_variance = state_covariance[0, 0] + noise_variance
-            innovation = values_centered[sample] - state_mean[0]
-            gain = state_covariance[:, 0] / innovation_variance
+        # Update with the observation (the sum of the two value components).
+        # The observation vector is a sum of two unit vectors, so the usual
+        # matrix-vector products collapse to picking and adding two columns.
+        observation_covariance = state_covariance[:, KINETIC_VALUE_INDEX] \
+            + state_covariance[:, NUISANCE_VALUE_INDEX]
+        innovation_variance = observation_covariance[KINETIC_VALUE_INDEX] \
+            + observation_covariance[NUISANCE_VALUE_INDEX] + noise_variances[sample]
+        innovation = values_centered[sample] - state_mean[KINETIC_VALUE_INDEX] \
+            - state_mean[NUISANCE_VALUE_INDEX]
+        gain = observation_covariance / innovation_variance
 
-            state_mean = state_mean + gain * innovation
-            state_covariance = state_covariance - np.outer(gain, state_covariance[0, :])
-            log_likelihood += -0.5 * (np.log(2.0 * np.pi * innovation_variance)
-                                      + innovation ** 2 / innovation_variance)
+        state_mean = state_mean + gain * innovation
+        state_covariance = state_covariance - gain[:, None] * observation_covariance[None, :]
 
         filtered_means[sample] = state_mean
         filtered_covariances[sample] = state_covariance
+        log_likelihood += -0.5 * (np.log(2.0 * np.pi * innovation_variance)
+                                  + innovation ** 2 / innovation_variance)
 
     return log_likelihood, filtered_means, filtered_covariances, predicted_means, predicted_covariances
 
@@ -558,44 +776,84 @@ def run_rts_smoother(transitions, filtered_means, filtered_covariances,
     return smoothed_means, smoothed_covariances
 
 
-def negative_log_likelihood(log_parameters, time_steps, values_centered, mask):
+def unpack_hyperparameters(log_parameters, nuisance):
     """
-    Negative marginal log-likelihood of the Matern-5/2 model, for the optimizer.
+    Turn the optimizer's parameter vector into a hyperparameter dict.
+
+    Only the kinetic component and the white noise are optimized. The
+    nuisance component is pinned to what the variogram measured, because the
+    likelihood on its own cannot choose between the two explanations of a
+    slow wiggle -- kinetics that bend or noise that drifts -- and lands in
+    whichever optimum the optimizer happens to approach first. The variogram
+    settles the question outside the likelihood, from robust statistics that
+    a trend cannot bias.
 
     Parameters
     ----------
     log_parameters : ndarray
-        Logarithms of (lengthscale, signal_std, noise_std).
+        Logarithms of (kinetic length scale, kinetic std, white noise std).
+    nuisance : tuple of float
+        Fixed (correlation time, standard deviation) of the nuisance component.
+
+    Returns
+    -------
+    dict of float
+        Hyperparameters ready for `combined_state_space_matrices`.
+    """
+    lengthscale, signal_std, noise_std = np.exp(log_parameters)
+    nuisance_lengthscale, nuisance_std = nuisance
+
+    return {'lengthscale': float(lengthscale), 'signal_std': float(signal_std),
+            'nuisance_lengthscale': float(nuisance_lengthscale),
+            'nuisance_std': float(nuisance_std),
+            'noise_std': float(noise_std)}
+
+
+def negative_log_likelihood(log_parameters, time_steps, values_centered, weights, nuisance):
+    """
+    Negative marginal log-likelihood of the two-component model, for the optimizer.
+
+    Parameters
+    ----------
+    log_parameters : ndarray
+        Parameter vector as described in `unpack_hyperparameters`.
     time_steps : ndarray
         Time differences between consecutive samples.
     values_centered : ndarray
         Mean-subtracted observations.
-    mask : ndarray of bool
-        Observations to skip.
+    weights : ndarray
+        Robustness weights; the observation variance of sample i is
+        ``noise_std ** 2 / weights[i]``.
+    nuisance : tuple of float
+        Fixed (correlation time, standard deviation) of the nuisance component.
 
     Returns
     -------
     float
         The negative log-likelihood.
     """
-    lengthscale, signal_std, noise_std = np.exp(log_parameters)
+    hyperparameters = unpack_hyperparameters(log_parameters, nuisance)
 
     transitions, process_noises, stationary_covariance = \
-        matern52_state_space_matrices(time_steps, lengthscale, signal_std ** 2)
+        combined_state_space_matrices(time_steps, hyperparameters)
     log_likelihood, *_ = run_kalman_filter(values_centered, transitions, process_noises,
-                                           stationary_covariance, noise_std ** 2, mask)
+                                           stationary_covariance,
+                                           hyperparameters['noise_std'] ** 2 / weights)
 
     return -log_likelihood
 
 
-def fit_hyperparameters(time, values_centered, mask, lengthscale_bounds, max_fit_points):
+def fit_hyperparameters(time, values_centered, weights, lengthscale_bounds,
+                        noise_structure, max_fit_points, previous_fit=None):
     """
-    Fit (lengthscale, signal_std, noise_std) by maximizing the marginal likelihood.
+    Fit the Gaussian-process hyperparameters by maximizing the marginal likelihood.
 
-    Fitting runs on a decimated subset of the unmasked points; the Kalman
-    likelihood is exact for any sampling pattern, so decimation only trades
-    statistical for computational efficiency. Two starting lengthscales are
-    tried to avoid local optima.
+    Fitting runs on a decimated subset of the samples; the Kalman likelihood
+    is exact for any sampling pattern, so decimation only trades statistical
+    for computational efficiency. Two starting length scales are tried to
+    avoid local optima. The nuisance correlation time is not fitted here --
+    it is measured directly from the variogram, which keeps it identifiable
+    even on traces where the correlated component is weak.
 
     Parameters
     ----------
@@ -603,138 +861,530 @@ def fit_hyperparameters(time, values_centered, mask, lengthscale_bounds, max_fit
         Sample times.
     values_centered : ndarray
         Mean-subtracted values.
-    mask : ndarray of bool
-        Artifact mask.
+    weights : ndarray
+        Robustness weights.
     lengthscale_bounds : tuple of float
-        (lower, upper) bounds for the lengthscale.
+        (lower, upper) bounds for the kinetic length scale.
+    noise_structure : dict
+        Output of `estimate_noise_structure`. It supplies the initial guesses
+        and fixes the nuisance component.
     max_fit_points : int
         Decimation target for the optimization.
+    previous_fit : dict of float, optional
+        Hyperparameters of an earlier fit of the same series. When given the
+        optimizer restarts from them alone, which is what makes the refit
+        after artifact detection cost a fraction of the first fit.
 
     Returns
     -------
-    dict
-        Fitted ``lengthscale``, ``signal_std`` and ``noise_std``.
+    dict of float
+        Fitted ``lengthscale``, ``signal_std``, ``nuisance_lengthscale``,
+        ``nuisance_std`` and ``noise_std``.
     """
-    unmasked_indices = np.nonzero(~mask)[0]
-    stride = max(1, int(np.ceil(len(unmasked_indices) / max_fit_points)))
-    fit_indices = unmasked_indices[::stride]
-
-    fit_times = time[fit_indices]
-    fit_values = values_centered[fit_indices]
+    stride = max(1, int(np.ceil(len(time) / max_fit_points)))
+    fit_times = time[::stride]
+    fit_values = values_centered[::stride]
+    fit_weights = weights[::stride]
     fit_time_steps = np.diff(fit_times)
-    fit_mask = np.zeros(len(fit_times), dtype=bool)
 
-    # Robust initial guesses: noise from the high-frequency differences,
-    # signal amplitude from the overall spread
-    noise_std_initial = MAD_TO_STD * np.median(np.abs(np.diff(fit_values))) / np.sqrt(2.0)
-    noise_std_initial = max(noise_std_initial, 1e-9 * np.std(fit_values))
-    signal_std_initial = np.std(fit_values)
+    signal_std_initial = max(np.std(fit_values), np.finfo(float).tiny)
+    noise_std_initial = max(noise_structure['white_std'], 1e-9 * signal_std_initial)
     duration = fit_times[-1] - fit_times[0]
 
-    # Generous bounds keep the optimizer in a numerically safe region
+    # The nuisance may never grow into a rival explanation of the reaction
+    # itself, however the variogram was misled.
+    nuisance = (noise_structure['correlated_lengthscale'],
+                min(noise_structure['correlated_std'],
+                    NUISANCE_AMPLITUDE_FRACTION * robust_scale(fit_values)))
+
     bounds = [np.log(lengthscale_bounds),
               np.log((1e-3 * signal_std_initial, 1e3 * signal_std_initial)),
               np.log((1e-2 * noise_std_initial, 1e3 * noise_std_initial))]
 
-    best_fit = None
-    for lengthscale_initial in (duration / 100.0, duration / 10.0):
-        lengthscale_initial = np.clip(lengthscale_initial, *lengthscale_bounds)
-        initial_guess = np.log([lengthscale_initial, signal_std_initial, noise_std_initial])
+    if previous_fit is None:
+        starting_lengthscales = (duration / 100.0, duration / 10.0)
+    else:
+        starting_lengthscales = (previous_fit['lengthscale'],)
 
-        fit = minimize(negative_log_likelihood, initial_guess,
-                       args=(fit_time_steps, fit_values, fit_mask),
+    best_fit = None
+    for lengthscale_initial in starting_lengthscales:
+        initial_guess = np.log([np.clip(lengthscale_initial, *lengthscale_bounds),
+                                signal_std_initial, noise_std_initial])
+
+        fit = minimize(negative_log_likelihood, np.clip(initial_guess, *np.transpose(bounds)),
+                       args=(fit_time_steps, fit_values, fit_weights, nuisance),
                        method='Nelder-Mead', bounds=bounds,
-                       options={'xatol': 0.02, 'fatol': 0.1, 'maxiter': 250})
+                       options={'xatol': 0.02, 'fatol': 0.1, 'maxiter': 400})
 
         if best_fit is None or fit.fun < best_fit.fun:
             best_fit = fit
 
-    lengthscale, signal_std, noise_std = np.exp(best_fit.x)
-
-    return {'lengthscale': float(lengthscale), 'signal_std': float(signal_std),
-            'noise_std': float(noise_std)}
+    return unpack_hyperparameters(best_fit.x, nuisance)
 
 
-def calculate_windowed_rates(time, smooth, smooth_variance, window, mask):
+def smooth_series(time, values_centered, weights, hyperparameters):
     """
-    Calculate the average rate over a centred window from the smoothed curve.
-
-    The windowed rate at time t is (f(t + w/2) - f(t - w/2)) / w, which
-    equals the mean of the derivative over the window and suppresses any
-    residual short-lived artifact contribution by the ratio of artifact
-    duration to window length. Windows whose data are mostly masked are
-    dropped: there the smoothed curve is an unsupported bridge, so its
-    slope is not evidence of a rate.
+    Run one full filter-and-smoother pass and read off the two components.
 
     Parameters
     ----------
     time : ndarray
         Sample times.
-    smooth, smooth_variance : ndarray
-        Posterior mean and variance of the smoothed curve.
-    window : float
-        Window length in time units.
-    mask : ndarray of bool
-        Artifact mask.
+    values_centered : ndarray
+        Mean-subtracted values.
+    weights : ndarray
+        Robustness weights.
+    hyperparameters : dict of float
+        Gaussian-process hyperparameters.
+
+    Returns
+    -------
+    dict
+        ``signal`` and ``rate`` with their variances, the ``nuisance``
+        component, and the marginal ``log_likelihood``.
+    """
+    transitions, process_noises, stationary_covariance = \
+        combined_state_space_matrices(np.diff(time), hyperparameters)
+
+    log_likelihood, filtered_means, filtered_covariances, predicted_means, predicted_covariances = \
+        run_kalman_filter(values_centered, transitions, process_noises, stationary_covariance,
+                          hyperparameters['noise_std'] ** 2 / weights)
+    smoothed_means, smoothed_covariances = run_rts_smoother(
+        transitions, filtered_means, filtered_covariances, predicted_means, predicted_covariances)
+
+    return {'signal': smoothed_means[:, KINETIC_VALUE_INDEX],
+            'signal_variance': np.maximum(
+                smoothed_covariances[:, KINETIC_VALUE_INDEX, KINETIC_VALUE_INDEX], 0.0),
+            'rate': smoothed_means[:, KINETIC_RATE_INDEX],
+            'rate_variance': np.maximum(
+                smoothed_covariances[:, KINETIC_RATE_INDEX, KINETIC_RATE_INDEX], 0.0),
+            'nuisance': smoothed_means[:, NUISANCE_VALUE_INDEX],
+            'log_likelihood': float(log_likelihood)}
+
+
+def resolve_artifact_gap(median_time_step, duration, number_of_samples,
+                         nuisance_lengthscale):
+    """
+    Choose the blind gap of the two-sided predictive artifact test, in samples.
+
+    The gap sets the longest artifact that can be detected: an excursion that
+    outlasts it is still visible to the prediction reaching over it and is
+    read as part of the curve. It also has to be longer than the nuisance
+    correlation time, otherwise the prediction from just outside the gap
+    still carries the same low-frequency wiggle as the sample under test and
+    a harmless wiggle would look like an artifact.
+
+    Parameters
+    ----------
+    median_time_step : float
+        Median time step of the series, in seconds.
+    duration : float
+        Total duration of the series, in seconds.
+    number_of_samples : int
+        Length of the series.
+    nuisance_lengthscale : float
+        Correlation time of the correlated noise, in seconds.
+
+    Returns
+    -------
+    int
+        Gap in samples, at least one.
+    """
+    gap_time = max(ARTIFACT_GAP_MIN_STEPS * median_time_step,
+                   ARTIFACT_GAP_FRACTION * duration,
+                   ARTIFACT_GAP_NUISANCE_FACTOR * nuisance_lengthscale)
+
+    return int(np.clip(round(gap_time / median_time_step), 1,
+                       ARTIFACT_GAP_MAX_FRACTION * number_of_samples))
+
+
+def predict_across_gap(time, values_centered, weights, hyperparameters, gap):
+    """
+    Predict every sample from the data that lies at least `gap` samples before it.
+
+    The Kalman filter is run in the usual way and each filtered state is then
+    propagated forward across the gap with a single transition matrix, so the
+    prediction for a sample never uses the sample itself nor its immediate
+    neighbourhood. Its variance is the model's own extrapolation uncertainty,
+    which already contains everything the fit does not claim to know: the
+    kinetic curve's freedom to bend, and the full variance of the nuisance
+    component once it has decorrelated.
+
+    Parameters
+    ----------
+    time, values_centered : ndarray
+        Sample times and mean-subtracted values.
+    weights : ndarray
+        Robustness weights for the filter pass.
+    hyperparameters : dict of float
+        Gaussian-process hyperparameters.
+    gap : int
+        Number of samples skipped between the last observation used and the
+        sample being predicted.
 
     Returns
     -------
     tuple of ndarray
-        Window centre times, windowed rates, and conservative standard
-        deviations (independence bound on the two endpoint variances).
+        Predicted values and their variances; the first `gap` entries are NaN
+        because no prediction of that kind exists for them.
+    """
+    transitions, process_noises, stationary_covariance = \
+        combined_state_space_matrices(np.diff(time), hyperparameters)
+    _, filtered_means, filtered_covariances, _, _ = run_kalman_filter(
+        values_centered, transitions, process_noises, stationary_covariance,
+        hyperparameters['noise_std'] ** 2 / weights)
+
+    gap_transitions, gap_noises, _ = combined_state_space_matrices(
+        time[gap:] - time[:-gap], hyperparameters)
+
+    means = np.einsum('kij,kj->ki', gap_transitions, filtered_means[:-gap])
+    covariances = gap_transitions @ filtered_covariances[:-gap] \
+        @ np.transpose(gap_transitions, (0, 2, 1)) + gap_noises
+
+    predictions = np.full(len(time), np.nan)
+    variances = np.full(len(time), np.nan)
+    predictions[gap:] = means[:, KINETIC_VALUE_INDEX] + means[:, NUISANCE_VALUE_INDEX]
+    variances[gap:] = (covariances[:, KINETIC_VALUE_INDEX, KINETIC_VALUE_INDEX]
+                       + 2.0 * covariances[:, KINETIC_VALUE_INDEX, NUISANCE_VALUE_INDEX]
+                       + covariances[:, NUISANCE_VALUE_INDEX, NUISANCE_VALUE_INDEX])
+
+    return predictions, variances
+
+
+def grow_excursions(detected, deviation_forward, deviation_backward, tolerance_forward,
+                    tolerance_backward, growth_cap):
+    """
+    Extend each detected excursion over the whole transient it belongs to.
+
+    A bubble does not end where it stops being conspicuous: it jumps, then
+    relaxes back over many samples whose individual deviation is too small to
+    detect but whose sum is exactly the level offset that inflates a rate.
+    Each detected run is therefore extended in both directions until the trace
+    comes back to what the *clean* side predicts -- forwards against the
+    prediction from after the transient, backwards against the one from
+    before it, so the reference never contains the artifact itself.
+
+    Growth that runs past `growth_cap` without ever returning is undone. A
+    deviation that persists is not a transient but a genuine change of regime,
+    and the samples after it are the new normal, not artifacts.
+
+    Parameters
+    ----------
+    detected : ndarray of bool
+        Samples the deviation test flagged.
+    deviation_forward, deviation_backward : ndarray
+        Signed deviations from the prediction reaching forwards over the gap
+        and from the one reaching backwards.
+    tolerance_forward, tolerance_backward : ndarray
+        Deviation magnitudes counting as "back on the curve" for each; these
+        are tighter than the detection thresholds, so growth stops only once
+        the trace is properly back and not merely less conspicuous.
+    growth_cap : int
+        Largest extension, in samples, in either direction.
+
+    Returns
+    -------
+    ndarray of bool
+        The grown excursion mask.
+    """
+    excursions = detected.copy()
+    edges = np.diff(np.concatenate([[0], detected.astype(np.int8), [0]]))
+
+    for run_start, run_stop in zip(np.nonzero(edges == 1)[0], np.nonzero(edges == -1)[0]):
+        sign = np.sign(np.median(deviation_backward[run_start:run_stop]))
+
+        tail = np.arange(run_stop, min(len(detected), run_stop + growth_cap))
+        head = np.arange(max(0, run_start - growth_cap), run_start)[::-1]
+
+        returned_tail = first_settled(sign * deviation_backward[tail] <= tolerance_backward[tail])
+        returned_head = first_settled(sign * deviation_forward[head] <= tolerance_forward[head])
+
+        # A transient has to end on both sides; an excursion that never comes
+        # back is a permanent change of regime and its samples are the new
+        # normal, not artifacts.
+        if returned_tail is None or (returned_head is None and run_start > 0):
+            continue
+
+        excursions[tail[:returned_tail]] = True
+        if returned_head is not None:
+            excursions[head[:returned_head]] = True
+
+    return excursions
+
+
+def first_settled(on_trend):
+    """
+    Position of the first run of `ARTIFACT_SETTLED_SAMPLES` on-trend samples.
+
+    A single sample crossing back inside the tolerance proves nothing when
+    the tolerance is of the order of the noise, so a return has to hold for a
+    few samples in a row.
+
+    Parameters
+    ----------
+    on_trend : ndarray of bool
+        Whether each sample is back within tolerance.
+
+    Returns
+    -------
+    int or None
+        Index of the start of the first settled run, or None if there is none.
+    """
+    if len(on_trend) < ARTIFACT_SETTLED_SAMPLES:
+        return None
+
+    settled = np.convolve(on_trend.astype(int), np.ones(ARTIFACT_SETTLED_SAMPLES, dtype=int),
+                          mode='valid') == ARTIFACT_SETTLED_SAMPLES
+
+    return int(np.argmax(settled)) if settled.any() else None
+
+
+def artifact_weights(time, values_centered, weights, hyperparameters, reference_lengthscale,
+                     gap, threshold):
+    """
+    Reject excursions the trace comes back from, and nothing else.
+
+    Every sample is predicted twice by `predict_across_gap`: once from the
+    data more than `gap` samples before it, once from the data more than
+    `gap` samples after it. A sample belongs to an artifact when all three of
+    the following hold.
+
+    - The data disagree with the prediction from the past.
+    - The data disagree with the prediction from the future.
+    - The two predictions nevertheless agree *with each other*.
+
+    The third condition is what protects the kinetics. Across a genuine
+    transition -- a light-on step, a steep sigmoidal onset, a kink -- the two
+    sides see different curves and say so, and no sample there is touched,
+    however badly either side predicts it on its own. Across a bubble both
+    sides describe the same undisturbed curve and only the data depart from
+    it. `grow_excursions` then extends each detection over the transient's
+    full relaxation, and undoes the growth wherever the trace never returns.
+
+    None of this uses the fitted curve at the sample itself, which is what
+    lets it see an artifact the fit has already bent to follow. Residual-based
+    reweighting alone cannot: a length scale short enough to track a bubble
+    leaves no residual to flag. For the same reason the kinetic length scale
+    used here is `reference_lengthscale`, which is the fitted one raised to at
+    least `ARTIFACT_STIFFNESS_FACTOR` times the gap. A fit that has already
+    bent around an artifact predicts almost nothing across the gap -- its
+    extrapolation uncertainty is then as large as the whole trace -- and would
+    clear that artifact of suspicion. Raising it only to what the gap needs,
+    rather than to the smoothest curve allowed, keeps the test from calling
+    the steepest stretch of a genuinely fast reaction an artifact.
+
+    Parameters
+    ----------
+    time, values_centered : ndarray
+        Sample times and mean-subtracted values.
+    weights : ndarray
+        Robustness weights for the filter passes.
+    hyperparameters : dict of float
+        Gaussian-process hyperparameters; only the kinetic length scale is
+        overridden.
+    reference_lengthscale : float
+        Kinetic length scale to assume while hunting artifacts.
+    gap : int
+        Blind gap in samples; artifacts up to roughly this long are detected
+        directly, longer ones through the growth step.
+    threshold : float
+        Standardized deviation at which a sample counts as unexplained.
+
+    Returns
+    -------
+    ndarray
+        Weight per sample: one outside excursions, `ROBUST_WEIGHT_FLOOR`
+        inside them.
+    """
+    hyperparameters = dict(hyperparameters, lengthscale=reference_lengthscale)
+    noise_variance = hyperparameters['noise_std'] ** 2
+
+    forward, forward_variance = predict_across_gap(time, values_centered, weights,
+                                                   hyperparameters, gap)
+    backward, backward_variance = predict_across_gap(time[::-1] * -1.0, values_centered[::-1],
+                                                     weights[::-1], hyperparameters, gap)
+    backward, backward_variance = backward[::-1], backward_variance[::-1]
+
+    deviation_forward = values_centered - forward
+    deviation_backward = values_centered - backward
+    tolerance_forward = threshold * np.sqrt(forward_variance + noise_variance)
+    tolerance_backward = threshold * np.sqrt(backward_variance + noise_variance)
+    disagreement = np.abs(forward - backward) / np.sqrt(forward_variance + backward_variance
+                                                        + 2.0 * noise_variance)
+
+    # Samples too close to either end have only one prediction and stay untested.
+    detected = np.nan_to_num((np.abs(deviation_forward) > tolerance_forward)
+                             & (np.abs(deviation_backward) > tolerance_backward)
+                             & (disagreement <= threshold), nan=False)
+
+    # Hysteresis: a sample has to be conspicuous to start an excursion but
+    # only unremarkable to end one, so the whole relaxation tail is covered.
+    settle = ARTIFACT_RETURN_TOLERANCE / threshold
+    excursions = grow_excursions(detected, deviation_forward, deviation_backward,
+                                 settle * tolerance_forward, settle * tolerance_backward,
+                                 int(ARTIFACT_GROWTH_CAP_FACTOR * gap))
+
+    return np.where(excursions, ROBUST_WEIGHT_FLOOR, 1.0)
+
+
+def robust_weights_from_zscores(zscores, threshold):
+    """
+    Redescending robustness weights from standardized deviations.
+
+    Samples within `threshold` keep full weight; beyond it the weight falls
+    off as the square of the ratio, so a sample's influence -- weight times
+    deviation -- *decreases* the further out it lies. This is the IRLS weight
+    of a Cauchy loss, and the squaring matters: with the merely bounded
+    influence of a Huber weight, the several hundred samples of one bubble
+    transient still pull the fit hard enough to shorten the kinetic length
+    scale to the bubble's own width. Weights are floored rather than zeroed
+    so that no sample is ever fully removed.
+
+    Parameters
+    ----------
+    zscores : ndarray
+        Standardized absolute deviations.
+    threshold : float
+        Deviation at which downweighting starts.
+
+    Returns
+    -------
+    ndarray
+        Weight per sample, in (`ROBUST_WEIGHT_FLOOR`, 1].
+    """
+    ratio = threshold / np.maximum(np.nan_to_num(zscores, nan=0.0), threshold)
+
+    return np.clip(ratio ** 2, ROBUST_WEIGHT_FLOOR, 1.0)
+
+
+def robust_weights(residuals, noise_std, threshold):
+    """
+    Huber weights from the residuals of a fitted model.
+
+    This is the second half of the robustness stage: it catches whatever the
+    fit did *not* follow, chiefly single-sample spikes, and refines the
+    weights once the curve is close to right.
+
+    Parameters
+    ----------
+    residuals : ndarray
+        Observation minus fitted value.
+    noise_std : float
+        White-noise standard deviation of the fit.
+    threshold : float
+        Standardized residual at which downweighting starts.
+
+    Returns
+    -------
+    ndarray
+        Weight per sample, in (`ROBUST_WEIGHT_FLOOR`, 1].
+    """
+    scale = max(noise_std, robust_scale(residuals), np.finfo(float).tiny)
+
+    return robust_weights_from_zscores(np.abs(residuals) / scale, threshold)
+
+
+def calculate_windowed_rates(time, signal, rate_variance, window, weights):
+    """
+    Calculate the average rate over a centred window from the kinetic component.
+
+    The windowed rate at time t is (f(t + w/2) - f(t - w/2)) / w, which
+    equals the mean of the derivative over the window and suppresses any
+    residual short-lived artifact contribution by the ratio of artifact
+    duration to window length. Windows whose samples are mostly downweighted
+    are dropped: there the curve is an unsupported bridge, so its slope is
+    not evidence of a rate.
+
+    Its uncertainty is taken as the mean posterior variance of the
+    derivative across the window. That is the variance the window average
+    would have if the derivative errors were perfectly correlated over it,
+    so it is an upper bound -- exact for windows shorter than the kinetic
+    length scale, conservative for longer ones. Differencing the endpoint
+    values instead would need their posterior covariance, which the marginal
+    smoother output does not carry; assuming independence there badly
+    overstates the error once a nuisance component makes the absolute level
+    of the kinetic curve ambiguous.
+
+    Parameters
+    ----------
+    time : ndarray
+        Sample times.
+    signal, rate_variance : ndarray
+        Posterior mean of the kinetic component and posterior variance of
+        its derivative.
+    window : float
+        Window length in time units.
+    weights : ndarray
+        Robustness weights.
+
+    Returns
+    -------
+    tuple of ndarray
+        Window centre times, windowed rates and their standard deviations.
     """
     half_window = 0.5 * window
     inside = (time >= time[0] + half_window) & (time <= time[-1] - half_window)
     centers = time[inside]
 
-    # Fraction of unmasked samples inside each window, via prefix sums
-    unmasked_counts = np.concatenate([[0.0], np.cumsum(~mask)])
+    # Mean weight and mean rate variance inside each window, via prefix sums
+    cumulative_weights = np.concatenate([[0.0], np.cumsum(weights)])
+    cumulative_variances = np.concatenate([[0.0], np.cumsum(rate_variance)])
     window_first = np.searchsorted(time, centers - half_window, side='left')
     window_last = np.searchsorted(time, centers + half_window, side='right')
-    unmasked_fraction = (unmasked_counts[window_last] - unmasked_counts[window_first]) \
-        / np.maximum(window_last - window_first, 1)
+    window_points = np.maximum(window_last - window_first, 1)
 
-    supported = unmasked_fraction >= MIN_UNMASKED_WINDOW_FRACTION
+    mean_weight = (cumulative_weights[window_last] - cumulative_weights[window_first]) \
+        / window_points
+    mean_variance = (cumulative_variances[window_last] - cumulative_variances[window_first]) \
+        / window_points
+
+    supported = mean_weight >= MIN_WINDOW_WEIGHT_FRACTION
     if not supported.any():
         raise ValueError('no window with sufficient unmasked data; '
                          'inspect the series or adjust outlier settings')
     centers = centers[supported]
 
-    curve_low = np.interp(centers - half_window, time, smooth)
-    curve_high = np.interp(centers + half_window, time, smooth)
-    variance_low = np.interp(centers - half_window, time, smooth_variance)
-    variance_high = np.interp(centers + half_window, time, smooth_variance)
+    curve_low = np.interp(centers - half_window, time, signal)
+    curve_high = np.interp(centers + half_window, time, signal)
 
     windowed_rates = (curve_high - curve_low) / window
-    windowed_rate_stds = np.sqrt(variance_low + variance_high) / window
+    windowed_rate_stds = np.sqrt(mean_variance[supported])
 
     return centers, windowed_rates, windowed_rate_stds
 
 
-def calculate_rolling_slopes(time, values, mask, window):
+def calculate_rolling_slopes(time, values, weights, window, median_time_step):
     """
-    Calculate the least-squares slope of the raw data in a sliding window.
+    Calculate the weighted least-squares slope of the raw data in a sliding window.
 
     This is the smoothing-free cross-check for the Gaussian-process result,
-    computed in O(n) with prefix sums. Masked samples get zero weight.
+    computed in O(n) with prefix sums. Downweighted samples contribute in
+    proportion to their weight.
 
     Parameters
     ----------
     time, values : ndarray
         Sample times and values.
-    mask : ndarray of bool
-        Artifact mask.
+    weights : ndarray
+        Robustness weights.
     window : float
         Window length in time units.
+    median_time_step : float
+        Median time step, used to scale how many points a window must hold.
 
     Returns
     -------
     ndarray
         Window slope centred on each sample; NaN where the window is
-        incomplete or holds fewer than `MIN_WINDOW_POINTS` unmasked points.
+        incomplete or holds too few effective points.
     """
+    # Requiring `MIN_WINDOW_POINTS` outright was a guard for densely sampled
+    # data. On a coarsely sampled series a correctly sized window holds only a
+    # handful of samples, and insisting on ten of them silently turns the whole
+    # cross-check into NaN -- exactly where a second opinion is most wanted.
+    minimum_points = max(3, min(MIN_WINDOW_POINTS, int(0.5 * window / median_time_step)))
+
     time_shifted = time - time[0]
-    weights = (~mask).astype(float)
 
     # Prefix sums of the weighted regression terms
     zero = np.zeros(1)
@@ -755,7 +1405,7 @@ def calculate_rolling_slopes(time, values, mask, window):
 
     denominator = points * total_time_squared - total_time ** 2
     complete = (time - 0.5 * window >= time[0]) & (time + 0.5 * window <= time[-1])
-    valid = complete & (points >= MIN_WINDOW_POINTS) & (denominator > 0)
+    valid = complete & (points >= minimum_points) & (denominator > 0)
 
     slopes = np.full(len(time), np.nan)
     slopes[valid] = (points * total_time_values - total_time * total_values)[valid] / denominator[valid]
@@ -792,15 +1442,33 @@ def collect_quality_flags(result, time, lengthscale_bounds):
     if t_max_rate < time[0] + window or t_max_rate > time[-1] - window:
         flags.append('max_rate_at_boundary')
 
+    # The window hit its duration cap, so it was the length of the run and not
+    # the sampling that set it: the series is short enough that the window
+    # holds only a handful of points and the headline number is noisier.
+    if window >= WINDOW_MAX_SPAN_FRACTION * (time[-1] - time[0]):
+        flags.append('window_duration_limited')
+
     if result.hyperparameters['lengthscale'].unit[TIME_UNIT] \
             < LENGTHSCALE_BOUND_FACTOR * lengthscale_bounds[0]:
         flags.append('lengthscale_at_lower_bound')
+
+    if max_rate < SIGNIFICANCE_SIGMA * max_rate_std:
+        flags.append('max_rate_not_significant')
 
     if max_rate_std > HIGH_UNCERTAINTY_FRACTION * abs(max_rate):
         flags.append('high_uncertainty')
 
     if result.diagnostics['outlier_fraction'] > OUTLIER_FRACTION_WARNING:
         flags.append('many_outliers_masked')
+
+    # Only meaningful once the variogram actually resolved a correlated
+    # component; otherwise its correlation time is a placeholder time step and
+    # the slope scale derived from it is arbitrary.
+    if result.hyperparameters['nuisance_lengthscale'].unit[TIME_UNIT] \
+            > result.diagnostics['median_dt'].unit[TIME_UNIT] \
+            and result.diagnostics['nuisance_rate_std'].unit[RATE_UNIT] \
+            > CORRELATED_NOISE_RATE_FRACTION * abs(max_rate):
+        flags.append('strong_correlated_noise')
 
     if np.isfinite(crosscheck):
         difference = abs(max_rate - crosscheck)
@@ -809,7 +1477,8 @@ def collect_quality_flags(result, time, lengthscale_bounds):
                 and difference > DISAGREEMENT_SIGMA * combined_std:
             flags.append('estimator_disagreement')
 
-    if result.max_rate_instantaneous.unit[RATE_UNIT] > INSTANTANEOUS_SPIKE_FACTOR * max_rate:
+    if max_rate > 0 \
+            and result.max_rate_instantaneous.unit[RATE_UNIT] > INSTANTANEOUS_SPIKE_FACTOR * max_rate:
         flags.append('instantaneous_rate_spike')
 
     if result.diagnostics['residual_lag1_autocorr'] > RESIDUAL_AUTOCORRELATION_WARNING:
@@ -836,12 +1505,19 @@ class MaxRateResult:
     slope of the raw data over the same window as ``max_rate``; large
     disagreement raises a flag.
 
+    ``smooth`` is the kinetic component alone and is what ``rate``
+    differentiates; ``nuisance`` is the correlated-noise component the fit
+    separated out. Their sum is the model of the measured trace, so a plot
+    of ``smooth`` deliberately does *not* follow every wiggle of the data.
+    ``outlier_mask`` marks the samples the robust fit downweighted; unlike a
+    hard mask it does not mean those samples were discarded.
+
     The input series is deliberately *not* stored: a result is meant to be
     saved alongside the dataset it was computed from, and duplicating the
     time and value arrays there would double the stored series for nothing.
     `plot_max_rate` therefore takes the inputs again. The per-sample arrays
-    that are kept (``smooth``, ``rate``, their uncertainties and
-    ``outlier_mask``) exist nowhere else.
+    that are kept (``smooth``, ``nuisance``, ``rate``, their uncertainties
+    and ``outlier_mask``) exist nowhere else.
     """
 
     max_rate: Quantity
@@ -855,6 +1531,7 @@ class MaxRateResult:
     outlier_mask: np.ndarray
     smooth: Quantity
     smooth_std: Quantity
+    nuisance: Quantity
     rate: Quantity
     rate_std: Quantity
     hyperparameters: Dict[str, Quantity]
@@ -862,9 +1539,8 @@ class MaxRateResult:
     flags: List[str] = field(default_factory=list)
 
 
-def extract_max_rate(time, values, window=None, outlier_threshold=6.0,
-                     outlier_pad=10, lengthscale_bounds=None,
-                     max_fit_points=1500, hyperparameters=None):
+def extract_max_rate(time, values, window=None, robust_threshold=4.0,
+                     lengthscale_bounds=None, max_fit_points=1200, hyperparameters=None):
     """
     Extract the maximum rate of a kinetic time series with uncertainty.
 
@@ -880,30 +1556,27 @@ def extract_max_rate(time, values, window=None, outlier_threshold=6.0,
     window : Quantity, optional
         Length of the sustained-rate window (dimension time). Defaults to
         max(25 median time steps, 2 % of the series duration).
-    outlier_threshold : float
-        Robust z-score on detrended increments above which samples are
-        masked as artifacts.
-    outlier_pad : int
-        Samples additionally masked on each side of a detected artifact.
+    robust_threshold : float
+        Standardized residual at which a sample starts to be downweighted.
     lengthscale_bounds : tuple of Quantity, optional
-        (lower, upper) bounds for the Gaussian-process lengthscale
-        (dimension time). Defaults to (max(20 median time steps, 0.2 % of
-        duration), duration / 2). The lower bound guards against fitting
-        correlated sensor noise as signal.
+        (lower, upper) bounds for the kinetic length scale (dimension time).
+        Defaults to (max(20 median time steps, 0.2 % of duration, twice the
+        measured noise correlation time), duration / 2). The lower bound is
+        what stops the kinetic component from tracking correlated noise.
     max_fit_points : int
         Points used (after decimation) for hyperparameter optimization.
-        The final smoothing pass always uses every point.
+        The final smoothing passes always use every point.
     hyperparameters : dict of Quantity, optional
-        ``lengthscale``, ``signal_std``, ``noise_std`` to reuse from a
-        previous fit, skipping the optimization (useful for batches of
-        similar experiments). Pass ``MaxRateResult.hyperparameters``
-        straight back.
+        ``lengthscale``, ``signal_std``, ``nuisance_lengthscale``,
+        ``nuisance_std`` and ``noise_std`` to reuse from a previous fit,
+        skipping the optimization (useful for batches of similar
+        experiments). Pass ``MaxRateResult.hyperparameters`` straight back.
 
     Returns
     -------
     MaxRateResult
-        Maximum rate estimates with uncertainties, the smoothed curve and
-        rate curve, and quality flags for human review.
+        Maximum rate estimates with uncertainties, the kinetic and nuisance
+        curves, the rate curve, and quality flags for human review.
     """
     time, values = validate_time_series(time, values)
 
@@ -914,66 +1587,97 @@ def extract_max_rate(time, values, window=None, outlier_threshold=6.0,
     if not 0 < window < duration:
         raise ValueError(f'window {window} s outside series duration {duration} s')
 
-    lengthscale_bounds = resolve_lengthscale_bounds(lengthscale_bounds, median_time_step, duration)
+    # Stage 1: how much of the scatter is correlated, and over what time
+    noise_structure = estimate_noise_structure(time, values)
+    lengthscale_bounds = resolve_lengthscale_bounds(lengthscale_bounds, median_time_step,
+                                                    duration,
+                                                    noise_structure['correlated_lengthscale'])
 
-    # Stage 1: mask artifacts, then fit the Gaussian-process hyperparameters
-    mask = detect_artifacts(values, outlier_threshold, outlier_pad)
-    mean_value = float(np.mean(values[~mask]))
+    # Stage 2: fit the two-component Gaussian process. Weights start out
+    # rejecting gross spikes only, so the fit is not dragged around by them.
+    weights = gross_outlier_weights(values, noise_structure['white_std'])
+    mean_value = float(np.average(values, weights=weights))
     values_centered = values - mean_value
 
-    hyperparameters = fit_hyperparameters(time, values_centered, mask,
-                                          lengthscale_bounds, max_fit_points) \
-        if hyperparameters is None else hyperparameter_magnitudes(hyperparameters)
+    reuse_hyperparameters = hyperparameters is not None
+    hyperparameters = hyperparameter_magnitudes(hyperparameters) if reuse_hyperparameters \
+        else fit_hyperparameters(time, values_centered, weights, lengthscale_bounds,
+                                 noise_structure, max_fit_points)
 
-    # Stage 2: smooth the full series; the state directly holds the curve
-    # value, the rate, and their uncertainties
-    transitions, process_noises, stationary_covariance = matern52_state_space_matrices(
-        np.diff(time), hyperparameters['lengthscale'], hyperparameters['signal_std'] ** 2)
+    # Stage 3: find the artifacts the first fit bent itself to follow, then
+    # refit without them. A single bubble is enough to pull the kinetic length
+    # scale down to its own width, so this refit is what protects every later
+    # stage, not just the smoothed curve.
+    gap = resolve_artifact_gap(median_time_step, duration, len(time),
+                               noise_structure['correlated_lengthscale'])
+    reference_lengthscale = min(max(hyperparameters['lengthscale'],
+                                   ARTIFACT_STIFFNESS_FACTOR * gap * median_time_step),
+                                lengthscale_bounds[1])
+    for _ in range(ARTIFACT_PASSES):
+        weights = np.minimum(weights, artifact_weights(time, values_centered, weights,
+                                                       hyperparameters, reference_lengthscale,
+                                                       gap, robust_threshold))
+    if not reuse_hyperparameters:
+        hyperparameters = fit_hyperparameters(time, values_centered, weights, lengthscale_bounds,
+                                              noise_structure, max_fit_points,
+                                              previous_fit=hyperparameters)
 
-    log_likelihood, filtered_means, filtered_covariances, predicted_means, predicted_covariances = \
-        run_kalman_filter(values_centered, transitions, process_noises, stationary_covariance,
-                          hyperparameters['noise_std'] ** 2, mask)
-    smoothed_means, smoothed_covariances = run_rts_smoother(
-        transitions, filtered_means, filtered_covariances, predicted_means, predicted_covariances)
+    for _ in range(ROBUST_PASSES):
+        smoothed = smooth_series(time, values_centered, weights, hyperparameters)
+        residuals = values_centered - smoothed['signal'] - smoothed['nuisance']
+        weights = np.minimum(weights, robust_weights(residuals, hyperparameters['noise_std'],
+                                                     robust_threshold))
+    smoothed = smooth_series(time, values_centered, weights, hyperparameters)
 
-    smooth = mean_value + smoothed_means[:, 0]
-    smooth_variance = np.maximum(smoothed_covariances[:, 0, 0], 0.0)
-    rate = smoothed_means[:, 1]
-    rate_std = np.sqrt(np.maximum(smoothed_covariances[:, 1, 1], 0.0))
+    smooth = mean_value + smoothed['signal']
+    rate = smoothed['rate']
+    rate_std = np.sqrt(smoothed['rate_variance'])
 
-    # Stage 3: the headline number is the largest window-averaged rate
+    # Stage 4: the headline number is the largest window-averaged rate
     centers, windowed_rates, windowed_rate_stds = calculate_windowed_rates(
-        time, smooth, smooth_variance, window, mask)
+        time, smooth, smoothed['rate_variance'], window, weights)
     best_window = int(np.argmax(windowed_rates))
 
-    # Instantaneous max only at observed samples; inside masked gaps the
-    # derivative is an unsupported interpolation
-    unmasked_indices = np.nonzero(~mask)[0]
-    best_instantaneous = int(unmasked_indices[np.argmax(rate[unmasked_indices])])
+    # Instantaneous max only where the data support it; inside a stretch of
+    # downweighted samples the derivative is an unsupported interpolation
+    supported = np.nonzero(weights >= OUTLIER_WEIGHT_THRESHOLD)[0]
+    best_instantaneous = int(supported[np.argmax(rate[supported])])
 
-    # Stage 4: cross-check at the same window centre. The global maximum of
+    # Stage 5: cross-check at the same window centre. The global maximum of
     # the raw rolling slope is itself upward-biased (winner's curse) on
     # noisy data, so it is reported as a diagnostic rather than flagged on.
-    rolling_slopes = calculate_rolling_slopes(time, values, mask, window)
+    rolling_slopes = calculate_rolling_slopes(time, values, weights, window, median_time_step)
     crosscheck = rolling_slopes[int(np.argmin(np.abs(time - centers[best_window])))]
 
-    # Uncertainty of a least-squares slope over ~n equidistant points spanning the window
-    crosscheck_std = hyperparameters['noise_std'] * np.sqrt(12.0 * median_time_step / window ** 3)
+    # Uncertainty of a least-squares slope over ~n equidistant points spanning
+    # the window; correlated noise adds to the white-noise term
+    total_noise_std = np.hypot(hyperparameters['noise_std'], hyperparameters['nuisance_std'])
+    crosscheck_std = total_noise_std * np.sqrt(12.0 * median_time_step / window ** 3)
 
-    residuals = (values - smooth)[~mask]
+    # Standard deviation of the derivative of the nuisance component: the
+    # spurious rate the correlated noise could contribute if it were mistaken
+    # for kinetics.
+    nuisance_rate_std = np.sqrt(3.0) * hyperparameters['nuisance_std'] \
+        / hyperparameters['nuisance_lengthscale']
+
+    residuals = values_centered - smoothed['signal'] - smoothed['nuisance']
     residual_autocorrelation = float(np.corrcoef(residuals[:-1], residuals[1:])[0, 1]) \
         if len(residuals) > 2 else np.nan
 
     max_rolling_slope = float(np.nanmax(rolling_slopes)) \
         if np.any(np.isfinite(rolling_slopes)) else np.nan
 
+    outlier_mask = weights < OUTLIER_WEIGHT_THRESHOLD
+
     diagnostics = {
-        'log_likelihood': float(log_likelihood),
-        'outlier_fraction': float(mask.mean()),
+        'log_likelihood': smoothed['log_likelihood'],
+        'outlier_fraction': float(outlier_mask.mean()),
         'residual_lag1_autocorr': residual_autocorrelation,
         'median_dt': Quantity(median_time_step, TIME_UNIT),
         'max_rolling_slope': Quantity(max_rolling_slope, RATE_UNIT),
         'crosscheck_std': Quantity(float(crosscheck_std), RATE_UNIT),
+        'nuisance_rate_std': Quantity(float(nuisance_rate_std), RATE_UNIT),
+        'lengthscale_lower_bound': Quantity(float(lengthscale_bounds[0]), TIME_UNIT),
     }
 
     result = MaxRateResult(
@@ -985,14 +1689,18 @@ def extract_max_rate(time, values, window=None, outlier_threshold=6.0,
         max_rate_instantaneous_std = Quantity(float(rate_std[best_instantaneous]), RATE_UNIT),
         t_max_rate_instantaneous = Quantity(float(time[best_instantaneous]), TIME_UNIT),
         max_rate_crosscheck = Quantity(float(crosscheck), RATE_UNIT),
-        outlier_mask = mask,
+        outlier_mask = outlier_mask,
         smooth = Quantity(smooth, AMOUNT_UNIT),
-        smooth_std = Quantity(np.sqrt(smooth_variance), AMOUNT_UNIT),
+        smooth_std = Quantity(np.sqrt(smoothed['signal_variance']), AMOUNT_UNIT),
+        nuisance = Quantity(smoothed['nuisance'], AMOUNT_UNIT),
         rate = Quantity(rate, RATE_UNIT),
         rate_std = Quantity(rate_std, RATE_UNIT),
         hyperparameters = {'lengthscale': Quantity(hyperparameters['lengthscale'], TIME_UNIT),
-                         'signal_std': Quantity(hyperparameters['signal_std'], AMOUNT_UNIT),
-                         'noise_std': Quantity(hyperparameters['noise_std'], AMOUNT_UNIT)},
+                           'signal_std': Quantity(hyperparameters['signal_std'], AMOUNT_UNIT),
+                           'nuisance_lengthscale': Quantity(hyperparameters['nuisance_lengthscale'],
+                                                            TIME_UNIT),
+                           'nuisance_std': Quantity(hyperparameters['nuisance_std'], AMOUNT_UNIT),
+                           'noise_std': Quantity(hyperparameters['noise_std'], AMOUNT_UNIT)},
         diagnostics = diagnostics,
     )
     result.flags = collect_quality_flags(result, time, lengthscale_bounds)
@@ -1002,7 +1710,11 @@ def extract_max_rate(time, values, window=None, outlier_threshold=6.0,
 
 def plot_max_rate(result, time, values, axes=None):
     """
-    Plot a two-panel diagnostic figure: data with smooth fit, and rate with confidence band.
+    Plot a two-panel diagnostic figure: data with the fit, and rate with confidence band.
+
+    The upper panel shows the kinetic component and, dashed, the full model
+    (kinetic plus nuisance). Where the two separate, the fit has assigned
+    that structure to correlated noise and kept it out of the rate.
 
     The input series is not stored on the result, so it is passed in again
     here; it is re-validated so that it lines up with the smoothed curve.
@@ -1032,18 +1744,22 @@ def plot_max_rate(result, time, values, axes=None):
     time, values = validate_time_series(time, values)
     mask = result.outlier_mask
     smooth = result.smooth.unit[AMOUNT_UNIT]
+    nuisance = result.nuisance.unit[AMOUNT_UNIT]
     rate = result.rate.unit[RATE_UNIT]
     rate_std = result.rate_std.unit[RATE_UNIT]
     max_rate = result.max_rate.unit[RATE_UNIT]
     max_rate_std = result.max_rate_std.unit[RATE_UNIT]
     t_max_rate = result.t_max_rate.unit[TIME_UNIT]
 
-    # Upper panel: raw data, masked artifacts, smoothed curve and the max-rate window
-    data_axis.plot(time, values, '.', ms=1.5, color='0.6', label='data')
+    # Upper panel: raw data, downweighted samples, both model components and
+    # the max-rate window
+    data_axis.plot(time, values, '.', ms=3.5, color='0.6', label='data')
     if mask.any():
         data_axis.plot(time[mask], values[mask], 'x', ms=3, color='crimson',
-                       label='masked artifacts')
-    data_axis.plot(time, smooth, color='C0', lw=1.5, label='GP smooth')
+                       label='downweighted')
+    data_axis.plot(time, smooth + nuisance, color='0.3', lw=0.8, ls='--',
+                   label='kinetic + nuisance')
+    data_axis.plot(time, smooth, color='C0', lw=1.5, label='kinetic component')
 
     half_window = 0.5 * result.window.unit[TIME_UNIT]
     window_times = np.array([t_max_rate - half_window, t_max_rate + half_window])
@@ -1074,17 +1790,21 @@ def test_function():
     import matplotlib.pyplot as plt
 
     # Synthetic experiment: induction period, linear H2 evolution in umol,
+    # a slow sinusoidal baseline wave whose slope rivals the true rate, and
     # one bubble artifact whose instantaneous slope is 75x the true rate
     rng = np.random.default_rng(0)
     time_seconds = np.arange(0.0, 8000.0, 1.0)
     signal = 0.02 * np.clip(time_seconds - 1000.0, 0.0, None)
+
+    baseline_wave = 3.0 * np.sin(2.0 * np.pi * time_seconds / 400.0)
 
     artifact = np.zeros_like(time_seconds)
     artifact[5000:5010] = np.linspace(0.0, 15.0, 10)
     artifact[5010:] = 15.0 * np.exp(-(time_seconds[5010:] - time_seconds[5010]) / 100.0)
 
     time = Quantity(time_seconds, 's')
-    values = Quantity(signal + artifact + 0.2 * rng.standard_normal(len(time_seconds)), 'umol')
+    values = Quantity(signal + baseline_wave + artifact
+                      + 0.2 * rng.standard_normal(len(time_seconds)), 'umol')
 
     result = extract_max_rate(time, values)
 
@@ -1093,10 +1813,36 @@ def test_function():
           f"(true 0.0200) at t = {result.t_max_rate.unit['s']:.0f} s")
     print(f"in umol/h: {result.max_rate.unit['umol / h']:.2f}")
     print(f"cross-check: {result.max_rate_crosscheck.unit['umol / s']:.4f}, flags: {result.flags}")
+    print(f"noise: white {result.hyperparameters['noise_std'].unit['umol']:.3f} umol, "
+          f"correlated {result.hyperparameters['nuisance_std'].unit['umol']:.3f} umol "
+          f"over {result.hyperparameters['nuisance_lengthscale'].unit['s']:.0f} s")
+
+    plot_max_rate(result, time, values)
+    plt.show()
+
+def test_function_experimental_data():
+
+    from pyKES.database.database_experiments import ExperimentalDataset
+    import matplotlib.pyplot as plt
+    
+
+    data = np.genfromtxt('/Users/jacob/Downloads/MRG-059-Z-1-3.csv', delimiter=',', skip_header = 1)
+
+
+    time = Quantity(data[:,0], 's')
+    values = Quantity(data[:,1], 'umol')
+
+    result = extract_max_rate(time, values)
 
     plot_max_rate(result, time, values)
     plt.show()
 
 
+
+    
+
+
+
 if __name__ == "__main__":
-    test_function()
+    #test_function()
+    test_function_experimental_data()

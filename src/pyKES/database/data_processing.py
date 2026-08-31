@@ -3,7 +3,7 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from functools import partial
 import traceback
-from typing import Optional
+from typing import Callable, Optional
 from pathlib import Path
 
 from pyKES.database.database_experiments import ExperimentalDataset, Experiment
@@ -81,9 +81,36 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
                                         raw_data_reading_function: callable,
                                         processing_function: callable,
                                         overview_df_experiment_column: Optional[str] = 'Experiment',
-                                        directory: Optional[Path] = None):
+                                        directory: Optional[Path] = None,
+                                        progress_callback: Optional[Callable[[int, int, Optional[str]], None]] = None):
     """
-    
+    Process every experiment of the overview dataframe that is not yet in the database.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset whose ``overview_df`` lists the experiments; successfully
+        processed experiments are added to it in place.
+    metadata_retrival_function : callable
+        Returns the metadata dict for an experiment name.
+    raw_data_reading_function : callable
+        Reads the raw data for an experiment from ``directory``.
+    processing_function : callable
+        Turns raw data and metadata into the processed-data dict.
+    overview_df_experiment_column : str, optional
+        Column of ``overview_df`` holding the experiment names.
+    directory : Path, optional
+        Directory the raw-data files are read from.
+    progress_callback : callable, optional
+        Called as ``(completed, total, experiment_name)`` once before the loop
+        with ``(0, total, None)`` — so callers can display the total before the
+        first, potentially slow, experiment — and again after each experiment.
+
+    Returns
+    -------
+    list of dict
+        One result dict per processed experiment, as returned by
+        `read_in_single_experiment`.
     """
 
     if "Processed" not in database.overview_df.columns:
@@ -100,9 +127,14 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
     experiments = database.overview_df.loc[mask, 
                     overview_df_experiment_column].astype(str).tolist()
     
+    total_experiments = len(experiments)
+
+    if progress_callback is not None:
+        progress_callback(0, total_experiments, None)
+
     results = []
-    
-    for experiment_name in experiments:
+
+    for completed, experiment_name in enumerate(experiments, start=1):
 
         result = read_in_single_experiment(
             file_name = experiment_name,
@@ -125,9 +157,12 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
                 database.overview_df[overview_df_experiment_column].eq(result['data'].experiment_name),
                     "Processed",
                 ] = 'True'
-            
+
         else:
             print(f"Failed to process {result['file']}: {result['error']}")
+
+        if progress_callback is not None:
+            progress_callback(completed, total_experiments, experiment_name)
 
     return results
 

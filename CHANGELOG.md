@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project aims to follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+- Progress reporting for raw-data ingestion: `read_in_experiments_single_threaded` accepts an optional `progress_callback`, called as `(completed, total, experiment_name)` once before the loop (with `total` and `None`) and after each experiment. The Streamlit data-upload page uses it to render a live progress bar naming the experiment being processed.
+
+### Changed
+- `pyKES.utilities.max_rate` reworked to be robust to low-frequency (correlated) sensor noise, which the previous single-length-scale smoother tracked as signal. The trace is now modelled as a slow kinetic component (Matern-5/2) plus a stationary nuisance component (Matern-3/2) plus white noise, and only the kinetic component is differentiated. The nuisance component's correlation time and amplitude are measured beforehand by a robust second-difference variogram rather than fitted by likelihood, because the likelihood alone cannot choose between "the kinetics bent" and "the baseline drifted".
+- Artifact handling replaced. Instead of masking samples whose increments look like jumps — which cut out sharp kinetic onsets and, on artifact-rich traces, up to 47 % of the series including the entire initial rise — samples are now rejected only where the data disagree with a prediction from well before *and* a prediction from well after them while those two predictions agree with each other. A genuine transition makes the two sides disagree and is left untouched; a bubble makes them agree and is rejected, then grown over its relaxation tail with hysteresis and undone wherever the trace never returns. Whatever survives is downweighted by redescending (Cauchy) IRLS weights rather than deleted.
+- `MaxRateResult` gained a `nuisance` field (the fitted correlated-noise component; `smooth + nuisance` models the measured trace). `smooth` and `rate` now refer to the kinetic component alone, so a plot of `smooth` deliberately does not follow low-frequency wiggles. `hyperparameters` gained `nuisance_lengthscale` and `nuisance_std`; `diagnostics` gained `nuisance_rate_std` and `lengthscale_lower_bound`. `outlier_mask` now marks downweighted rather than deleted samples.
+- The uncertainty of `max_rate` is now the mean posterior variance of the derivative across the window. The previous independence bound on the two endpoint values becomes far too conservative once a nuisance component makes the absolute level of the kinetic curve ambiguous.
+- New quality flags `max_rate_not_significant` (maximum less than 3 σ above zero, e.g. blank wells), `strong_correlated_noise` (the nuisance component's slope scale reaches the reported rate) and `window_duration_limited` (the series is too short for the sampling-based window rule, so the window holds only a handful of points).
+- The default max-rate window is now capped at 10 % of the series duration, on top of the existing floor of 25 median time steps and 2 % of the duration. The floor and the cap cross at exactly 250 samples, so the rule is continuous and series above that length are unaffected.
+- **Breaking**: `extract_max_rate` parameters `outlier_threshold` and `outlier_pad` are replaced by a single `robust_threshold` (default 4.0), and `max_fit_points` now defaults to 1200. Reused `hyperparameters` dicts from before this release lack the two nuisance entries and will raise.
+
+### Fixed
+- Maximum rates on traces with strong low-frequency noise were overestimated by up to a factor of two, and blank wells reported spurious positive rates driven by noise crests. On a 66-well validation plate the six artifact-rich wells drop by 11–54 %, the six blanks now return near-zero rates flagged `max_rate_not_significant`, and the 60 well-behaved wells reproduce their previous values to within a few percent.
+- The Gaussian-process fit could be completely wrong over the first few hundred seconds of a reaction, because the initial rise was masked as an artifact and the smoother reverted to its prior mean across the gap.
+- Maximum rates on short, coarsely sampled series were underestimated by up to a quarter, because the sampling-based window floor had no counterpart cap: on a 76-point, 250 s run it produced a window a third of the experiment wide, averaging the maximum together with everything after it. The new duration cap raises such a series from 0.80 to 1.05 µmol/L/s, matching a raw finite-difference reference at the same window to within 1 %.
+- On the same short series the noise model collapsed: with only three variogram lags for a four-parameter fit, essentially all of the scatter was assigned to a "correlated" component with a correlation time of 1.5 samples, leaving `white_std` a thousand times too small. That nuisance state then interpolated the measurement noise point by point, driving the residuals — and with them the IRLS scale — to zero, so ordinary noise scored as hundreds of standard deviations and 16 % of the series was rejected as artifacts. A correlated component that decorrelates within three sampling intervals is now folded into the white noise, as are the amplitudes of components already declared insignificant.
+- `max_rate_crosscheck` silently became NaN whenever a window held fewer than ten samples, which is the normal case on a short series. The rolling-regression minimum is now scaled to the window.
+
 ## [0.1.6]
 
 ### Added

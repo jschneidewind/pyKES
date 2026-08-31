@@ -16,7 +16,9 @@ A per-handler progress bar reports ingestion progress in real time.
 
 import os
 import tempfile
+from functools import partial
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -160,6 +162,40 @@ def _render_metadata_uploader(
 # Raw-data uploaders
 # ---------------------------------------------------------------------------
 
+def _update_ingestion_progress(progress_placeholder,
+                               completed: int,
+                               total: int,
+                               experiment_name: Optional[str]) -> None:
+    """
+    Render ingestion progress into a Streamlit placeholder.
+
+    Bound to its placeholder with `functools.partial` and handed to
+    `read_in_experiments_single_threaded` as its ``progress_callback``.
+
+    Parameters
+    ----------
+    progress_placeholder : st.delta_generator.DeltaGenerator
+        Placeholder created with `st.empty`; re-rendered on every tick.
+    completed : int
+        Number of experiments processed so far.
+    total : int
+        Number of experiments to process.
+    experiment_name : str or None
+        Experiment just processed; ``None`` for the initial call.
+    """
+
+    if total == 0:
+        progress_placeholder.info("No new experiments to process")
+        return
+
+    if experiment_name is None:
+        progress_text = f"Processing {total} experiment(s)…"
+    else:
+        progress_text = f"Processing experiment {completed}/{total}: {experiment_name}"
+
+    progress_placeholder.progress(completed / total, text = progress_text)
+
+
 def _render_raw_data_uploaders(config: FileUploadHandler, dataset: ExperimentalDataset) -> None:
     with st.form(key=f"upload_form_{config.file_storage_key}", clear_on_submit=False):
         uploaded_files = st.file_uploader(
@@ -174,6 +210,8 @@ def _render_raw_data_uploaders(config: FileUploadHandler, dataset: ExperimentalD
     if not submitted or not uploaded_files:
         return
 
+    progress_placeholder = st.empty()
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         for uploaded_file in uploaded_files:
             file_path = Path(tmp_dir) / uploaded_file.name
@@ -186,7 +224,13 @@ def _render_raw_data_uploaders(config: FileUploadHandler, dataset: ExperimentalD
             processing_function = config.processing_function,
             directory = Path(tmp_dir),
             overview_df_experiment_column = config.overview_df_experiment_column,
+            progress_callback = partial(_update_ingestion_progress, progress_placeholder),
         )
+
+    # Clear the finished bar so only the result messages remain. An empty result
+    # list means nothing was processed; its "no new experiments" notice stays.
+    if results:
+        progress_placeholder.empty()
 
     successes = [r for r in results if r["success"]]
     failures = [r for r in results if not r["success"]]
