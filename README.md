@@ -15,7 +15,7 @@ Adding .vscode/setting.json file with
         "/Users/jacob/Documents/Water_Splitting/Projects/pyKES/pyKES/src"
     ]
 }
-
+ 
 ## Other packages using pyKES
 
 When pyKES version changes:
