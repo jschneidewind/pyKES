@@ -7,11 +7,19 @@ import json
 import pickle
 from io import StringIO
 
+from pyKES.utilities.version_information import (
+    build_version_information,
+    describe_version_information,
+    stamp_version_information,
+)
+
 # Bump when the on-disk layout changes in a way older readers cannot ignore
 # (renamed/removed groups, changed required attributes). Purely additive
 # changes to processing_parameters or per-experiment dicts do not require
 # a bump.
-SCHEMA_VERSION = "1.0"
+# 1.1 adds the dataset-level 'version' attribute and the per-experiment
+# 'version' attribute (both JSON, both optional for readers).
+SCHEMA_VERSION = "1.1"
 
 
 def import_overview_excel(file_name, 
@@ -30,7 +38,26 @@ def import_overview_excel(file_name,
 
 @dataclass
 class Experiment:
-    """Store data and metadata for a single experiment."""
+    """
+    Store data and metadata for a single experiment.
+
+    Parameters
+    ----------
+    experiment_name : str
+        Unique name of the experiment within its dataset.
+    raw_data_file : str
+        Source the raw data was read from.
+    color, group : str
+        Display color and group used by the Streamlit pages.
+    metadata, raw_data, processed_data : dict
+        Experiment metadata, raw measurements, and the output of the
+        processing function.
+    version : dict, optional
+        Provenance of the processing run that produced `processed_data`
+        (pyKES version, timestamps, external app version). Written by the
+        ingestion and reprocessing pipelines; empty for experiments read from
+        files predating schema 1.1.
+    """
     experiment_name: str
     raw_data_file: str
     color: str
@@ -38,6 +65,7 @@ class Experiment:
     metadata: Dict[str, any]
     raw_data: Dict[str, any]
     processed_data: Dict[str, any]
+    version: Dict[str, Any] = field(default_factory=dict)
 
 def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
     """
@@ -204,6 +232,25 @@ def read_df_from_hdf(h5_file: h5py.File, key: str = 'overview_df') -> pd.DataFra
 @dataclass
 class ExperimentalDataset:
     """
+    Collection of experiments plus the dataset-level configuration.
+
+    Parameters
+    ----------
+    experiments : dict
+        Mapping of experiment name to `Experiment`.
+    overview_df : pandas.DataFrame
+        Overview sheet listing the experiments and their metadata.
+    plotting_instruction, group_mapping, processing_parameters : dict
+        Configuration supplied by the external app.
+    version : dict
+        Provenance of the dataset: pyKES version, schema version, creation and
+        modification timestamps, and the external app's own version
+        information. Filled in on the first save; see
+        `pyKES.utilities.version_information`.
+    schema_version : str, optional
+        On-disk layout version the dataset was loaded from. None for datasets
+        that have not been written yet or that come from files predating
+        versioning.
     """
 
     experiments: Dict[str, 'Experiment'] = field(default_factory=dict)
@@ -211,11 +258,83 @@ class ExperimentalDataset:
     plotting_instruction: Dict[str, Any] = field(default_factory=dict)
     group_mapping: Dict[str, Any] = field(default_factory=dict)
     processing_parameters: Dict[str, Any] = field(default_factory=dict)
+    version: Dict[str, Any] = field(default_factory=dict)
     schema_version: Optional[str] = None
 
     def add_experiment(self, experimental_data: 'Experiment'):
         """Add an experiment to the dataset"""
         self.experiments[experimental_data.experiment_name] = experimental_data
+
+    # -----------------------------------------------------------------
+    # Version / provenance handling
+    # -----------------------------------------------------------------
+
+    def stamp_version(self,
+                      processed: bool = False,
+                      external_version: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Refresh the dataset's version dictionary.
+
+        Called automatically on every save and by the processing pipelines;
+        call it directly only to record provenance at some other moment.
+
+        Parameters
+        ----------
+        processed : bool, default False
+            Whether a processing function was just run, which additionally
+            sets ``'last_processed'``.
+        external_version : dict, optional
+            Provenance of the external app (e.g. its git commit), merged into
+            the existing ``'external_version'`` entry.
+
+        Returns
+        -------
+        version : dict
+            The updated version dictionary (also stored on the dataset).
+        """
+        if not self.version:
+            self.version = build_version_information(SCHEMA_VERSION)
+
+        self.version = stamp_version_information(self.version,
+                                                 SCHEMA_VERSION,
+                                                 processed=processed,
+                                                 external_version=external_version)
+
+        return self.version
+
+    def set_external_version(self, external_version: Dict[str, Any]) -> None:
+        """
+        Record the external app's own version information.
+
+        Intended for apps that embed pyKES and want their code version stored
+        alongside the data::
+
+            dataset.set_external_version({'app': 'photocat',
+                                          'commit': get_git_commit(__file__)})
+
+        Parameters
+        ----------
+        external_version : dict
+            Arbitrary JSON-serializable provenance, merged into any existing
+            entry.
+
+        Returns
+        -------
+        None : None
+            ``self.version['external_version']`` is updated in place.
+        """
+        self.stamp_version(external_version=external_version)
+
+    def describe_version(self) -> str:
+        """
+        Render the dataset's version dictionary as a one-line summary.
+
+        Returns
+        -------
+        description : str
+            Human-readable provenance summary.
+        """
+        return describe_version_information(self.version)
 
     def update_overview_df(self,
                         incoming_df: pd.DataFrame,
@@ -286,6 +405,11 @@ class ExperimentalDataset:
             # Always stamp the schema version so older / mismatched readers
             # can detect format drift.
             f.attrs['schema_version'] = SCHEMA_VERSION
+            self.schema_version = SCHEMA_VERSION
+
+            # Provenance of the file: which pyKES (and which external app)
+            # wrote it, and when it was created / last touched.
+            f.attrs['version'] = json.dumps(self.stamp_version())
 
             # Save dataset-level dictionaries as attributes
             if self.plotting_instruction:
@@ -308,6 +432,9 @@ class ExperimentalDataset:
                 exp_grp.attrs['raw_data_file'] = experiment.raw_data_file
                 exp_grp.attrs['color'] = experiment.color
                 exp_grp.attrs['group'] = experiment.group
+
+                if experiment.version:
+                    exp_grp.attrs['version'] = json.dumps(experiment.version)
 
                 # Save nested dictionaries in separate groups
                 if experiment.raw_data:
@@ -350,6 +477,8 @@ class ExperimentalDataset:
                 dataset.group_mapping = json.loads(f.attrs['group_mapping'])
             if 'processing_parameters' in f.attrs:
                 dataset.processing_parameters = json.loads(f.attrs['processing_parameters'])
+            if 'version' in f.attrs:
+                dataset.version = json.loads(f.attrs['version'])
             
             for exp_name in f.keys():
                 if exp_name == 'overview_df':  # Skip the overview_df group
@@ -362,6 +491,9 @@ class ExperimentalDataset:
                 raw_data_file = exp_group.attrs['raw_data_file'] 
                 color = exp_group.attrs['color']
                 group = exp_group.attrs.get('group', '')  # Default to empty string if not present
+
+                # Absent for experiments written before schema 1.1
+                version = json.loads(exp_group.attrs['version']) if 'version' in exp_group.attrs else {}
                 
                 # Load nested dictionaries
                 raw_data = load_nested_dict_from_hdf5(exp_group['raw_data']) if 'raw_data' in exp_group else {}
@@ -375,7 +507,8 @@ class ExperimentalDataset:
                     group=group,
                     metadata=metadata,
                     raw_data=raw_data,
-                    processed_data=processed_data
+                    processed_data=processed_data,
+                    version=version
                 )
 
                 dataset.add_experiment(single_experiment)
@@ -462,6 +595,12 @@ class ExperimentalDataset:
             # Merge processing_parameters dictionaries
             if temp_dataset.processing_parameters:
                 merged_dataset.processing_parameters.update(temp_dataset.processing_parameters)
+
+            # Carry over the external provenance of every source file; the
+            # merged dataset itself is stamped as newly created on save.
+            source_external_version = (temp_dataset.version or {}).get('external_version') or {}
+            if source_external_version:
+                merged_dataset.stamp_version(external_version=source_external_version)
         
         # Report duplicates
         if duplicate_experiments:
@@ -475,6 +614,9 @@ class ExperimentalDataset:
             # Remove duplicate rows if any
             merged_dataset.overview_df = merged_dataset.overview_df.drop_duplicates()
         
+        merged_dataset.stamp_version()
+        merged_dataset.version['merged_from'] = [str(filename) for filename in filenames]
+
         print(f"\nMerged dataset contains {len(merged_dataset.experiments)} experiments")
         
         # Save if output filename provided
@@ -498,6 +640,7 @@ def usage_example():
     # Add dataset-level attributes
     dataset.plotting_instruction = {'xlabel': 'Time (s)', 'ylabel': 'Current (mA)'}
     dataset.group_mapping = {'GroupA': ['Exp1'], 'GroupB': ['Exp2']}
+    dataset.set_external_version({'app': 'usage_example', 'commit': 'abc123'})
 
     exp1 = Experiment(
         experiment_name="Exp1",
@@ -525,6 +668,7 @@ def usage_example():
     loaded_dataset = ExperimentalDataset.load_from_hdf5("src/tests/experiments.h5")
     loaded_dataset.print_experiments()
     
+    print(f"Version information: {loaded_dataset.describe_version()}")
     print(f"Plotting instructions: {loaded_dataset.plotting_instruction}")
     print(f"Group mapping: {loaded_dataset.group_mapping}")
     print(f"Exp1 group: {loaded_dataset.experiments['Exp1'].group}")

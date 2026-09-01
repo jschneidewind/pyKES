@@ -6,10 +6,23 @@ from pyKES.streamlit_app.config_interface import (
     HomeConfig,
     PyKESStreamlitConfig,
 )
+from pyKES.utilities.version_information import get_git_commit
 
 from tests.data.processing_parameters import PROCESSING_PARAMETERS, PLOTTING_INSTRUCTIONS, GROUP_MAPPING
 from tests.data.processing_functions_overview_df import metadata_retrival_function, raw_data_reading_function, processing_function
 
+
+# -----------------------------------------------------------------------------
+# Provenance of this app, stored in every dataset it processes
+# -----------------------------------------------------------------------------
+
+# Recorded in dataset.version['external_version'], so the processed data can be
+# traced back to the code that produced it. get_git_commit returns None outside
+# a git work tree (e.g. a deployment from a source archive).
+EXTERNAL_VERSION = {
+    "app": "external_repo_example",
+    "commit": get_git_commit(__file__),
+}
 
 # -----------------------------------------------------------------------------
 # File Handler Config
@@ -53,6 +66,7 @@ DATA_UPLOAD_CONFIG = DataUploadConfig(
     group_mapping=GROUP_MAPPING,
     plotting_instruction=PLOTTING_INSTRUCTIONS,
     processing_parameters=PROCESSING_PARAMETERS,
+    external_version=EXTERNAL_VERSION,
 )
 
 HOME_CONFIG = HomeConfig()

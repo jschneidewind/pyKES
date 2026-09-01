@@ -58,6 +58,18 @@ streamlit run examples/external_repo/Home.py
   absolute paths.
 - Customize titles, icons, and the home-page intro through `HomeConfig` and
   `PyKESStreamlitConfig`.
+- Set `external_version` on `DataUploadConfig` (see `EXTERNAL_VERSION` in
+  `config.py`) so the git commit of *this* repository is stored in every
+  dataset processed by the app. See
+  [docs/versioning_and_reprocessing.md](../../docs/versioning_and_reprocessing.md).
+
+## Reprocessing existing files
+
+Section "3. ♻️ Reprocess Existing Experiments" of the Data Upload page reruns a
+handler's `processing_function` against the metadata and raw data already in the
+loaded HDF5 file — no raw-data files needed. Use it to apply an updated
+processing pipeline to finished datasets; remember to download the dataset
+afterwards to persist the result.
 
 ## Notes / gaps
 

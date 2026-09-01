@@ -16,6 +16,15 @@ Adding .vscode/setting.json file with
     ]
 }
 
+## Other packages using pyKES
+
+When pyKES version changes:
+* Updating packages' pyproject.toml to new pyKES version
+running
+uv lock --refresh
+uv sync
+
+
 
 ## Contributing
 

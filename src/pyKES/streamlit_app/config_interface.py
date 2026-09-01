@@ -110,6 +110,17 @@ class DataUploadConfig:
     fresh_dataset_plotting_instruction : Dict[str, Any], optional
     fresh_dataset_processing_parameters : Dict[str, Any], optional
         Defaults stored on a freshly created ``ExperimentalDataset``.
+
+    external_version : Dict[str, Any], optional
+        Version information of the external app itself, recorded in the
+        dataset's ``version['external_version']`` whenever experiments are
+        processed or reprocessed. Typically the git commit of the repository
+        holding the processing functions::
+
+            from pyKES.utilities.version_information import get_git_commit
+
+            external_version = {'app': 'photocat',
+                                'commit': get_git_commit(__file__)}
     """
 
     file_handlers: List[FileUploadHandler]
@@ -129,6 +140,9 @@ class DataUploadConfig:
     group_mapping: Dict[str, Any] = field(default_factory=dict)
     plotting_instruction: Dict[str, Any] = field(default_factory=dict)
     processing_parameters: Dict[str, Any] = field(default_factory=dict)
+
+    # Provenance of the external app, stamped onto processed experiments.
+    external_version: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class HomeConfig:

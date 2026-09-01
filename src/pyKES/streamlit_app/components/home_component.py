@@ -14,6 +14,7 @@ from typing import Optional
 
 from pyKES.database.database_experiments import ExperimentalDataset
 from pyKES.streamlit_app.config_interface import HomeConfig
+from pyKES.utilities.version_information import describe_version_information
 
 def render_home(config: Optional[HomeConfig] = None) -> None:
     """
@@ -85,6 +86,7 @@ def render_home(config: Optional[HomeConfig] = None) -> None:
         st.title(config.loaded_dataset_title)
         if st.session_state.hdf5_filename:
             st.caption(f"File: {st.session_state.hdf5_filename}")
+        st.caption(describe_version_information(st.session_state.experimental_dataset.version))
         st.dataframe(st.session_state.experimental_dataset.overview_df)
 
     st.markdown(config.intro_markdown)

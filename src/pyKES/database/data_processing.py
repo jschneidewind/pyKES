@@ -6,7 +6,59 @@ import traceback
 from typing import Callable, Optional
 from pathlib import Path
 
-from pyKES.database.database_experiments import ExperimentalDataset, Experiment
+from pyKES.database.database_experiments import ExperimentalDataset, Experiment, SCHEMA_VERSION
+from pyKES.utilities.version_information import stamp_version_information
+
+
+def stamp_experiment_version(experiment: Experiment,
+                             external_version: Optional[dict] = None) -> None:
+    """
+    Record on an experiment which code produced its processed data.
+
+    Parameters
+    ----------
+    experiment : Experiment
+        Experiment whose ``version`` dict is updated in place. On a first run
+        the dict is created; on a reprocessing run its ``created`` timestamp
+        is preserved and ``last_processed`` is refreshed.
+    external_version : dict, optional
+        Provenance of the external app supplying the processing functions.
+
+    Returns
+    -------
+    None : None
+    """
+    stamp_version_information(experiment.version,
+                              SCHEMA_VERSION,
+                              processed=True,
+                              external_version=external_version)
+
+
+def resolve_external_version(database: ExperimentalDataset,
+                             external_version: Optional[dict]) -> Optional[dict]:
+    """
+    Choose the external provenance to stamp onto processed experiments.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset whose ``version['external_version']`` acts as the default, so
+        an app that called `ExperimentalDataset.set_external_version` once does
+        not have to repeat itself on every processing call.
+    external_version : dict or None
+        Explicitly supplied provenance, which takes precedence. An empty dict
+        counts as "not supplied", so a config that simply leaves the field at
+        its default does not suppress the dataset's own entry.
+
+    Returns
+    -------
+    external_version : dict or None
+        Provenance to record, or None when neither source provides one.
+    """
+    if external_version:
+        return external_version
+
+    return (database.version or {}).get('external_version') or None
 
 def generate_list_of_files(keywords, directory):
 
@@ -25,7 +77,8 @@ def read_in_single_experiment(file_name: str,
                               raw_data_reading_function: callable,
                               processing_function: callable,
                               directory: Optional[Path] = None,
-                              legacy_mode = True):
+                              legacy_mode = True,
+                              external_version: Optional[dict] = None):
     """
     Legacy mode is for use with file-based processing and use in multi-processing mode.
 
@@ -57,7 +110,9 @@ def read_in_single_experiment(file_name: str,
             raw_data = raw_data_dict,
             processed_data = processed_data_dict
         )
-        
+
+        stamp_experiment_version(experiment, external_version)
+
         return {
             'success': True,
             'data': experiment
@@ -82,6 +137,7 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
                                         processing_function: callable,
                                         overview_df_experiment_column: Optional[str] = 'Experiment',
                                         directory: Optional[Path] = None,
+                                        external_version: Optional[dict] = None,
                                         progress_callback: Optional[Callable[[int, int, Optional[str]], None]] = None):
     """
     Process every experiment of the overview dataframe that is not yet in the database.
@@ -101,6 +157,10 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
         Column of ``overview_df`` holding the experiment names.
     directory : Path, optional
         Directory the raw-data files are read from.
+    external_version : dict, optional
+        Provenance of the external app (e.g. its git commit), stamped onto
+        every processed experiment. Defaults to the dataset's own
+        ``version['external_version']``.
     progress_callback : callable, optional
         Called as ``(completed, total, experiment_name)`` once before the loop
         with ``(0, total, None)`` — so callers can display the total before the
@@ -128,6 +188,7 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
                     overview_df_experiment_column].astype(str).tolist()
     
     total_experiments = len(experiments)
+    external_version = resolve_external_version(database, external_version)
 
     if progress_callback is not None:
         progress_callback(0, total_experiments, None)
@@ -143,7 +204,8 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
             raw_data_reading_function = raw_data_reading_function,
             processing_function = processing_function,
             directory = directory,
-            legacy_mode = False
+            legacy_mode = False,
+            external_version = external_version
         )
 
         results.append(result)
@@ -164,6 +226,9 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
         if progress_callback is not None:
             progress_callback(completed, total_experiments, experiment_name)
 
+    if any(result['success'] for result in results):
+        database.stamp_version(processed=True, external_version=external_version)
+
     return results
 
 
@@ -174,7 +239,8 @@ def read_in_experiments_multiprocessing(database: ExperimentalDataset,
                                         keywords: Optional[list] = None, 
                                         directory: Optional[str] = None,
                                         overview_df_based_processing: Optional[bool] = False,
-                                        overview_df_experiment_column: Optional[str] = 'Experiment'): 
+                                        overview_df_experiment_column: Optional[str] = 'Experiment',
+                                        external_version: Optional[dict] = None): 
     """
     
     """
@@ -188,7 +254,8 @@ def read_in_experiments_multiprocessing(database: ExperimentalDataset,
                                           database = database,
                                           metadata_retrival_function = metadata_retrival_function,
                                           raw_data_reading_function = raw_data_reading_function,
-                                          processing_function = processing_function)
+                                          processing_function = processing_function,
+                                          external_version = resolve_external_version(database, external_version))
 
     with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
         results = list(executor.map(read_in_single_experiment_partial, files))
@@ -198,6 +265,159 @@ def read_in_experiments_multiprocessing(database: ExperimentalDataset,
             database.add_experiment(result['data'])
         else:
             print(f"Failed to process {result['file']}: {result['error']}")
+
+    if any(result['success'] for result in results):
+        database.stamp_version(processed=True, external_version=external_version)
+
+    return results
+
+
+# =============================================================================
+# Reprocessing of experiments already stored in a dataset
+# =============================================================================
+
+def reprocess_single_experiment(experiment: Experiment,
+                                processing_function: callable,
+                                metadata_retrival_function: Optional[callable] = None,
+                                overview_df=None,
+                                external_version: Optional[dict] = None) -> dict:
+    """
+    Rerun the processing step of one experiment that is already in a dataset.
+
+    The raw data stored in the HDF5 file is reused, so no raw-data files are
+    needed. The metadata is either taken from the experiment as stored or
+    refreshed from the overview DataFrame, which is what makes an edited
+    overview sheet take effect.
+
+    The experiment is only mutated once the processing function has returned,
+    so a failing experiment keeps its previous processed data.
+
+    Parameters
+    ----------
+    experiment : Experiment
+        Experiment to reprocess; mutated in place on success.
+    processing_function : callable
+        ``(raw_data_dict, metadata_dict) -> processed_data_dict``.
+    metadata_retrival_function : callable, optional
+        ``(experiment_name, overview_df) -> metadata_dict``. When given, the
+        metadata (and with it ``color`` and ``group``) is refreshed before
+        processing; otherwise the stored metadata is reused unchanged.
+    overview_df : pandas.DataFrame, optional
+        Overview sheet handed to `metadata_retrival_function`.
+    external_version : dict, optional
+        Provenance of the external app, stamped onto the experiment.
+
+    Returns
+    -------
+    result : dict
+        ``{'success': True, 'data': experiment}`` or
+        ``{'success': False, 'file': experiment_name, 'error': message}``,
+        matching the result shape of `read_in_single_experiment`.
+    """
+    try:
+        if metadata_retrival_function is not None:
+            metadata_dict = metadata_retrival_function(experiment.experiment_name, overview_df)
+        else:
+            metadata_dict = experiment.metadata
+
+        processed_data_dict = processing_function(experiment.raw_data, metadata_dict)
+
+        experiment.metadata = metadata_dict
+        experiment.processed_data = processed_data_dict
+        experiment.color = metadata_dict.get('color', experiment.color)
+        experiment.group = metadata_dict.get('group', experiment.group)
+
+        stamp_experiment_version(experiment, external_version)
+
+        return {
+            'success': True,
+            'data': experiment
+        }
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f'{experiment.experiment_name} reprocessing failed, previous results kept, error: {str(e)}')
+        print("Full traceback:")
+        print(tb)
+
+        return {
+            'success': False,
+            'file': experiment.experiment_name,
+            'error': f"{str(e)}\n\nFull traceback:\n{tb}"
+        }
+
+
+def reprocess_experiments(database: ExperimentalDataset,
+                          processing_function: callable,
+                          metadata_retrival_function: Optional[callable] = None,
+                          experiment_names: Optional[list] = None,
+                          external_version: Optional[dict] = None,
+                          progress_callback: Optional[Callable[[int, int, Optional[str]], None]] = None):
+    """
+    Rerun the processing step for experiments already held by a dataset.
+
+    This is the path for updating an existing HDF5 file — for example after a
+    change to the max-rate algorithm — without going back to the raw-data
+    files: metadata and raw data come from the file, only ``processed_data``
+    is rebuilt. The dataset's version dictionary records the run.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset holding the experiments; mutated in place.
+    processing_function : callable
+        ``(raw_data_dict, metadata_dict) -> processed_data_dict``.
+    metadata_retrival_function : callable, optional
+        When given, metadata is refreshed from ``database.overview_df`` before
+        processing; otherwise the stored metadata is reused.
+    experiment_names : list of str, optional
+        Experiments to reprocess. Defaults to every experiment in the dataset.
+    external_version : dict, optional
+        Provenance of the external app. Defaults to the dataset's own
+        ``version['external_version']``.
+    progress_callback : callable, optional
+        Called as ``(completed, total, experiment_name)``, once before the loop
+        with ``(0, total, None)`` and again after each experiment — the same
+        convention as `read_in_experiments_single_threaded`.
+
+    Returns
+    -------
+    list of dict
+        One result dict per experiment, as returned by
+        `reprocess_single_experiment`.
+    """
+    if experiment_names is None:
+        experiment_names = sorted(database.experiments.keys())
+
+    unknown_experiments = [name for name in experiment_names if name not in database.experiments]
+    if unknown_experiments:
+        raise ValueError(f"Experiments not present in the dataset: {unknown_experiments}")
+
+    total_experiments = len(experiment_names)
+    external_version = resolve_external_version(database, external_version)
+
+    if progress_callback is not None:
+        progress_callback(0, total_experiments, None)
+
+    results = []
+
+    for completed, experiment_name in enumerate(experiment_names, start=1):
+
+        result = reprocess_single_experiment(
+            experiment = database.experiments[experiment_name],
+            processing_function = processing_function,
+            metadata_retrival_function = metadata_retrival_function,
+            overview_df = database.overview_df,
+            external_version = external_version
+        )
+
+        results.append(result)
+
+        if progress_callback is not None:
+            progress_callback(completed, total_experiments, experiment_name)
+
+    if any(result['success'] for result in results):
+        database.stamp_version(processed=True, external_version=external_version)
 
     return results
 

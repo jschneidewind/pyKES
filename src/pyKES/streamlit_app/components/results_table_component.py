@@ -4,9 +4,10 @@ Numerical Analysis Results Table
 This module provides a Streamlit interface for inspecting the numerical analysis
 results of individual experiments side by side. Experiments are selected through
 group expanders (as in the time-series page) and their results are rendered as a
-table whose rows are the analysis quantities and whose columns are experiments.
+table whose rows are the experiments and whose columns are the analysis
+quantities.
 
-The rows are defined by the external app through the
+The columns are defined by the external app through the
 ``results_table_instructions`` entry of ``ExperimentalDataset.plotting_instruction``:
 
     'results_table_instructions': {
@@ -31,11 +32,11 @@ from pyKES.utilities.unit_handler import Quantity
 # Display constants
 # =============================================================================
 
-# Key of the plotting_instruction entry that defines the table rows
+# Key of the plotting_instruction entry that defines the table columns
 INSTRUCTION_KEY = 'results_table_instructions'
 
-# Header of the left-most column listing the analysis result names
-RESULT_NAME_COLUMN = 'Analysis Result'
+# Header of the left-most column listing the experiment names
+EXPERIMENT_NAME_COLUMN = 'Experiment'
 
 # Shown whenever a result cannot be resolved for a given experiment
 MISSING_VALUE_PLACEHOLDER = '—'
@@ -248,13 +249,13 @@ def build_results_table(
     """
     Assemble the results table for the selected experiments.
 
-    Every instruction key becomes a row so that the table keeps its shape
+    Every instruction key becomes a column so that the table keeps its shape
     across experiments; cells that cannot be resolved show a placeholder.
 
     Parameters
     ----------
     selected_experiments : list of str
-        Names of the experiments to show, in display order.
+        Names of the experiments to show, in display order — one row each.
     experiments : dict
         Mapping of experiment name to experiment object.
     results_table_instructions : dict
@@ -263,9 +264,9 @@ def build_results_table(
     Returns
     -------
     table : pandas.DataFrame
-        Table indexed by analysis result name with one column per experiment.
+        Table indexed by experiment name with one column per analysis result.
     """
-    table_data = {
+    table_rows = {
         exp_name: [
             build_cell_text(experiments[exp_name], result_config)
             for result_config in results_table_instructions.values()
@@ -274,7 +275,11 @@ def build_results_table(
         if exp_name in experiments
     }
 
-    return pd.DataFrame(table_data, index=list(results_table_instructions.keys()))
+    # Building from an explicit column list keeps the column order and the
+    # table shape even when no experiment is selected.
+    return pd.DataFrame.from_dict(table_rows,
+                                  orient='index',
+                                  columns=list(results_table_instructions.keys()))
 
 
 # =============================================================================
@@ -428,13 +433,13 @@ def render_help_section() -> None:
 
         #### 2. Results Table (Right Panel)
         - **Selected Experiments**: shows and allows manual selection/deselection
-        - Each selected experiment becomes one column, headed by its name
-        - The left-most column lists the analysis results
+        - Each selected experiment becomes one row, labelled with its name
+        - Each analysis result becomes one column
         - Cells reading `{MISSING_VALUE_PLACEHOLDER}` mean that result is not available
           for that experiment
 
         #### 3. Which results are shown
-        The rows are defined by the upstream app through the
+        The columns are defined by the upstream app through the
         `'{INSTRUCTION_KEY}'` entry of the dataset's `plotting_instruction`:
 
         ```python
@@ -522,7 +527,7 @@ def render_results_table() -> None:
             experimental_dataset.experiments,
             results_table_instructions
         )
-        results_table.index.name = RESULT_NAME_COLUMN
+        results_table.index.name = EXPERIMENT_NAME_COLUMN
 
         st.dataframe(results_table, width='stretch')
 

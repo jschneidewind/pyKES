@@ -52,30 +52,37 @@ def experiments():
 def test_table_shape_and_headers(experiments):
     table = build_results_table(list(experiments.keys()), experiments, INSTRUCTIONS)
 
-    assert list(table.columns) == ['Exp_001', 'Exp_002', 'Exp_003']
-    assert list(table.index) == list(INSTRUCTIONS.keys())
+    assert list(table.index) == ['Exp_001', 'Exp_002', 'Exp_003']
+    assert list(table.columns) == list(INSTRUCTIONS.keys())
 
 
 def test_values_are_formatted_with_uncertainty(experiments):
     table = build_results_table(['Exp_001'], experiments, INSTRUCTIONS)
 
-    assert table.loc['Max. rate (mmol/h/g)', 'Exp_001'] == '12.35 ± 0.68'
-    assert table.loc['Apparent quantum yield (%)', 'Exp_001'] == '3.21'
+    assert table.loc['Exp_001', 'Max. rate (mmol/h/g)'] == '12.35 ± 0.68'
+    assert table.loc['Exp_001', 'Apparent quantum yield (%)'] == '3.21'
 
 
 def test_missing_values_become_placeholders(experiments):
     table = build_results_table(['Exp_002', 'Exp_003'], experiments, INSTRUCTIONS)
 
     # Single-element arrays are unwrapped, absent paths are placeholders
-    assert table.loc['Max. rate (mmol/h/g)', 'Exp_002'] == '18.00'
-    assert table.loc['Apparent quantum yield (%)', 'Exp_002'] == MISSING_VALUE_PLACEHOLDER
-    assert (table['Exp_003'] == MISSING_VALUE_PLACEHOLDER).all()
+    assert table.loc['Exp_002', 'Max. rate (mmol/h/g)'] == '18.00'
+    assert table.loc['Exp_002', 'Apparent quantum yield (%)'] == MISSING_VALUE_PLACEHOLDER
+    assert (table.loc['Exp_003'] == MISSING_VALUE_PLACEHOLDER).all()
 
 
 def test_unknown_experiments_are_skipped(experiments):
     table = build_results_table(['Exp_001', 'Deleted_experiment'], experiments, INSTRUCTIONS)
 
-    assert list(table.columns) == ['Exp_001']
+    assert list(table.index) == ['Exp_001']
+
+
+def test_empty_selection_keeps_the_columns(experiments):
+    table = build_results_table([], experiments, INSTRUCTIONS)
+
+    assert list(table.columns) == list(INSTRUCTIONS.keys())
+    assert table.empty
 
 
 def test_quantity_is_converted_to_requested_unit():
