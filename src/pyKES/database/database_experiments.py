@@ -67,6 +67,12 @@ class Experiment:
     processed_data: Dict[str, any]
     version: Dict[str, Any] = field(default_factory=dict)
 
+def _sanitize_hdf5_key(key: Any) -> str:
+    """Convert dict keys to HDF5-safe strings without breaking nested paths."""
+    key_str = key if isinstance(key, str) else str(key)
+    return key_str.replace('/', '__SLASH__')
+
+
 def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
     """
     Recursively save nested dictionaries to HDF5 group.
@@ -75,8 +81,10 @@ def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
     Note: Replaces '/' in keys with '__SLASH__' to avoid HDF5 path conflicts.
     """
     for key, value in data_dict.items():
-        # Replace '/' in keys to avoid HDF5 path interpretation issues
-        safe_key = key.replace('/', '__SLASH__')
+        # Replace '/' in keys to avoid HDF5 path interpretation issues.
+        # Data uploads can include integer keys in nested dicts; stringify them
+        # before building an HDF5 path.
+        safe_key = _sanitize_hdf5_key(key)
         full_key = f"{prefix}/{safe_key}" if prefix else safe_key
         
         if isinstance(value, np.ndarray):

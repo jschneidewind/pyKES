@@ -117,6 +117,18 @@ def test_experiment_version_round_trips(tmp_path):
     assert loaded.experiments['Exp_001'].version[PYKES_VERSION_KEY] == '9.9.9'
 
 
+def test_integer_keys_in_nested_dicts_are_saved(tmp_path):
+    dataset = make_dataset()
+    dataset.experiments['Exp_001'].metadata['nested'] = {0: {'value': 7}, 1: 'one'}
+
+    filename = str(tmp_path / 'dataset_with_integer_keys.h5')
+    dataset.save_to_hdf5(filename)
+    loaded = ExperimentalDataset.load_from_hdf5(filename)
+
+    assert loaded.experiments['Exp_001'].metadata['nested']['0']['value'] == 7
+    assert loaded.experiments['Exp_001'].metadata['nested']['1'] == 'one'
+
+
 def test_dataset_without_version_information_is_described():
     assert 'no version information' in describe_version_information({})
 
