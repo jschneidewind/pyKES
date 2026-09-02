@@ -9,17 +9,21 @@ messages it writes are queued and only flushed once the run yields to the
 event loop, which happens after the loop has already finished. The progress
 bar was invisible in the browser for exactly this reason.
 
-A job started here is instead advanced by one experiment per rerun. Each rerun
-ends, the event loop gets control, and the bar painted by that rerun reaches
-the screen.
+A job started here is instead advanced by one experiment per run of an
+``st.fragment(run_every=...)``. The timer that drives those runs lives in the
+*frontend*: Streamlit sends it as an auto-rerun instruction, and the browser
+asks for the next run. Each run therefore **ends normally** and its elements
+are delivered before the next one starts.
 
-The reruns are app-scoped, so the page that hosts a job has to skip its
-expensive sections while `any_active_job` is true — the data-upload page
-rewrites the whole HDF5 file in its download section, which must not happen
-once per experiment. Fragment-scoped reruns would avoid that, but they are not
-usable here: ``st.rerun(scope="fragment")`` is rejected outside a fragment
-rerun, and the only way into one is a widget interaction or a ``run_every``
-timer that would then poll for the entire duration of the job.
+Ending normally is the part that matters, and it is why `st.rerun` cannot be
+used to drive this instead. A script run that ends in `st.rerun` is followed
+immediately by the next one, and `AppSession` clears the browser queue on every
+``SCRIPT_STARTED`` — so a progress bar drawn by a run that then reruns is
+discarded before it is ever sent, unless a flush happens to fall between the
+two. On a server it usually does, because the flush runs on another thread. In
+the browser it does not, and the bar is never seen at all. Measured in headless
+Chrome against stlite 1.7.3: with `st.rerun` the page went from blank straight
+to the finished state; with the timer the bar advanced step by step.
 
 The same code path is used when running under ``streamlit run``; nothing here
 is browser-specific.
@@ -39,6 +43,12 @@ from pyKES.database.data_processing import finalize_processing_run
 # derived from the job's own key. The results outlive the job itself so the page
 # can report them after the final rerun has torn the job down.
 JOB_RESULTS_KEY_TEMPLATE = "{job_key}_results"
+
+# How often the frontend asks for the next step of a running job. It only paces
+# the hand-over between steps — the step itself takes as long as it takes — so
+# it is set well below the duration of any real experiment and costs one round
+# trip per step.
+JOB_STEP_INTERVAL_SECONDS = 0.1
 
 
 def job_results_key(job_key: str) -> str:
@@ -96,7 +106,6 @@ def start_chunked_job(job_key: str,
         'experiment_names': experiment_names,
         'completed': 0,
         'results': [],
-        'painted': False,
         'staging_directory': staging_directory,
         'context': context,
     }
@@ -138,19 +147,37 @@ def collect_job_results(job_key: str) -> Optional[list]:
     return st.session_state.pop(job_results_key(job_key), None)
 
 
-def paint_job_progress(job: dict) -> None:
+def job_is_complete(job: dict) -> bool:
     """
-    Draw the progress bar for the experiment that is about to be processed.
-
-    Painting is a rerun of its own, doing no work, so that the bar reaches the
-    screen *before* the next experiment occupies the event loop. Painting and
-    processing in the same rerun would leave the bar one experiment behind and
-    never show the first one — which is the whole bug this module exists for.
+    Report whether every experiment of a job has been processed.
 
     Parameters
     ----------
     job : dict
-        Job state; ``painted`` is set in place.
+        Job state.
+
+    Returns
+    -------
+    bool
+        True once no experiment is left.
+    """
+
+    return job['completed'] == len(job['experiment_names'])
+
+
+def paint_job_progress(job: dict) -> None:
+    """
+    Draw the progress bar for the experiment that is about to be processed.
+
+    Called at the end of every step, so the run that delivers this bar is over
+    before the experiment it names occupies the worker. The bar therefore
+    stands on screen for exactly as long as that experiment takes.
+
+    Parameters
+    ----------
+    job : dict
+        Job state. Must not be complete — the caller finishes the job first, so
+        ``completed`` always indexes an experiment here.
 
     Returns
     -------
@@ -165,8 +192,6 @@ def paint_job_progress(job: dict) -> None:
         text = f"Processing experiment {completed + 1}/{total}: {job['experiment_names'][completed]}",
     )
 
-    job['painted'] = True
-
 
 def run_job_step(job: dict, step_function: Callable[..., dict]) -> None:
     """
@@ -175,8 +200,7 @@ def run_job_step(job: dict, step_function: Callable[..., dict]) -> None:
     Parameters
     ----------
     job : dict
-        Job state; ``results``, ``completed`` and ``painted`` are updated in
-        place.
+        Job state; ``results`` and ``completed`` are updated in place.
     step_function : callable
         ``(experiment_name, **context) -> result_dict``, e.g.
         `pyKES.database.data_processing.ingest_experiment`.
@@ -190,7 +214,6 @@ def run_job_step(job: dict, step_function: Callable[..., dict]) -> None:
 
     job['results'].append(step_function(experiment_name, **job['context']))
     job['completed'] += 1
-    job['painted'] = False
 
 
 def finish_chunked_job(job_key: str, job: dict) -> None:
@@ -222,12 +245,40 @@ def finish_chunked_job(job_key: str, job: dict) -> None:
     del st.session_state[job_key]
 
 
-def render_chunked_job(job_key: str, step_function: Callable[..., dict]) -> None:
+@st.fragment(run_every=JOB_STEP_INTERVAL_SECONDS)
+def render_job_progress(job_key: str) -> None:
     """
-    Advance a job by one phase and rerun for the next.
+    Draw the progress bar of a running job. Draws nothing else, ever.
 
-    Alternates painting and processing, so every experiment is announced
-    before it runs and the announcement reaches the screen while it runs.
+    Deliberately a separate fragment from `advance_job`: a fragment rerun
+    clears the deltas of the fragments *in that run* and preserves everyone
+    else's, so a bar drawn here survives every step the worker takes. Drawn
+    from inside the worker instead, it was wiped by the worker's own next tick
+    before it was ever sent, and the browser showed the first experiment for
+    the whole run.
+
+    Parameters
+    ----------
+    job_key : str
+        Session-state key identifying the job.
+
+    Returns
+    -------
+    None : None
+    """
+
+    job = active_job(job_key)
+
+    if job is None or job_is_complete(job):
+        return
+
+    paint_job_progress(job)
+
+
+@st.fragment(run_every=JOB_STEP_INTERVAL_SECONDS)
+def advance_job(job_key: str, step_function: Callable[..., dict]) -> None:
+    """
+    Process one experiment per timer tick. Writes nothing to the page.
 
     Parameters
     ----------
@@ -246,17 +297,34 @@ def render_chunked_job(job_key: str, step_function: Callable[..., dict]) -> None
     if job is None:
         return
 
-    # st.rerun raises, so each branch below ends the script run.
-    if job['completed'] == len(job['experiment_names']):
+    if job_is_complete(job):
         finish_chunked_job(job_key, job)
+
+        # App-scoped: the page re-renders once without either fragment, so the
+        # timers stop and the sections skipped during the job come back.
         st.rerun()
 
-    if job['painted']:
-        run_job_step(job, step_function)
-    else:
-        paint_job_progress(job)
+    run_job_step(job, step_function)
 
-    st.rerun()
+
+def render_chunked_job(job_key: str, step_function: Callable[..., dict]) -> None:
+    """
+    Run a job to completion, one experiment per timer tick, showing progress.
+
+    Parameters
+    ----------
+    job_key : str
+        Session-state key identifying the job.
+    step_function : callable
+        ``(experiment_name, **context) -> result_dict``.
+
+    Returns
+    -------
+    None : None
+    """
+
+    render_job_progress(job_key)
+    advance_job(job_key, step_function)
 
 
 def any_active_job(job_keys: list) -> bool:

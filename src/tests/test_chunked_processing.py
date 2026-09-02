@@ -12,6 +12,7 @@ pair of them, and that the dataset ends up as it would after a single
 whole sequence can be driven without a browser.
 """
 
+import inspect
 from pathlib import Path
 
 import pandas as pd
@@ -20,14 +21,20 @@ from streamlit.testing.v1 import AppTest
 
 from pyKES.database.data_processing import read_in_experiments_single_threaded
 from pyKES.database.database_experiments import ExperimentalDataset
-from pyKES.streamlit_app.chunked_processing import paint_job_progress
+from pyKES.streamlit_app.chunked_processing import (advance_job, paint_job_progress,
+                                                    render_job_progress)
+from pyKES.streamlit_app.components.data_upload_component import (INGESTION_JOB_KEY_TEMPLATE,
+                                                                  REPROCESS_JOB_KEY)
 
 
 EXPERIMENT_NAMES = ['Exp_001', 'Exp_002']
 
-# One paint run and one work run per experiment, plus the run that retires the
-# job and the final run that renders the finished page.
-EXPECTED_SCRIPT_RUNS = 2 * len(EXPERIMENT_NAMES) + 2
+# One tick per experiment, plus the tick that finds the job complete and
+# retires it.
+EXPECTED_TICKS = len(EXPERIMENT_NAMES) + 1
+
+# Guard against a job that never retires, which would hang the test run.
+MAX_TICKS = 10
 
 # Streamlit script exercising one ingestion job from start to finish. The
 # processing callables are defined inside it because AppTest executes the
@@ -239,49 +246,86 @@ render_data_upload(CONFIG)
 '''
 
 
+def tick_until_finished(app, job_key="test_ingestion_job"):
+    """
+    Run the app until its job has retired, one tick per run.
+
+    `AppTest` executes the script but does not fire the frontend timer that
+    drives `run_every` fragments in a real browser, so each `run` here stands
+    for one tick of that timer.
+
+    Parameters
+    ----------
+    app : AppTest
+        App to drive.
+    job_key : str, optional
+        Session-state key the job is registered under.
+
+    Returns
+    -------
+    int
+        Number of ticks it took.
+    """
+
+    for tick in range(1, MAX_TICKS + 1):
+        app.run(timeout=30)
+
+        assert [element.value for element in app.exception] == []
+
+        if job_key not in app.session_state:
+            return tick
+
+    raise AssertionError(f"job {job_key!r} still running after {MAX_TICKS} ticks")
+
+
 def run_chunked_ingestion_app():
     """
     Run the ingestion app to completion.
 
     Returns
     -------
-    AppTest
-        The finished app, with the dataset and the job bookkeeping in its
-        session state.
+    tuple of (AppTest, int)
+        The finished app and the number of ticks it took.
     """
 
     app = AppTest.from_string(CHUNKED_INGESTION_APP)
-    app.run(timeout=30)
+    ticks = tick_until_finished(app)
 
-    assert [element.value for element in app.exception] == []
-
-    return app
+    return app, ticks
 
 
-def test_ingestion_is_spread_over_one_experiment_per_pair_of_runs():
-    app = run_chunked_ingestion_app()
+def test_ingestion_is_spread_over_one_experiment_per_tick():
+    app, ticks = run_chunked_ingestion_app()
 
-    assert app.session_state["script_runs"] == EXPECTED_SCRIPT_RUNS
+    assert ticks == EXPECTED_TICKS
+    assert app.session_state["processing_runs"] == list(range(1, len(EXPERIMENT_NAMES) + 1))
     assert sorted(app.session_state["dataset"].experiments) == EXPERIMENT_NAMES
     assert [result['success'] for result in app.session_state["results"]] == [True, True]
 
 
 def test_expensive_sections_are_skipped_while_the_job_runs():
-    app = run_chunked_ingestion_app()
+    app, _ = run_chunked_ingestion_app()
 
     # Only the final run, once the job has been retired.
     assert app.session_state["expensive_renders"] == 1
     assert [element.value for element in app.markdown] == ["expensive section"]
 
 
-def test_each_experiment_is_announced_before_it_is_processed():
-    app = run_chunked_ingestion_app()
+def test_progress_is_drawn_by_a_different_fragment_than_the_work():
+    """
+    The bar must not be drawn by the fragment doing the work.
 
-    # Experiment N is processed on script run 2N, so the run before it painted
-    # the bar and did nothing else. That is what puts the announcement on
-    # screen before the experiment occupies the event loop; painting and
-    # processing in the same run would leave the bar one experiment behind.
-    assert app.session_state["processing_runs"] == [2, 4]
+    A fragment rerun clears the deltas of the fragments in that run and
+    preserves everyone else's, so a bar drawn inside the worker is wiped by the
+    worker's own next tick before it is ever sent. Measured in the browser,
+    that showed the first experiment for the whole run.
+    """
+    assert render_job_progress.__wrapped__ is not advance_job.__wrapped__
+
+    source = inspect.getsource(advance_job.__wrapped__)
+
+    assert "paint_job_progress" not in source
+    assert "st.progress" not in source
 
 
 def test_progress_announces_the_experiment_about_to_run(monkeypatch):
@@ -290,22 +334,18 @@ def test_progress_announces_the_experiment_about_to_run(monkeypatch):
     monkeypatch.setattr(streamlit, "progress",
                         lambda value, text: progress_calls.append((value, text)))
 
-    job = {'experiment_names': EXPERIMENT_NAMES, 'completed': 1, 'painted': False}
-    paint_job_progress(job)
+    paint_job_progress({'experiment_names': EXPERIMENT_NAMES, 'completed': 1})
 
     fraction, text = progress_calls[0]
 
     assert fraction == 0.5
     assert 'Exp_002' in text
     assert '2/2' in text
-    assert job['painted'] is True
 
 
 def test_staged_uploads_survive_until_the_job_finishes():
     app = AppTest.from_string(STAGED_UPLOAD_APP)
-    app.run(timeout=30)
-
-    assert [element.value for element in app.exception] == []
+    tick_until_finished(app, job_key=INGESTION_JOB_KEY_TEMPLATE.format(file_storage_key="raw_data"))
 
     # The reader read each staged file back on a later script run than the one
     # that wrote it, which a TemporaryDirectory context would not have allowed.
@@ -329,17 +369,12 @@ def test_reprocessing_runs_chunked_through_the_page():
 
     reprocess_button = next(button for button in app.button if "Reprocess" in button.label)
     reprocess_button.click()
-    app.run(timeout=60)
+    tick_until_finished(app, job_key=REPROCESS_JOB_KEY)
 
-    assert [element.value for element in app.exception] == []
-
-    # Each experiment reprocessed on its own run, one run after the paint run
-    # that announced it.
+    # Each experiment reprocessed on a run of its own.
     processing_runs = app.session_state["processing_runs"]
     assert len(processing_runs) == len(EXPERIMENT_NAMES)
     assert processing_runs == sorted(set(processing_runs))
-    assert all(later - earlier == 2
-               for earlier, later in zip(processing_runs, processing_runs[1:]))
 
     assert [element.value for element in app.success] == [
         "✓ Reprocessed 2 experiment(s) successfully"]
@@ -349,7 +384,7 @@ def test_reprocessing_runs_chunked_through_the_page():
 
 
 def test_chunked_run_matches_the_loop_function():
-    app = run_chunked_ingestion_app()
+    app, _ = run_chunked_ingestion_app()
 
     looped_dataset = ExperimentalDataset(
         overview_df = pd.DataFrame({'Experiment': EXPERIMENT_NAMES}))

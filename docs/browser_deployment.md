@@ -49,11 +49,11 @@ The same constraint is why stlite makes `time.sleep()` a no-op and why
 `st.spinner()` cannot show a spinner around a blocking call: nothing can be
 drawn while the only event loop is occupied.
 
-## 2. The pattern: one experiment per rerun
+## 2. The pattern: one experiment per timer tick
 
-A script run ends at every rerun, and *that* is a yield point: the queue drains,
-the browser paints, and the next run starts. So instead of looping inside one
-run, a long job is spread across many runs, one experiment each.
+A script run has to **end** for what it drew to reach the browser. So instead of
+looping inside one run, a long job is spread across many runs, one experiment
+each.
 
 `pyKES.streamlit_app.chunked_processing` implements this. The job lives in
 `st.session_state` — the experiment names, how many are done, the results so
@@ -69,48 +69,74 @@ start_chunked_job(
 st.rerun()
 ```
 
-From then on, every run calls `render_chunked_job`, which advances the job by
-one phase and reruns:
+From then on the page calls `render_chunked_job`, which is two `st.fragment`s
+with a `run_every` timer:
 
-| Phase | What the run does |
+| Fragment | What each tick does |
 | --- | --- |
-| paint | Draws the progress bar for the experiment *about to* run. No work. |
-| work | Processes that one experiment. |
-| finish | Stamps the dataset version, deletes the staging directory, parks the results. |
+| `render_job_progress` | Draws the progress bar. Nothing else, ever. |
+| `advance_job` | Processes one experiment, or retires a finished job. Draws nothing. |
 
-### Why painting is a phase of its own
+Two details of that split are not obvious, and both were established by
+measuring the real page in headless Chrome rather than by reading the API.
 
-Painting and processing in the same run would not help: the bar drawn at the
-start of a run still only reaches the screen when that run ends — by which time
-the experiment it announced is already done. The display would lag one
-experiment behind and the first one would never be announced at all, which is
-exactly the symptom this pattern was written to fix. A paint run does no work,
-so it ends immediately and the announcement is on screen for the whole time the
-following work run is busy.
+### Why `st.rerun` cannot drive this
 
-The cost is two runs per experiment. Both are cheap next to the processing
-itself.
+The obvious implementation steps the job with `st.rerun()` at the end of each
+run. It does not work in the browser at all, and the reason is in
+`AppSession._on_scriptrunner_event`: every `SCRIPT_STARTED` calls
+`_clear_queue()`, which throws away queued messages that have not been flushed.
+A run that ends in `st.rerun` is followed immediately by the next one, so the
+bar it drew is discarded before it is ever sent — unless a flush happens to fall
+between the two.
 
-### Why the reruns are app-scoped
+On a server one usually does, because the flush runs on another thread. In the
+browser it does not. Measured over an eight-experiment run: the page went from
+blank straight to the finished state, with the progress bar appearing in **zero**
+intermediate DOM states.
 
-`st.fragment` exists to rerun one part of a page in isolation, which would be a
-natural fit. It cannot be used here: `st.rerun(scope="fragment")` is rejected
-unless it is called *during a fragment rerun*, and the only ways into one are a
-widget interaction or a `run_every` timer that would then poll for the whole
-duration of the job. So the reruns are ordinary, app-scoped ones.
+A `run_every` fragment does not have this problem: the timer lives in the
+frontend, so the browser only asks for the next tick after it has received and
+drawn the previous one.
 
-That means the whole page script re-runs once per phase, and any section that
-is expensive to render would run with it. The data-upload page therefore skips
-its tail — the HDF5 merge, the download button (which serializes the entire
-dataset), the overview table and the statistics — while a job is running:
+### Why the bar is drawn by a different fragment than the work
+
+`ForwardMsgQueue.clear` takes the ids of the fragments running this time and
+preserves every delta that belongs to *other* fragments. A fragment therefore
+wipes its own output on its own next tick, but never anyone else's.
+
+So a bar drawn inside the worker fragment is cleared by the worker's next tick
+before it is flushed. Measured: the browser showed
+`Processing experiment 1/8` for the entire run and never advanced — the only
+paint that survived was the very first one, which came from the initial page run
+and so had no fragment id. Splitting the painter out fixed it: the same run then
+advanced through several experiments.
+
+### What this actually looks like
+
+Honest expectation: the bar appears immediately and advances, but it does **not**
+tick once per experiment. Python, Streamlit and the UI share one worker thread,
+and the processing keeps it busy, so the painter only gets a turn between
+experiments and only some of those paints reach the browser before the next one
+replaces them. On an eight-experiment probe the user saw three or four distinct
+states rather than eight.
+
+That is a limit of the runtime, not a tuning problem — raising or lowering the
+timer interval did not change the number of updates. What matters is that the
+page is visibly working and the count climbs, instead of sitting blank for
+minutes.
+
+### The page still skips its expensive sections
+
+`advance_job` retires a finished job with an app-scoped `st.rerun()`, so the
+whole page re-renders once against the finished dataset. While the job runs, the
+page skips its tail — the HDF5 merge, the download button (which serializes the
+entire dataset), the overview table and the statistics:
 
 ```python
 if any_active_job(_page_job_keys(config)):
     return
 ```
-
-The finish phase reruns app-scoped one last time, so those sections come back
-and render once against the finished dataset.
 
 ### Staging uploaded files
 
@@ -172,29 +198,48 @@ the same pattern:
    is active, and `collect_job_results(job_key)` once it is gone.
 4. Add the job's key to the page's `any_active_job` guard.
 
+Never draw progress from inside the fragment that does the work, and never step
+a job with `st.rerun()` — the two failure modes measured above.
+
 Work that is *not* made of repeatable units — writing one large HDF5 file, for
 instance — cannot be chunked this way, and will still block the browser page
 with no feedback. Keep such operations off the path that runs on every rerun.
 
 ## 5. Checking it
 
-The unit-level behaviour is covered by `src/tests/test_chunked_processing.py`,
-which drives the whole sequence with `streamlit.testing.v1.AppTest` — it runs a
-script in-process and follows `st.rerun`, so the run count, the order of the
-phases and the survival of the staging directory can all be asserted without a
-browser.
+`src/tests/test_chunked_processing.py` drives the whole sequence with
+`streamlit.testing.v1.AppTest`, which runs a script in-process: one `run` per
+timer tick, since `AppTest` does not fire the frontend timer. It asserts the
+tick count, that the work and the painting live in different fragments, that
+staged files survive, and that the finished dataset matches a plain
+`read_in_experiments_single_threaded` call.
 
-What those tests cannot show is the thing that started all this: whether the
-bar is actually *painted* while the job runs. That needs the real runtime:
+**None of that can tell you whether the bar is actually painted**, which is the
+whole point — every failed design above passed its in-process tests. That needs
+a browser, and it is worth re-checking after any change to this module.
+
+The pyKES repository has no deployment of its own, so use an external app's
+bundle, pointed at a locally built wheel rather than the released one:
 
 ```bash
-# server runtime
-streamlit run src/pyKES/streamlit_app/Home.py
-
-# browser runtime, against a locally built wheel
-uv build
-python -m http.server 8000   # in the external app's deploy/ directory
+uv build                                   # in the pyKES repo
+cp dist/pykes-*.whl <bundle>/              # next to the app's index.html
+# in the bundle's files.js, replace the "pykes==X.Y.Z" requirement with
+#   "http://localhost:8000/pykes-X.Y.Z-py3-none-any.whl"
+python -m http.server 8000                 # in the bundle directory
 ```
 
-In both, the bar must advance experiment by experiment, naming the one in
-flight, rather than appearing only when everything is finished.
+Then open it and watch. Polling the DOM from a driver script is not enough on
+its own — install a `MutationObserver` before the app loads and read its log
+afterwards, so that what the browser was shown is recorded rather than sampled:
+
+```js
+window.__log = [];
+new MutationObserver(function () {
+  window.__log.push({t: performance.now(), text: document.body.innerText});
+}).observe(document, {childList: true, subtree: true, characterData: true});
+```
+
+The bar must appear while the job is running and the count must climb. A single
+state that never changes means the painter is being cleared by whatever is doing
+the work — see section 2.
