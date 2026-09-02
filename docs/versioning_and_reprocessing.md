@@ -41,7 +41,7 @@ current.
     'created':          '2026-08-31T14:03:57+02:00',
     'last_modified':    '2026-09-02T09:21:04+02:00',
     'last_processed':   '2026-09-02T09:20:11+02:00',
-    'external_version': {'app': 'photocat', 'commit': '9f3c1ab…'},
+    'external_version': {'app': 'photocat', 'version': '0.4.2'},
 }
 ```
 
@@ -82,12 +82,13 @@ running code no longer has.
 ### Recording the external app's version
 
 The processing functions live in the *external* repository, so pyKES's own
-version only tells half the story. An app records its own with:
+version only tells half the story. An external app is itself a Python project
+with a `pyproject.toml`, so it records the version declared there:
 
 ```python
-from pyKES.utilities.version_information import get_git_commit
+from pyKES.utilities.version_information import get_project_version
 
-EXTERNAL_VERSION = {'app': 'photocat', 'commit': get_git_commit(__file__)}
+EXTERNAL_VERSION = {'app': 'photocat', 'version': get_project_version(__file__)}
 ```
 
 and hands it to pyKES in one of two ways:
@@ -100,9 +101,15 @@ dataset.set_external_version(EXTERNAL_VERSION)
 DataUploadConfig(file_handlers=[...], external_version=EXTERNAL_VERSION)
 ```
 
-`get_git_commit` returns the commit hash, suffixed with `-dirty` when the
-working tree holds uncommitted changes, and `None` outside a git work tree
-(a deployment from a source archive, say).
+`get_project_version` searches upwards from the given path — pass `__file__`
+from a module of the app — for the nearest `pyproject.toml` and returns its
+declared version, or `None` when no such file is found (a deployment that ships
+only the installed package, say) or it declares no version. The released
+version number is the useful stamp here: it is the identifier the app's own
+users, issues and changelog refer to, whereas a commit hash only means
+something to whoever has the repository at hand. It does mean two datasets
+processed by different commits of the same release carry the same stamp, so
+bump the version when the processing behaviour changes.
 
 ### Schema version
 

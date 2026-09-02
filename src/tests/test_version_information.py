@@ -24,7 +24,7 @@ from pyKES.utilities.version_information import (
     SCHEMA_VERSION_KEY,
     build_version_information,
     describe_version_information,
-    get_git_commit,
+    get_project_version,
     get_pykes_version,
     stamp_version_information,
 )
@@ -48,13 +48,13 @@ def make_dataset():
 
 
 def test_fresh_version_information_is_complete():
-    version = build_version_information('1.1', external_version={'commit': 'abc123'})
+    version = build_version_information('1.1', external_version={'version': '0.3.0'})
 
     assert version[PYKES_VERSION_KEY] == get_pykes_version()
     assert version[SCHEMA_VERSION_KEY] == '1.1'
     assert version[CREATED_KEY] == version[LAST_MODIFIED_KEY]
     assert version[LAST_PROCESSED_KEY] is None
-    assert version[EXTERNAL_VERSION_KEY] == {'commit': 'abc123'}
+    assert version[EXTERNAL_VERSION_KEY] == {'version': '0.3.0'}
 
 
 def test_stamping_preserves_creation_and_records_processing():
@@ -62,11 +62,11 @@ def test_stamping_preserves_creation_and_records_processing():
     created = version[CREATED_KEY]
 
     stamp_version_information(version, '1.1', processed=True,
-                              external_version={'commit': 'def456'})
+                              external_version={'version': '0.4.0'})
 
     assert version[CREATED_KEY] == created
     assert version[LAST_PROCESSED_KEY] == version[LAST_MODIFIED_KEY]
-    assert version[EXTERNAL_VERSION_KEY] == {'commit': 'def456'}
+    assert version[EXTERNAL_VERSION_KEY] == {'version': '0.4.0'}
 
 
 def test_stamping_fills_in_keys_of_a_legacy_version_dict():
@@ -79,7 +79,7 @@ def test_stamping_fills_in_keys_of_a_legacy_version_dict():
 
 def test_version_survives_the_hdf5_round_trip(tmp_path):
     dataset = make_dataset()
-    dataset.set_external_version({'app': 'demo', 'commit': 'abc123'})
+    dataset.set_external_version({'app': 'demo', 'version': '0.3.0'})
 
     filename = str(tmp_path / 'dataset.h5')
     dataset.save_to_hdf5(filename)
@@ -88,7 +88,7 @@ def test_version_survives_the_hdf5_round_trip(tmp_path):
     assert loaded.schema_version == SCHEMA_VERSION
     assert loaded.version[SCHEMA_VERSION_KEY] == SCHEMA_VERSION
     assert loaded.version[PYKES_VERSION_KEY] == get_pykes_version()
-    assert loaded.version[EXTERNAL_VERSION_KEY] == {'app': 'demo', 'commit': 'abc123'}
+    assert loaded.version[EXTERNAL_VERSION_KEY] == {'app': 'demo', 'version': '0.3.0'}
     assert loaded.version[CREATED_KEY] == dataset.version[CREATED_KEY]
 
 
@@ -133,5 +133,24 @@ def test_dataset_without_version_information_is_described():
     assert 'no version information' in describe_version_information({})
 
 
-def test_git_commit_is_none_outside_a_repository(tmp_path):
-    assert get_git_commit(str(tmp_path)) is None
+def test_project_version_is_read_from_the_nearest_pyproject(tmp_path):
+    project_directory = tmp_path / 'external_app'
+    package_directory = project_directory / 'app' / 'processing'
+    package_directory.mkdir(parents=True)
+    (project_directory / 'pyproject.toml').write_text(
+        '[project]\nname = "external_app"\nversion = "2.5.1"\n', encoding='utf-8')
+    processing_module = package_directory / 'functions.py'
+    processing_module.write_text('', encoding='utf-8')
+
+    assert get_project_version(str(processing_module)) == '2.5.1'
+
+
+def test_project_version_of_pykes_itself_matches_the_package_version():
+    # This test file lives inside the pyKES repository, so the upward search
+    # must land on its pyproject.toml rather than on some parent project.
+    assert get_project_version(__file__) == get_pykes_version()
+
+
+def test_project_version_is_none_outside_a_python_project(tmp_path):
+    # tmp_path is outside any checkout, so the search reaches the root
+    assert get_project_version(str(tmp_path)) is None

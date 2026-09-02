@@ -6,7 +6,7 @@ from pyKES.streamlit_app.config_interface import (
     HomeConfig,
     PyKESStreamlitConfig,
 )
-from pyKES.utilities.version_information import get_git_commit
+from pyKES.utilities.version_information import get_project_version
 
 from tests.data.processing_parameters import PROCESSING_PARAMETERS, PLOTTING_INSTRUCTIONS, GROUP_MAPPING
 from tests.data.processing_functions_overview_df import metadata_retrival_function, raw_data_reading_function, processing_function
@@ -17,11 +17,11 @@ from tests.data.processing_functions_overview_df import metadata_retrival_functi
 # -----------------------------------------------------------------------------
 
 # Recorded in dataset.version['external_version'], so the processed data can be
-# traced back to the code that produced it. get_git_commit returns None outside
-# a git work tree (e.g. a deployment from a source archive).
+# traced back to the code that produced it. get_project_version reads the
+# version declared in this repository's own pyproject.toml.
 EXTERNAL_VERSION = {
     "app": "external_repo_example",
-    "commit": get_git_commit(__file__),
+    "version": get_project_version(__file__),
 }
 
 # -----------------------------------------------------------------------------

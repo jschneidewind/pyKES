@@ -118,18 +118,18 @@ def test_progress_is_reported_for_every_experiment(dataset):
 
 
 def test_reprocessing_stamps_the_version_information(dataset):
-    dataset.set_external_version({'commit': 'abc123'})
+    dataset.set_external_version({'version': '0.3.0'})
 
     reprocess_experiments(dataset, process_raw_data)
 
     assert dataset.version[LAST_PROCESSED_KEY] is not None
-    assert dataset.version['external_version'] == {'commit': 'abc123'}
+    assert dataset.version['external_version'] == {'version': '0.3.0'}
 
     experiment_version = dataset.experiments['Exp_001'].version
     assert experiment_version[LAST_PROCESSED_KEY] is not None
     assert experiment_version[PYKES_VERSION_KEY]
     # The dataset's external version is inherited without repeating it
-    assert experiment_version['external_version'] == {'commit': 'abc123'}
+    assert experiment_version['external_version'] == {'version': '0.3.0'}
 
 
 def test_color_and_group_follow_the_refreshed_metadata(dataset):

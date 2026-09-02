@@ -114,13 +114,14 @@ class DataUploadConfig:
     external_version : Dict[str, Any], optional
         Version information of the external app itself, recorded in the
         dataset's ``version['external_version']`` whenever experiments are
-        processed or reprocessed. Typically the git commit of the repository
-        holding the processing functions::
+        processed or reprocessed. Typically the version declared in the
+        ``pyproject.toml`` of the repository holding the processing
+        functions::
 
-            from pyKES.utilities.version_information import get_git_commit
+            from pyKES.utilities.version_information import get_project_version
 
             external_version = {'app': 'photocat',
-                                'commit': get_git_commit(__file__)}
+                                'version': get_project_version(__file__)}
     """
 
     file_handlers: List[FileUploadHandler]

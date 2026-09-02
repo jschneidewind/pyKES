@@ -307,8 +307,8 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
     directory : Path, optional
         Directory the raw-data files are read from.
     external_version : dict, optional
-        Provenance of the external app (e.g. its git commit), stamped onto
-        every processed experiment. Defaults to the dataset's own
+        Provenance of the external app (e.g. its own project version), stamped
+        onto every processed experiment. Defaults to the dataset's own
         ``version['external_version']``.
     progress_callback : callable, optional
         Called as ``(completed, total, experiment_name)`` once before the loop

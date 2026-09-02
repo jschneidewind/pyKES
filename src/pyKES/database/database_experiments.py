@@ -292,8 +292,8 @@ class ExperimentalDataset:
             Whether a processing function was just run, which additionally
             sets ``'last_processed'``.
         external_version : dict, optional
-            Provenance of the external app (e.g. its git commit), merged into
-            the existing ``'external_version'`` entry.
+            Provenance of the external app (e.g. its own project version),
+            merged into the existing ``'external_version'`` entry.
 
         Returns
         -------
@@ -318,7 +318,7 @@ class ExperimentalDataset:
         alongside the data::
 
             dataset.set_external_version({'app': 'photocat',
-                                          'commit': get_git_commit(__file__)})
+                                          'version': get_project_version(__file__)})
 
         Parameters
         ----------
@@ -648,7 +648,7 @@ def usage_example():
     # Add dataset-level attributes
     dataset.plotting_instruction = {'xlabel': 'Time (s)', 'ylabel': 'Current (mA)'}
     dataset.group_mapping = {'GroupA': ['Exp1'], 'GroupB': ['Exp2']}
-    dataset.set_external_version({'app': 'usage_example', 'commit': 'abc123'})
+    dataset.set_external_version({'app': 'usage_example', 'version': '0.3.0'})
 
     exp1 = Experiment(
         experiment_name="Exp1",

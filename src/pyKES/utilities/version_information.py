@@ -22,15 +22,14 @@ The dictionary holds:
     (initial ingestion or reprocessing of an existing file).
 ``external_version``
     Free-form dictionary an external app fills with its own provenance,
-    typically the git commit of the repository holding the processing
-    functions (see `get_git_commit`).
+    typically the version declared in the ``pyproject.toml`` of the repository
+    holding the processing functions (see `get_project_version`).
 
 Author: pyKES Development Team
 Date: 31 August 2026
 """
 
 import re
-import subprocess
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version as installed_version
 from pathlib import Path
@@ -52,15 +51,16 @@ EXTERNAL_VERSION_KEY = 'external_version'
 # so no distribution metadata exists to read the version from.
 UNKNOWN_VERSION = 'unknown'
 
+# Version-declaring file of a Python project, searched for upwards from a
+# module path to identify the project that module belongs to
+PYPROJECT_FILENAME = 'pyproject.toml'
+
 # Repository root relative to this module, used to read the version of a source
 # checkout (src/pyKES/utilities/version_information.py -> repository root)
-PYPROJECT_PATH = Path(__file__).resolve().parents[3] / 'pyproject.toml'
+PYKES_PYPROJECT_PATH = Path(__file__).resolve().parents[3] / PYPROJECT_FILENAME
 
 # Matches the `version = "0.1.7"` line of the [project] table
 PYPROJECT_VERSION_PATTERN = re.compile(r'^version\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
-
-# Marker appended to a commit hash when the working tree has uncommitted changes
-DIRTY_SUFFIX = '-dirty'
 
 
 # =============================================================================
@@ -81,7 +81,7 @@ def get_pykes_version() -> str:
     version : str
         Version string, or `UNKNOWN_VERSION` when neither source is available.
     """
-    source_version = read_version_from_pyproject()
+    source_version = read_version_from_pyproject(PYKES_PYPROJECT_PATH)
     if source_version:
         return source_version
 
@@ -91,20 +91,26 @@ def get_pykes_version() -> str:
         return UNKNOWN_VERSION
 
 
-def read_version_from_pyproject() -> Optional[str]:
+def read_version_from_pyproject(pyproject_path: Path) -> Optional[str]:
     """
-    Read the project version from the ``pyproject.toml`` of a source checkout.
+    Read the project version declared in a ``pyproject.toml``.
+
+    Parameters
+    ----------
+    pyproject_path : Path
+        File to read.
 
     Returns
     -------
     version : str or None
-        Version declared in the file, or None when pyKES runs from an installed
-        package (no ``pyproject.toml`` beside it) or the file declares none.
+        Version declared in the file, or None when the file does not exist
+        (pyKES running from an installed package, an app deployed without its
+        ``pyproject.toml``) or declares no version.
     """
-    if not PYPROJECT_PATH.is_file():
+    if not pyproject_path.is_file():
         return None
 
-    match = PYPROJECT_VERSION_PATTERN.search(PYPROJECT_PATH.read_text(encoding='utf-8'))
+    match = PYPROJECT_VERSION_PATTERN.search(pyproject_path.read_text(encoding='utf-8'))
 
     return match.group(1) if match else None
 
@@ -121,80 +127,58 @@ def current_timestamp() -> str:
     return datetime.now().astimezone().isoformat(timespec='seconds')
 
 
-def get_git_commit(repository_path: Optional[str] = None, short: bool = False) -> Optional[str]:
+def get_project_version(project_path: Optional[str] = None) -> Optional[str]:
     """
-    Read the current git commit of a repository, for external provenance.
+    Read the version of the Python project a path belongs to.
 
-    Intended for external apps that want the commit of their own processing
+    Intended for external apps that want the version of their own processing
     code recorded in the dataset::
 
         dataset.set_external_version({'app': 'photocat',
-                                      'commit': get_git_commit(__file__)})
+                                      'version': get_project_version(__file__)})
 
     Parameters
     ----------
-    repository_path : str, optional
-        Any path inside the repository — a file path is resolved to its
-        containing directory. Defaults to the current working directory.
-    short : bool, default False
-        Return the abbreviated hash instead of the full one.
+    project_path : str, optional
+        Any path inside the project — a file path is resolved to its containing
+        directory. Defaults to the current working directory.
 
     Returns
     -------
-    commit : str or None
-        Commit hash, suffixed with ``'-dirty'`` when the working tree holds
-        uncommitted changes. None when the path is not inside a git work tree,
-        which is the normal case for a deployment from a source archive.
+    version : str or None
+        Version declared in the nearest ``pyproject.toml`` above the path, or
+        None when no such file is found or it declares no version.
     """
-    working_directory = Path(repository_path).resolve() if repository_path else Path.cwd()
-    if working_directory.is_file():
-        working_directory = working_directory.parent
+    pyproject_path = find_pyproject(project_path)
 
-    describe_command = ['git', 'rev-parse', '--short', 'HEAD'] if short else ['git', 'rev-parse', 'HEAD']
-    commit = run_git_command(describe_command, working_directory)
-
-    if commit is None:
-        return None
-
-    # An empty `status --porcelain` means a clean tree; None means the status
-    # call itself failed, in which case the cleanliness is simply not reported.
-    status = run_git_command(['git', 'status', '--porcelain'], working_directory)
-
-    return f"{commit}{DIRTY_SUFFIX}" if status else commit
+    return read_version_from_pyproject(pyproject_path) if pyproject_path else None
 
 
-def run_git_command(command: list, working_directory: Path) -> Optional[str]:
+def find_pyproject(start_path: Optional[str] = None) -> Optional[Path]:
     """
-    Run a git command and return its stripped stdout.
+    Search upwards from a path for the ``pyproject.toml`` of its project.
+
+    The first file found wins, so a package inside a monorepo reports the
+    version of the innermost project that declares one.
 
     Parameters
     ----------
-    command : list of str
-        Command and arguments to execute.
-    working_directory : Path
-        Directory the command is run in.
+    start_path : str, optional
+        Path to start from; a file path is resolved to its containing
+        directory. Defaults to the current working directory.
 
     Returns
     -------
-    output : str or None
-        Standard output, or None when git is unavailable or the command fails
-        (not a repository, git not installed).
+    pyproject_path : Path or None
+        Path of the nearest ``pyproject.toml``, or None when the search reaches
+        the filesystem root without finding one.
     """
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=working_directory,
-            capture_output=True,
-            text=True,
-            check=False
-        )
-    except (OSError, FileNotFoundError):
-        return None
+    start = Path(start_path).resolve() if start_path else Path.cwd()
+    directory = start.parent if start.is_file() else start
 
-    if completed.returncode != 0:
-        return None
+    candidates = (candidate / PYPROJECT_FILENAME for candidate in (directory, *directory.parents))
 
-    return completed.stdout.strip()
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
 # =============================================================================
@@ -211,7 +195,7 @@ def build_version_information(schema_version: str,
     schema_version : str
         On-disk layout version the dataset will be written with.
     external_version : dict, optional
-        Provenance of the external app (e.g. its git commit).
+        Provenance of the external app (e.g. its own project version).
 
     Returns
     -------
@@ -313,16 +297,16 @@ def describe_version_information(version_information: Dict[str, Any]) -> str:
 def test_function():
     """Demonstrate building and stamping a version dictionary."""
     version_information = build_version_information(schema_version='1.1',
-                                                    external_version={'app_commit': 'abc123'})
+                                                    external_version={'app_version': '0.3.0'})
     print(describe_version_information(version_information))
 
     stamp_version_information(version_information,
                               schema_version='1.1',
                               processed=True,
-                              external_version={'app_commit': 'def456'})
+                              external_version={'app_version': '0.4.0'})
     print(describe_version_information(version_information))
 
-    print(f"git commit of this repository: {get_git_commit(__file__, short=True)}")
+    print(f"version of the project this module belongs to: {get_project_version(__file__)}")
 
 
 if __name__ == '__main__':

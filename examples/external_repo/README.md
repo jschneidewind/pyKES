@@ -59,8 +59,8 @@ streamlit run examples/external_repo/Home.py
 - Customize titles, icons, and the home-page intro through `HomeConfig` and
   `PyKESStreamlitConfig`.
 - Set `external_version` on `DataUploadConfig` (see `EXTERNAL_VERSION` in
-  `config.py`) so the git commit of *this* repository is stored in every
-  dataset processed by the app. See
+  `config.py`) so the version declared in the `pyproject.toml` of *this*
+  repository is stored in every dataset processed by the app. See
   [docs/versioning_and_reprocessing.md](../../docs/versioning_and_reprocessing.md).
 
 ## Reprocessing existing files
