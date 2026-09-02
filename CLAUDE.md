@@ -27,15 +27,17 @@ pip install -e <path-to-pyKES>
 - [src/pyKES/plotting/](src/pyKES/plotting/) — plotting helpers (matplotlib + plotly via Streamlit).
 - [src/pyKES/streamlit_app/](src/pyKES/streamlit_app/) — reusable Streamlit pages:
   - [config_interface.py](src/pyKES/streamlit_app/config_interface.py) — `FileUploadHandler`, `DataUploadConfig`, `HomeConfig`, `PyKESStreamlitConfig`.
+  - [chunked_processing.py](src/pyKES/streamlit_app/chunked_processing.py) — advances a long processing run one experiment per rerun.
   - [components/](src/pyKES/streamlit_app/components/) — `render_home`, `render_data_upload`, `render_analysis_results`, `render_time_series`.
   - [pages/](src/pyKES/streamlit_app/pages/) — Streamlit page entry points; each delegates to a component.
 - [examples/external_repo/](examples/external_repo/) — sample wiring for an external app (Home, config, processing functions).
-- [tests/](tests/) — pytest suite (currently focused on `pathways`).
+- [src/tests/](src/tests/) — pytest suite.
 
 ## Architecture conventions
 
 - **Single source of truth**: `st.session_state.experimental_dataset` (an `ExperimentalDataset`). Pages mutate it in place.
-- **Ingestion runs in `ProcessPoolExecutor`**, so user-supplied processing callables must be importable at module top level (no closures, no lambdas).
+- **`read_in_experiments_multiprocessing` runs in a `ProcessPoolExecutor`**, so user-supplied processing callables must be importable at module top level (no closures, no lambdas). The Streamlit upload page does *not* use it — it steps through `ingest_experiment` one experiment at a time (see below), which is also what makes it work in the browser, where there are no processes to fork.
+- **The pages must survive stlite's single-threaded browser runtime.** External repos deploy them as a static Pyodide page, where Python, Streamlit and the UI share one event loop: a loop that processes everything inside one script run delivers nothing to the screen until it has finished. Long-running page work is therefore chunked across reruns via [streamlit_app/chunked_processing.py](src/pyKES/streamlit_app/chunked_processing.py), never looped inline. See [docs/browser_deployment.md](docs/browser_deployment.md).
 - **Two ingestion modes** in `read_in_experiments_multiprocessing`:
   - `keywords` + `directory` — substring match on filenames inside `directory`.
   - `overview_df_based_processing=True` — filenames come from `overview_df[overview_df_experiment_column]`. When `directory` is also provided, non-absolute names are resolved against it (used by the Streamlit uploader to stage files in a temp dir).

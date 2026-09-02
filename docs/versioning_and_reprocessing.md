@@ -182,6 +182,12 @@ A progress bar names the experiment being processed; failures are reported
 individually with their traceback. The result lives in the session dataset, so
 **download the dataset afterwards** to persist it.
 
+The page does not call `reprocess_experiments` for this: it steps through the
+experiments one Streamlit rerun at a time, via
+`pyKES.streamlit_app.chunked_processing`, which is what keeps the progress bar
+visible in the browser deployment. See
+[browser_deployment.md](browser_deployment.md).
+
 ### What reprocessing writes
 
 On a successful run the dataset's `last_processed`, `last_modified` and

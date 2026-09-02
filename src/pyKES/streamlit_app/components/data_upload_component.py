@@ -11,7 +11,12 @@ The page is structured around two independent uploaders:
   mode (looking up filenames in columns named by ``file_name_field``) or
   file-list mode (iterating the uploaded files directly).
 
-A per-handler progress bar reports ingestion progress in real time.
+A per-handler progress bar reports ingestion progress in real time. Ingestion
+and reprocessing are not run in one go: both are handed to
+`pyKES.streamlit_app.chunked_processing`, which advances them one experiment
+per rerun. That is what keeps the bar visible in the stlite browser build,
+where a blocking loop would occupy the only event loop and let nothing reach
+the screen until it finished.
 
 The page also offers **reprocessing**: rerunning a handler's processing
 function against the metadata and raw data already stored in the dataset. That
@@ -22,7 +27,6 @@ information.
 
 import os
 import tempfile
-from functools import partial
 from pathlib import Path
 from typing import Optional
 
@@ -30,7 +34,14 @@ import pandas as pd
 import streamlit as st
 
 from pyKES.database.database_experiments import ExperimentalDataset
-from pyKES.database.data_processing import read_in_experiments_single_threaded, reprocess_experiments
+from pyKES.database.data_processing import (ingest_experiment,
+                                            reprocess_experiment_by_name,
+                                            resolve_external_version,
+                                            select_experiments_to_reprocess,
+                                            select_unprocessed_experiments)
+from pyKES.streamlit_app.chunked_processing import (active_job, any_active_job,
+                                                    collect_job_results, render_chunked_job,
+                                                    start_chunked_job)
 from pyKES.streamlit_app.config_interface import DataUploadConfig, FileUploadHandler
 from pyKES.database.database_experiments import import_overview_excel
 from pyKES.utilities.version_information import describe_version_information
@@ -38,6 +49,31 @@ from pyKES.utilities.version_information import describe_version_information
 
 # Session-state key of the experiment multiselect on the reprocessing form
 REPROCESS_SELECTION_KEY = "reprocess_selected_experiments"
+
+# Session-state keys of the two chunked processing jobs. The ingestion key is
+# suffixed with the handler's storage key, since a page can carry several
+# uploaders.
+INGESTION_JOB_KEY_TEMPLATE = "ingestion_job_{file_storage_key}"
+REPROCESS_JOB_KEY = "reprocess_job"
+
+
+def _page_job_keys(config: DataUploadConfig) -> list:
+    """
+    Session-state keys of every chunked job this page can start.
+
+    Parameters
+    ----------
+    config : DataUploadConfig
+        Configuration listing the file handlers.
+
+    Returns
+    -------
+    list of str
+        One ingestion job key per handler, plus the reprocessing job key.
+    """
+
+    return [INGESTION_JOB_KEY_TEMPLATE.format(file_storage_key=handler.file_storage_key)
+            for handler in config.file_handlers] + [REPROCESS_JOB_KEY]
 
 
 def render_data_upload(config: DataUploadConfig) -> None:
@@ -84,6 +120,12 @@ def render_data_upload(config: DataUploadConfig) -> None:
     st.subheader("3. ♻️ Reprocess Existing Experiments")
     _render_reprocessing_section(config, dataset)
     st.divider()
+
+    # A running job reruns the page once per experiment. The sections below
+    # rewrite the whole HDF5 file and re-derive the statistics on every run,
+    # which would dwarf the processing itself, so they wait for it to finish.
+    if any_active_job(_page_job_keys(config)):
+        return
 
     st.subheader("4. 📦 Merge HDF5 Files")
     _render_HDF5_merging(config, dataset)
@@ -184,38 +226,84 @@ def _render_metadata_uploader(
 # Raw-data uploaders
 # ---------------------------------------------------------------------------
 
-def _update_ingestion_progress(progress_placeholder,
-                               completed: int,
-                               total: int,
-                               experiment_name: Optional[str]) -> None:
+def _stage_uploaded_files(uploaded_files: list) -> str:
     """
-    Render ingestion progress into a Streamlit placeholder.
-
-    Bound to its placeholder with `functools.partial` and handed to
-    `read_in_experiments_single_threaded` as its ``progress_callback``.
+    Write the uploaded files to a directory the raw-data reader can read from.
 
     Parameters
     ----------
-    progress_placeholder : st.delta_generator.DeltaGenerator
-        Placeholder created with `st.empty`; re-rendered on every tick.
-    completed : int
-        Number of experiments processed so far.
-    total : int
-        Number of experiments to process.
-    experiment_name : str or None
-        Experiment just processed; ``None`` for the initial call.
+    uploaded_files : list of UploadedFile
+        Files submitted through the uploader.
+
+    Returns
+    -------
+    str
+        Path of the staging directory.
     """
 
-    if total == 0:
-        progress_placeholder.info("No new experiments to process")
+    # Not a TemporaryDirectory context: the directory has to outlive this
+    # script run, since the ingestion is spread over one rerun per experiment.
+    # `finish_chunked_job` removes it. Navigating away mid-job leaves it
+    # behind — in the browser that is Pyodide's in-memory FS, which goes away
+    # with the tab.
+    staging_directory = tempfile.mkdtemp()
+
+    for uploaded_file in uploaded_files:
+        (Path(staging_directory) / uploaded_file.name).write_bytes(uploaded_file.getbuffer())
+
+    return staging_directory
+
+
+def _start_ingestion_job(job_key: str,
+                         config: FileUploadHandler,
+                         dataset: ExperimentalDataset,
+                         uploaded_files: list,
+                         external_version: Optional[dict]) -> None:
+    """
+    Stage the uploaded files and register the ingestion run.
+
+    Parameters
+    ----------
+    job_key : str
+        Session-state key of this handler's job.
+    config : FileUploadHandler
+        Handler defining the processing pipeline.
+    dataset : ExperimentalDataset
+        Dataset the new experiments are added to.
+    uploaded_files : list of UploadedFile
+        Files submitted through the uploader.
+    external_version : dict, optional
+        Provenance of the external app.
+
+    Returns
+    -------
+    None : None
+    """
+
+    experiment_names = select_unprocessed_experiments(dataset, config.overview_df_experiment_column)
+
+    if not experiment_names:
+        st.info("No new experiments to process")
         return
 
-    if experiment_name is None:
-        progress_text = f"Processing {total} experiment(s)…"
-    else:
-        progress_text = f"Processing experiment {completed}/{total}: {experiment_name}"
+    staging_directory = _stage_uploaded_files(uploaded_files)
 
-    progress_placeholder.progress(completed / total, text = progress_text)
+    start_chunked_job(
+        job_key = job_key,
+        experiment_names = experiment_names,
+        context = {
+            'database': dataset,
+            'metadata_retrival_function': config.metadata_retrival_function,
+            'raw_data_reading_function': config.raw_data_reading_function,
+            'processing_function': config.processing_function,
+            'overview_df_experiment_column': config.overview_df_experiment_column,
+            'directory': Path(staging_directory),
+            'external_version': resolve_external_version(dataset, external_version),
+        },
+        staging_directory = staging_directory,
+    )
+
+    st.rerun()
 
 
 def _render_raw_data_uploaders(config: FileUploadHandler,
@@ -223,6 +311,10 @@ def _render_raw_data_uploaders(config: FileUploadHandler,
                                external_version: Optional[dict] = None) -> None:
     """
     Render one handler's uploader and ingest its files on submit.
+
+    The ingestion itself is not run here: it is handed to
+    `pyKES.streamlit_app.chunked_processing`, which advances it one experiment
+    per rerun so the progress bar is painted while the run is in progress.
 
     Parameters
     ----------
@@ -233,6 +325,8 @@ def _render_raw_data_uploaders(config: FileUploadHandler,
     external_version : dict, optional
         Provenance of the external app, stamped onto the processed experiments.
     """
+    job_key = INGESTION_JOB_KEY_TEMPLATE.format(file_storage_key=config.file_storage_key)
+
     with st.form(key=f"upload_form_{config.file_storage_key}", clear_on_submit=False):
         uploaded_files = st.file_uploader(
             label = config.label,
@@ -241,35 +335,22 @@ def _render_raw_data_uploaders(config: FileUploadHandler,
             key = config.file_storage_key,
             accept_multiple_files = True,
         )
-        submitted = st.form_submit_button("🚀 Process data", use_container_width=True)
+        submitted = st.form_submit_button("🚀 Process data", width="stretch")
+
+    if active_job(job_key) is not None:
+        render_chunked_job(job_key, ingest_experiment)
+        return
+
+    results = collect_job_results(job_key)
+
+    if results is not None:
+        _report_processing_results(results, "Processed")
+        return
 
     if not submitted or not uploaded_files:
         return
 
-    progress_placeholder = st.empty()
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        for uploaded_file in uploaded_files:
-            file_path = Path(tmp_dir) / uploaded_file.name
-            file_path.write_bytes(uploaded_file.getbuffer())
-
-        results = read_in_experiments_single_threaded(
-            database = dataset,
-            metadata_retrival_function = config.metadata_retrival_function,
-            raw_data_reading_function = config.raw_data_reading_function,
-            processing_function = config.processing_function,
-            directory = Path(tmp_dir),
-            overview_df_experiment_column = config.overview_df_experiment_column,
-            external_version = external_version,
-            progress_callback = partial(_update_ingestion_progress, progress_placeholder),
-        )
-
-    # Clear the finished bar so only the result messages remain. An empty result
-    # list means nothing was processed; its "no new experiments" notice stays.
-    if results:
-        progress_placeholder.empty()
-
-    _report_processing_results(results, "Processed")
+    _start_ingestion_job(job_key, config, dataset, uploaded_files, external_version)
 
 
 def _report_processing_results(results: list, verb: str) -> None:
@@ -377,7 +458,18 @@ def _render_reprocessing_section(config: DataUploadConfig, dataset: Experimental
                  "overview sheet take effect. Unchecked, the metadata stored in the "
                  "file is reused unchanged.",
         )
-        submitted = st.form_submit_button("♻️ Reprocess", use_container_width=True)
+        submitted = st.form_submit_button("♻️ Reprocess", width="stretch")
+
+    if active_job(REPROCESS_JOB_KEY) is not None:
+        render_chunked_job(REPROCESS_JOB_KEY, reprocess_experiment_by_name)
+        return
+
+    results = collect_job_results(REPROCESS_JOB_KEY)
+
+    if results is not None:
+        _report_processing_results(results, "Reprocessed")
+        st.info("Download the dataset below to persist the reprocessed results.")
+        return
 
     if not submitted:
         return
@@ -391,21 +483,18 @@ def _render_reprocessing_section(config: DataUploadConfig, dataset: Experimental
         )
         return
 
-    progress_placeholder = st.empty()
-
-    results = reprocess_experiments(
-        database = dataset,
-        processing_function = handler.processing_function,
-        metadata_retrival_function = handler.metadata_retrival_function if refresh_metadata else None,
-        experiment_names = selected_experiments or None,
-        external_version = config.external_version,
-        progress_callback = partial(_update_ingestion_progress, progress_placeholder),
+    start_chunked_job(
+        job_key = REPROCESS_JOB_KEY,
+        experiment_names = select_experiments_to_reprocess(dataset, selected_experiments or None),
+        context = {
+            'database': dataset,
+            'processing_function': handler.processing_function,
+            'metadata_retrival_function': handler.metadata_retrival_function if refresh_metadata else None,
+            'external_version': resolve_external_version(dataset, config.external_version),
+        },
     )
 
-    progress_placeholder.empty()
-    _report_processing_results(results, "Reprocessed")
-
-    st.info("Download the dataset below to persist the reprocessed results.")
+    st.rerun()
 
 
 def _render_HDF5_merging(config: DataUploadConfig, dataset: ExperimentalDataset) -> None:
@@ -421,7 +510,7 @@ def _render_HDF5_merging(config: DataUploadConfig, dataset: ExperimentalDataset)
             key = "merge_hdf5_uploader",
             accept_multiple_files = True,
         )
-        submitted = st.form_submit_button("🚀 Merge HDF5 Files", use_container_width=True)
+        submitted = st.form_submit_button("🚀 Merge HDF5 Files", width="stretch")
     
     if not submitted or not uploaded_files:
         return

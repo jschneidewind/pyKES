@@ -131,6 +131,155 @@ def read_in_single_experiment(file_name: str,
         }
 
 
+def ensure_processed_column(database: ExperimentalDataset) -> None:
+    """
+    Make sure ``overview_df`` carries the ``Processed`` flag as text.
+
+    Idempotent, and called by both entry points that touch the flag, so
+    neither depends on the other having run first.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset whose ``overview_df`` is given the column if it lacks one.
+
+    Returns
+    -------
+    None : None
+    """
+
+    # The flag is text, not a bool: it round-trips through Excel and HDF5, and
+    # comes back as the strings this module compares against. Seeding it with a
+    # bool gives the column bool dtype, which pandas then refuses to write
+    # 'True' into once the first experiment succeeds.
+    if "Processed" not in database.overview_df.columns:
+        database.overview_df["Processed"] = "False"
+
+
+def select_unprocessed_experiments(database: ExperimentalDataset,
+                                   overview_df_experiment_column: Optional[str] = 'Experiment') -> list:
+    """
+    List the experiments of the overview sheet that still need processing.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset whose ``overview_df`` lists the experiments. A missing
+        ``Processed`` column is added to it in place.
+    overview_df_experiment_column : str, optional
+        Column of ``overview_df`` holding the experiment names.
+
+    Returns
+    -------
+    list of str
+        Experiments that are either not flagged as processed or not yet held
+        by ``database.experiments``.
+    """
+
+    ensure_processed_column(database)
+
+    unprocessed = (
+        database.overview_df["Processed"].ne('True')
+        | ~database.overview_df[overview_df_experiment_column].isin(database.experiments))
+
+    return database.overview_df.loc[unprocessed,
+                    overview_df_experiment_column].astype(str).tolist()
+
+
+def ingest_experiment(experiment_name: str,
+                      database: ExperimentalDataset,
+                      metadata_retrival_function: callable,
+                      raw_data_reading_function: callable,
+                      processing_function: callable,
+                      overview_df_experiment_column: Optional[str] = 'Experiment',
+                      directory: Optional[Path] = None,
+                      external_version: Optional[dict] = None) -> dict:
+    """
+    Process one experiment of the overview sheet and add it to the dataset.
+
+    One step of `read_in_experiments_single_threaded`, exposed separately so a
+    caller can drive the ingestion one experiment at a time — which is what the
+    Streamlit page does to keep its progress bar alive in the browser.
+
+    Parameters
+    ----------
+    experiment_name : str
+        Experiment to process, as named in ``overview_df``.
+    database : ExperimentalDataset
+        Dataset the experiment is added to; mutated in place on success.
+    metadata_retrival_function : callable
+        Returns the metadata dict for an experiment name.
+    raw_data_reading_function : callable
+        Reads the raw data for an experiment from ``directory``.
+    processing_function : callable
+        Turns raw data and metadata into the processed-data dict.
+    overview_df_experiment_column : str, optional
+        Column of ``overview_df`` holding the experiment names.
+    directory : Path, optional
+        Directory the raw-data files are read from.
+    external_version : dict, optional
+        Provenance of the external app, stamped onto the experiment. Already
+        resolved — unlike the loop functions, this is not defaulted to the
+        dataset's own entry.
+
+    Returns
+    -------
+    result : dict
+        Result of `read_in_single_experiment`.
+    """
+
+    ensure_processed_column(database)
+
+    result = read_in_single_experiment(
+        file_name = experiment_name,
+        database = database,
+        metadata_retrival_function = metadata_retrival_function,
+        raw_data_reading_function = raw_data_reading_function,
+        processing_function = processing_function,
+        directory = directory,
+        legacy_mode = False,
+        external_version = external_version
+    )
+
+    if not result['success']:
+        print(f"Failed to process {result['file']}: {result['error']}")
+        return result
+
+    database.add_experiment(result['data'])
+
+    database.overview_df.loc[
+        database.overview_df[overview_df_experiment_column].eq(result['data'].experiment_name),
+            "Processed",
+        ] = 'True'
+
+    return result
+
+
+def finalize_processing_run(database: ExperimentalDataset,
+                            results: list,
+                            external_version: Optional[dict] = None) -> None:
+    """
+    Stamp the dataset version after a processing or reprocessing run.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset whose ``version`` dict is updated in place.
+    results : list of dict
+        Results of the run; the dataset is only stamped when at least one
+        experiment succeeded.
+    external_version : dict, optional
+        Provenance of the external app.
+
+    Returns
+    -------
+    None : None
+    """
+
+    if any(result['success'] for result in results):
+        database.stamp_version(processed=True, external_version=external_version)
+
+
 def read_in_experiments_single_threaded(database: ExperimentalDataset,
                                         metadata_retrival_function: callable,
                                         raw_data_reading_function: callable,
@@ -173,24 +322,8 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
         `read_in_single_experiment`.
     """
 
-    # The flag is text, not a bool: it round-trips through Excel and HDF5, and
-    # comes back as the strings this module compares against below. Seeding it
-    # with a bool gives the column bool dtype, which pandas then refuses to
-    # write 'True' into once the first experiment succeeds.
-    if "Processed" not in database.overview_df.columns:
-        database.overview_df["Processed"] = "False"
+    experiments = select_unprocessed_experiments(database, overview_df_experiment_column)
 
-    # Returning only the experiments which have not been processed 
-    # Do not contain "Processed" column or "Processed" is not True
-    # also returns experiments which are not in the database.experiments dict,
-
-    mask = (
-    database.overview_df["Processed"].ne('True')
-    | ~database.overview_df[overview_df_experiment_column].isin(database.experiments))
-    
-    experiments = database.overview_df.loc[mask, 
-                    overview_df_experiment_column].astype(str).tolist()
-    
     total_experiments = len(experiments)
     external_version = resolve_external_version(database, external_version)
 
@@ -201,37 +334,21 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
 
     for completed, experiment_name in enumerate(experiments, start=1):
 
-        result = read_in_single_experiment(
-            file_name = experiment_name,
+        results.append(ingest_experiment(
+            experiment_name = experiment_name,
             database = database,
             metadata_retrival_function = metadata_retrival_function,
             raw_data_reading_function = raw_data_reading_function,
             processing_function = processing_function,
+            overview_df_experiment_column = overview_df_experiment_column,
             directory = directory,
-            legacy_mode = False,
             external_version = external_version
-        )
-
-        results.append(result)
-
-        if result['success']:
-            # Add experiment to database
-            database.add_experiment(result['data'])
-
-            # Setting "Processed" to True in dataframe
-            database.overview_df.loc[
-                database.overview_df[overview_df_experiment_column].eq(result['data'].experiment_name),
-                    "Processed",
-                ] = 'True'
-
-        else:
-            print(f"Failed to process {result['file']}: {result['error']}")
+        ))
 
         if progress_callback is not None:
             progress_callback(completed, total_experiments, experiment_name)
 
-    if any(result['success'] for result in results):
-        database.stamp_version(processed=True, external_version=external_version)
+    finalize_processing_run(database, results, external_version)
 
     return results
 
@@ -270,8 +387,7 @@ def read_in_experiments_multiprocessing(database: ExperimentalDataset,
         else:
             print(f"Failed to process {result['file']}: {result['error']}")
 
-    if any(result['success'] for result in results):
-        database.stamp_version(processed=True, external_version=external_version)
+    finalize_processing_run(database, results, external_version)
 
     return results
 
@@ -351,6 +467,80 @@ def reprocess_single_experiment(experiment: Experiment,
         }
 
 
+def reprocess_experiment_by_name(experiment_name: str,
+                                 database: ExperimentalDataset,
+                                 processing_function: callable,
+                                 metadata_retrival_function: Optional[callable] = None,
+                                 external_version: Optional[dict] = None) -> dict:
+    """
+    Reprocess one experiment of a dataset, addressed by name.
+
+    Name-addressed counterpart of `reprocess_single_experiment`, so that a
+    caller stepping through the experiments one at a time can reach both
+    pipelines through the same ``(experiment_name, **context)`` call shape as
+    `ingest_experiment`.
+
+    Parameters
+    ----------
+    experiment_name : str
+        Experiment to reprocess; must be present in ``database.experiments``.
+    database : ExperimentalDataset
+        Dataset holding the experiment and the overview sheet.
+    processing_function : callable
+        ``(raw_data_dict, metadata_dict) -> processed_data_dict``.
+    metadata_retrival_function : callable, optional
+        When given, metadata is refreshed from ``database.overview_df``.
+    external_version : dict, optional
+        Provenance of the external app, already resolved.
+
+    Returns
+    -------
+    result : dict
+        Result of `reprocess_single_experiment`.
+    """
+
+    return reprocess_single_experiment(
+        experiment = database.experiments[experiment_name],
+        processing_function = processing_function,
+        metadata_retrival_function = metadata_retrival_function,
+        overview_df = database.overview_df,
+        external_version = external_version
+    )
+
+
+def select_experiments_to_reprocess(database: ExperimentalDataset,
+                                    experiment_names: Optional[list] = None) -> list:
+    """
+    Resolve which experiments of a dataset a reprocessing run covers.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset holding the experiments.
+    experiment_names : list of str, optional
+        Requested experiments. Defaults to every experiment in the dataset.
+
+    Returns
+    -------
+    list of str
+        Experiments to reprocess.
+
+    Raises
+    ------
+    ValueError
+        If any requested experiment is not held by the dataset.
+    """
+
+    if experiment_names is None:
+        return sorted(database.experiments.keys())
+
+    unknown_experiments = [name for name in experiment_names if name not in database.experiments]
+    if unknown_experiments:
+        raise ValueError(f"Experiments not present in the dataset: {unknown_experiments}")
+
+    return list(experiment_names)
+
+
 def reprocess_experiments(database: ExperimentalDataset,
                           processing_function: callable,
                           metadata_retrival_function: Optional[callable] = None,
@@ -390,12 +580,7 @@ def reprocess_experiments(database: ExperimentalDataset,
         One result dict per experiment, as returned by
         `reprocess_single_experiment`.
     """
-    if experiment_names is None:
-        experiment_names = sorted(database.experiments.keys())
-
-    unknown_experiments = [name for name in experiment_names if name not in database.experiments]
-    if unknown_experiments:
-        raise ValueError(f"Experiments not present in the dataset: {unknown_experiments}")
+    experiment_names = select_experiments_to_reprocess(database, experiment_names)
 
     total_experiments = len(experiment_names)
     external_version = resolve_external_version(database, external_version)
@@ -407,21 +592,18 @@ def reprocess_experiments(database: ExperimentalDataset,
 
     for completed, experiment_name in enumerate(experiment_names, start=1):
 
-        result = reprocess_single_experiment(
-            experiment = database.experiments[experiment_name],
+        results.append(reprocess_experiment_by_name(
+            experiment_name = experiment_name,
+            database = database,
             processing_function = processing_function,
             metadata_retrival_function = metadata_retrival_function,
-            overview_df = database.overview_df,
             external_version = external_version
-        )
-
-        results.append(result)
+        ))
 
         if progress_callback is not None:
             progress_callback(completed, total_experiments, experiment_name)
 
-    if any(result['success'] for result in results):
-        database.stamp_version(processed=True, external_version=external_version)
+    finalize_processing_run(database, results, external_version)
 
     return results
 

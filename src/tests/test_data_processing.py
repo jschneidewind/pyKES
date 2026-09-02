@@ -1,5 +1,7 @@
 """
-Tests for the progress reporting of the single-threaded ingestion pipeline.
+Tests for the single-threaded ingestion pipeline: its progress reporting, the
+per-experiment steps the Streamlit page drives one rerun at a time, and the
+equivalence of the two.
 
 The processing callables are synthetic: `retrieve_metadata` fails deliberately
 for one experiment so the progress sequence can be checked across both the
@@ -8,9 +10,10 @@ success and the failure branch of the loop.
 
 import pandas as pd
 
-from pyKES.database.data_processing import read_in_experiments_single_threaded
+from pyKES.database.data_processing import (ingest_experiment,
+                                            read_in_experiments_single_threaded,
+                                            select_unprocessed_experiments)
 from pyKES.database.database_experiments import ExperimentalDataset
-from pyKES.streamlit_app.components.data_upload_component import _update_ingestion_progress
 
 
 FAILING_EXPERIMENT = 'Exp_002'
@@ -39,20 +42,6 @@ class ProgressRecorder:
 
     def __call__(self, completed, total, experiment_name):
         self.calls.append((completed, total, experiment_name))
-
-
-class PlaceholderSpy:
-    """Stand-in for an `st.empty()` placeholder."""
-
-    def __init__(self):
-        self.progress_calls = []
-        self.info_calls = []
-
-    def progress(self, value, text):
-        self.progress_calls.append((value, text))
-
-    def info(self, body):
-        self.info_calls.append(body)
 
 
 def make_dataset(experiment_names):
@@ -108,22 +97,99 @@ def test_progress_callback_reports_zero_total_when_nothing_to_process():
     assert recorder.calls == [(0, 0, None)]
 
 
-def test_ingestion_progress_renders_fraction_and_name():
-    placeholder = PlaceholderSpy()
+def test_select_unprocessed_experiments_seeds_the_flag_as_text():
+    dataset = make_dataset(['Exp_001', 'Exp_003'])
 
-    _update_ingestion_progress(placeholder, 0, 4, None)
-    _update_ingestion_progress(placeholder, 1, 4, 'Exp_001')
+    experiment_names = select_unprocessed_experiments(dataset)
 
-    fractions = [value for value, _ in placeholder.progress_calls]
-    assert fractions == [0.0, 0.25]
-    assert '4' in placeholder.progress_calls[0][1]
-    assert 'Exp_001' in placeholder.progress_calls[1][1]
+    assert experiment_names == ['Exp_001', 'Exp_003']
+
+    # A bool column would make pandas reject the 'True' written on success.
+    assert dataset.overview_df['Processed'].tolist() == ['False', 'False']
 
 
-def test_ingestion_progress_handles_empty_workload():
-    placeholder = PlaceholderSpy()
+def test_select_unprocessed_experiments_skips_processed_experiments():
+    dataset = make_dataset(['Exp_001', FAILING_EXPERIMENT, 'Exp_003'])
 
-    _update_ingestion_progress(placeholder, 0, 0, None)
+    read_in_experiments_single_threaded(
+        database = dataset,
+        metadata_retrival_function = retrieve_metadata,
+        raw_data_reading_function = read_raw_data,
+        processing_function = process_raw_data,
+    )
 
-    assert placeholder.progress_calls == []
-    assert placeholder.info_calls == ["No new experiments to process"]
+    # The experiment that failed was never flagged, so it stays on the list.
+    assert select_unprocessed_experiments(dataset) == [FAILING_EXPERIMENT]
+
+
+def test_stepping_experiment_by_experiment_matches_the_loop():
+    """
+    The Streamlit page drives `ingest_experiment` one rerun at a time instead
+    of calling the loop function; both must leave the same dataset behind.
+    """
+    experiment_names = ['Exp_001', FAILING_EXPERIMENT, 'Exp_003']
+
+    looped_dataset = make_dataset(experiment_names)
+    looped_results = read_in_experiments_single_threaded(
+        database = looped_dataset,
+        metadata_retrival_function = retrieve_metadata,
+        raw_data_reading_function = read_raw_data,
+        processing_function = process_raw_data,
+    )
+
+    stepped_dataset = make_dataset(experiment_names)
+    stepped_results = [
+        ingest_experiment(
+            experiment_name = experiment_name,
+            database = stepped_dataset,
+            metadata_retrival_function = retrieve_metadata,
+            raw_data_reading_function = read_raw_data,
+            processing_function = process_raw_data,
+        )
+        for experiment_name in select_unprocessed_experiments(stepped_dataset)
+    ]
+
+    assert ([result['success'] for result in stepped_results]
+            == [result['success'] for result in looped_results])
+    assert set(stepped_dataset.experiments) == set(looped_dataset.experiments)
+    assert (stepped_dataset.overview_df['Processed'].tolist()
+            == looped_dataset.overview_df['Processed'].tolist())
+
+
+def test_ingest_experiment_seeds_the_flag_on_its_own():
+    """
+    The flag must be text whichever entry point creates the column.
+
+    Seeding it with a bool gives the column bool dtype, which pandas then
+    refuses to write 'True' into once the first experiment succeeds — the
+    `TypeError: Invalid value 'True' for dtype 'bool'` fixed in 0.2.0. Stepping
+    through experiments reaches the flag without going through the loop
+    function, so the guarantee is checked here too.
+    """
+    dataset = make_dataset(['Exp_001', 'Exp_003'])
+
+    ingest_experiment(
+        experiment_name = 'Exp_001',
+        database = dataset,
+        metadata_retrival_function = retrieve_metadata,
+        raw_data_reading_function = read_raw_data,
+        processing_function = process_raw_data,
+    )
+
+    assert dataset.overview_df['Processed'].tolist() == ['True', 'False']
+
+
+def test_ingest_experiment_leaves_the_dataset_alone_on_failure():
+    dataset = make_dataset([FAILING_EXPERIMENT])
+
+    result = ingest_experiment(
+        experiment_name = FAILING_EXPERIMENT,
+        database = dataset,
+        metadata_retrival_function = retrieve_metadata,
+        raw_data_reading_function = read_raw_data,
+        processing_function = process_raw_data,
+    )
+
+    assert result['success'] is False
+    assert dataset.experiments == {}
+    assert dataset.overview_df['Processed'].tolist() == ['False']

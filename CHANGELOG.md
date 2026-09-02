@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project aims to follow Semantic Versioning.
 
+## [0.2.1]
+
+### Fixed
+- The ingestion progress bar on the Data Upload page never appeared in the browser deployment: pressing "🚀 Process data" showed nothing at all until processing had finished. stlite runs Streamlit inside Pyodide on the browser's single event loop, with no separate script-runner thread, so everything `read_in_experiments_single_threaded` wrote through its `progress_callback` was queued and only delivered once the loop it was reporting on had ended — at which point the page cleared the placeholder and drew the result messages instead. Under `streamlit run` the same code worked, because there the script has a thread of its own while the server's event loop keeps delivering. The reprocessing section had the same defect.
+- Ingestion and reprocessing are now spread across Streamlit reruns, one experiment each, by the new module `pyKES.streamlit_app.chunked_processing`. A run ends at every rerun, which is the yield point the browser runtime needs, so the bar is painted while the job is still going. Each experiment takes two runs: one that only draws the bar for the experiment about to be processed — painting and processing in the same run would leave the display an experiment behind and never announce the first — and one that processes it. `render_chunked_job` drives the phases, `any_active_job` lets a page skip sections that are too expensive to re-render once per experiment (the Data Upload page skips the HDF5 merge, the download button, the overview table and the statistics until the job is done), and uploaded files are staged in a `mkdtemp` directory that outlives the run which created them, removed when the job finishes. See [docs/browser_deployment.md](docs/browser_deployment.md).
+
+### Changed
+- `pyKES.database.data_processing` exposes the per-experiment steps of both loops as module-level functions: `ensure_processed_column`, `select_unprocessed_experiments`, `ingest_experiment`, `select_experiments_to_reprocess`, `reprocess_experiment_by_name` and `finalize_processing_run`. The seeding of the `Processed` flag as the string `'False'` — the 0.2.0 fix for `TypeError: Invalid value 'True' for dtype 'bool'` — now lives in `ensure_processed_column`, which both `select_unprocessed_experiments` and `ingest_experiment` call, so stepping through experiments one rerun at a time reaches the flag with the same guarantee the loop function had. `read_in_experiments_single_threaded`, `read_in_experiments_multiprocessing` and `reprocess_experiments` are now thin loops over them and keep their signatures, return values and `progress_callback` protocol unchanged, so callers outside Streamlit are unaffected.
+- The three submit buttons on the Data Upload page pass `width="stretch"` instead of the deprecated `use_container_width`.
+- Removed `_update_ingestion_progress` from the data-upload component; the progress bar is drawn by `chunked_processing.paint_job_progress` and needs no `st.empty` placeholder.
+
 ## [0.2.0]
 
 ### Added
