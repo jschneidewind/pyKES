@@ -147,7 +147,9 @@ def get_project_version(project_path: Optional[str] = None) -> Optional[str]:
     -------
     version : str or None
         Version declared in the nearest ``pyproject.toml`` above the path, or
-        None when no such file is found or it declares no version.
+        None when no such file is found or it declares no version. A deployment
+        that does not ship the file — an stlite bundle of ``.py`` files, say —
+        therefore has to add it to the bundle to be stamped with a version.
     """
     pyproject_path = find_pyproject(project_path)
 

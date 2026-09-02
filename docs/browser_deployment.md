@@ -122,7 +122,44 @@ experiment is read. The page uses `tempfile.mkdtemp()` instead, and
 navigates away mid-job leaves one directory behind; in the browser that is
 Pyodide's in-memory filesystem, which goes away with the tab.
 
-## 3. Adding a new long-running section
+## 3. The other browser constraint: the filesystem is the bundle
+
+Under `streamlit run`, an app's own repository is right there on disk. In the
+browser there is no repository — Pyodide's filesystem holds exactly the files
+the deployment bundles into it, plus the packages micropip installs. Anything
+pyKES reads from disk at runtime therefore has to be part of the bundle.
+
+The one thing that is read this way is the app's version.
+`get_project_version(__file__)` searches upwards from the calling module for
+the nearest `pyproject.toml` and returns the version declared in it (see
+[versioning_and_reprocessing.md](versioning_and_reprocessing.md)). A bundle of
+`.py` files alone has no such file, the search reaches the filesystem root, and
+every dataset created in the browser is stamped `'version': None` — silently,
+since a missing provenance stamp is not an error the page can raise.
+
+So the build script must bundle `pyproject.toml` alongside the app package. In
+pyKES-Well-App's `deploy/build.py`:
+
+```python
+files["Home.py"] = (STREAMLIT_APP / "Home.py").read_text()
+files["pyproject.toml"] = PYPROJECT.read_text()      # provenance of the app
+```
+
+The bundled layout then mirrors the repository closely enough for the search:
+`pyproject.toml` sits beside the `pykes_well_app/` package, which is one level
+above the `config.py` that calls `get_project_version(__file__)`.
+
+To check it without a browser, build the bundle to a directory and read the
+version back out of that layout:
+
+```python
+version = get_project_version(str(bundle / 'pykes_well_app' / 'config.py'))
+```
+
+It must equal the version declared in the repository's `pyproject.toml`, not
+`None`.
+
+## 4. Adding a new long-running section
 
 Anything that takes noticeable time and is made of repeatable units should use
 the same pattern:
@@ -139,7 +176,7 @@ Work that is *not* made of repeatable units — writing one large HDF5 file, for
 instance — cannot be chunked this way, and will still block the browser page
 with no feedback. Keep such operations off the path that runs on every rerun.
 
-## 4. Checking it
+## 5. Checking it
 
 The unit-level behaviour is covered by `src/tests/test_chunked_processing.py`,
 which drives the whole sequence with `streamlit.testing.v1.AppTest` — it runs a

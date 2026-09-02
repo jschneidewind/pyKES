@@ -145,6 +145,20 @@ def test_project_version_is_read_from_the_nearest_pyproject(tmp_path):
     assert get_project_version(str(processing_module)) == '2.5.1'
 
 
+def test_project_version_is_found_in_a_deployment_bundle(tmp_path):
+    # Layout of an stlite bundle: the package sits directly beside the bundled
+    # pyproject.toml, with no src/ directory and no repository around them
+    bundle = tmp_path / 'bundle'
+    package_directory = bundle / 'well_app'
+    package_directory.mkdir(parents=True)
+    (bundle / 'pyproject.toml').write_text(
+        '[project]\nname = "well_app"\nversion = "0.2.0"\n', encoding='utf-8')
+    config_module = package_directory / 'config.py'
+    config_module.write_text('', encoding='utf-8')
+
+    assert get_project_version(str(config_module)) == '0.2.0'
+
+
 def test_project_version_of_pykes_itself_matches_the_package_version():
     # This test file lives inside the pyKES repository, so the upward search
     # must land on its pyproject.toml rather than on some parent project.

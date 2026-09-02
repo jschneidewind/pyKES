@@ -103,8 +103,11 @@ DataUploadConfig(file_handlers=[...], external_version=EXTERNAL_VERSION)
 
 `get_project_version` searches upwards from the given path — pass `__file__`
 from a module of the app — for the nearest `pyproject.toml` and returns its
-declared version, or `None` when no such file is found (a deployment that ships
-only the installed package, say) or it declares no version. The released
+declared version, or `None` when no such file is found or it declares none.
+The file is read from disk at runtime, so a deployment that does not ship it
+records `None`: an stlite bundle in particular holds only the files it bundles,
+and must include the app's `pyproject.toml` for the stamp to survive into the
+browser (see [browser_deployment.md](browser_deployment.md)). The released
 version number is the useful stamp here: it is the identifier the app's own
 users, issues and changelog refer to, whereas a commit hash only means
 something to whoever has the repository at hand. It does mean two datasets
