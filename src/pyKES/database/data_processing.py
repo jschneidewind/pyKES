@@ -173,8 +173,12 @@ def read_in_experiments_single_threaded(database: ExperimentalDataset,
         `read_in_single_experiment`.
     """
 
+    # The flag is text, not a bool: it round-trips through Excel and HDF5, and
+    # comes back as the strings this module compares against below. Seeding it
+    # with a bool gives the column bool dtype, which pandas then refuses to
+    # write 'True' into once the first experiment succeeds.
     if "Processed" not in database.overview_df.columns:
-        database.overview_df["Processed"] = False
+        database.overview_df["Processed"] = "False"
 
     # Returning only the experiments which have not been processed 
     # Do not contain "Processed" column or "Processed" is not True

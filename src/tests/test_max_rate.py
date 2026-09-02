@@ -13,8 +13,9 @@ result in `'mol / s'`.
 import numpy as np
 import pytest
 
-from pyKES.utilities.max_rate import (WINDOW_MAX_SPAN_FRACTION, WINDOW_MEDIAN_STEPS,
-                                      estimate_noise_structure, extract_max_rate,
+from pyKES.utilities.max_rate import (NUISANCE_MIN_LENGTHSCALE_STEPS, WINDOW_MAX_SPAN_FRACTION,
+                                      WINDOW_MEDIAN_STEPS, estimate_noise_structure,
+                                      extract_max_rate, matern32_state_space_matrices,
                                       resolve_window)
 from pyKES.utilities.unit_handler import Quantity
 
@@ -316,6 +317,74 @@ def test_components_add_up_to_the_data(rng):
     result = extract_max_rate(time_quantity(t), amount_quantity(y))
     residuals = y - result.smooth.unit['mol'] - result.nuisance.unit['mol']
     assert np.std(residuals) == pytest.approx(noise_std, rel=0.2)
+
+
+# --- Correlated noise at the edge of what the sampling resolves ---------------
+# A nuisance decorrelating in two or three samples is still correlated noise and
+# still has to be carried by the nuisance component. Discarding it instead --
+# which the resolution guard used to do the moment the measured correlation time
+# slipped below three sampling intervals -- leaves the kinetic component as the
+# only thing left to explain the wiggles with, and it obliges.
+
+FLOOR_AMPLITUDE = 100.0
+FLOOR_TIME_CONSTANT = 400.0
+FLOOR_NUISANCE = 3.0
+FLOOR_WHITE = 0.4
+FLOOR_TIME_STEP = 3.4
+
+
+def matern32_draw(rng, t, lengthscale, std):
+    """Exact draw from the Matern-3/2 process the nuisance component models."""
+    transitions, process_noises, stationary = matern32_state_space_matrices(
+        np.diff(t), lengthscale, std ** 2)
+    state = np.linalg.cholesky(stationary) @ rng.standard_normal(2)
+
+    path = np.empty(len(t))
+    path[0] = state[0]
+    for step in range(len(t) - 1):
+        state = transitions[step] @ state \
+            + np.linalg.cholesky(process_noises[step]) @ rng.standard_normal(2)
+        path[step + 1] = state[0]
+
+    return path
+
+
+def nuisance_floor_series(rng, correlation_steps):
+    """A densely sampled saturating curve plus a nuisance of the given correlation time."""
+    t = np.arange(0.0, 3500.0, FLOOR_TIME_STEP)
+    y = saturating_curve(t, FLOOR_AMPLITUDE, FLOOR_TIME_CONSTANT) \
+        + matern32_draw(rng, t, correlation_steps * FLOOR_TIME_STEP, FLOOR_NUISANCE) \
+        + FLOOR_WHITE * rng.standard_normal(len(t))
+    return t, y
+
+
+def test_fast_nuisance_is_clamped_not_discarded(rng):
+    """A resolvable nuisance below the correlation-time floor is pinned, not deleted."""
+    t, y = nuisance_floor_series(rng, correlation_steps=2.0)
+    structure = estimate_noise_structure(t, y)
+
+    assert structure['correlated_lengthscale'] == pytest.approx(
+        NUISANCE_MIN_LENGTHSCALE_STEPS * FLOOR_TIME_STEP)
+    # The component keeps its own amplitude instead of being folded into the
+    # white noise, which would leave white_std of the order of FLOOR_NUISANCE.
+    assert structure['correlated_std'] == pytest.approx(FLOOR_NUISANCE, rel=0.5)
+    assert structure['white_std'] < 0.5 * FLOOR_NUISANCE
+
+
+def test_max_rate_is_continuous_across_the_nuisance_floor():
+    """Crossing the correlation-time floor may not move the answer.
+
+    The same series either side of the floor has the same kinetics, so the two
+    maxima must agree. Discarding the sub-floor nuisance instead broke this by
+    60 %, because the kinetic length scale then collapsed onto the wiggles.
+    """
+    rates = []
+    for correlation_steps in (2.5, 4.0):
+        t, y = nuisance_floor_series(np.random.default_rng(11), correlation_steps)
+        result = extract_max_rate(time_quantity(t), amount_quantity(y))
+        rates.append(result.max_rate.unit[RATE_UNIT])
+
+    assert rates[0] == pytest.approx(rates[1], rel=0.10)
 
 
 # --- Short, coarsely sampled series ------------------------------------------

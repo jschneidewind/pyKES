@@ -94,8 +94,12 @@ STATE_DIMENSION = SIGNAL_STATE_DIMENSION + NUISANCE_STATE_DIMENSION
 VARIOGRAM_LAG_COUNT = 24             # log-spaced lags probed by the variogram
 VARIOGRAM_MAX_LAG_FRACTION = 0.05    # longest lag, as a fraction of the series duration
 VARIOGRAM_MIN_SAMPLES = 40           # a lag is only used if this many differences remain
+# The variogram model has four parameters, so fewer lags than this cannot split
+# the scatter into a white and a correlated part at all -- whatever the fit
+# returns is then an arbitrary point on a ridge, not a measurement.
+VARIOGRAM_MIN_RESOLVED_LAGS = 6
 CORRELATED_NOISE_SIGNIFICANCE = 0.1  # correlated noise below this variance ratio counts as absent
-NUISANCE_MIN_LENGTHSCALE_STEPS = 3.0 # a nuisance decorrelating faster than this is just white noise
+NUISANCE_MIN_LENGTHSCALE_STEPS = 3.0 # floor on the nuisance correlation time, in median time steps
 NUISANCE_ABSENT_FRACTION = 1e-3      # residual nuisance amplitude, as a fraction of the white noise
 # A nuisance allowed to decorrelate slowly stops being distinguishable from
 # kinetics and starts absorbing the curvature of the reaction curve itself.
@@ -425,16 +429,52 @@ def variogram_residuals(log_parameters, lags, variances):
     return np.log(model) - np.log(variances)
 
 
+def variogram_residuals_at_fixed_lengthscale(log_parameters, lags, variances, lengthscale):
+    """
+    Log-space residuals of the noise model with the correlation time pinned.
+
+    Used for the refit that follows a clamp of the correlation time to its
+    resolution floor: the two variances and the curvature term are free to
+    re-share the scatter under the constraint, which they must, because a
+    process held to a longer correlation time explains less of the short-lag
+    variogram than the unconstrained fit assigned to it.
+
+    Parameters
+    ----------
+    log_parameters : ndarray
+        Logarithms of (white variance, correlated variance, curvature
+        coefficient); the correlation time is not among them.
+    lags : ndarray
+        Lags of the measured variogram.
+    variances : ndarray
+        Measured second-difference variances.
+    lengthscale : float
+        Correlation time to hold fixed.
+
+    Returns
+    -------
+    ndarray
+        Differences of logarithms, one per lag.
+    """
+    log_white, log_correlated, log_curvature = log_parameters
+
+    return variogram_residuals(
+        np.array([log_white, log_correlated, np.log(lengthscale), log_curvature]), lags, variances)
+
+
 def estimate_noise_structure(time, values):
     """
     Split the scatter of a trace into a white and a correlated component.
 
     Fits the variogram model of `variogram_residuals` to the measured
-    second-difference variogram. The correlated component survives only if it
-    is actually resolvable: it has to carry a meaningful share of the variance
-    *and* decorrelate slowly enough to be told apart from white noise at this
-    sampling. Otherwise it is folded into the white noise, which switches the
-    nuisance component of the Gaussian process off in all but name.
+    second-difference variogram. Two things can stop the correlated component
+    from being usable: a variogram with too few lags to separate two
+    components in the first place, and a component carrying too little
+    variance to matter. Either way it is folded into the white noise, which
+    switches the nuisance component of the Gaussian process off in all but
+    name. A correlation time shorter than the sampling can resolve is neither:
+    it is a constraint the fit has to respect, not a reason to discard what the
+    variogram plainly shows.
 
     Parameters
     ----------
@@ -467,17 +507,34 @@ def estimate_noise_structure(time, values):
     fit = least_squares(variogram_residuals, initial_guess, args=(lags, variances), bounds=bounds)
     white_variance, correlated_variance, lengthscale, _ = np.exp(fit.x)
 
-    # A correlated component carrying too little variance to resolve, or one
-    # that decorrelates within a few samples, is indistinguishable from white
-    # noise at this sampling; calling it white is the identifiable choice.
-    # Keeping its amplitude as a nuisance instead would hand the fit a state
-    # one or two samples wide that interpolates the measurement noise point by
-    # point, leaving residuals -- and with them the scale the robust
-    # reweighting calibrates against -- near zero. A short, coarsely sampled
-    # series lands here, because its variogram has too few lags to separate
-    # the two components at all.
-    unresolved = (correlated_variance < CORRELATED_NOISE_SIGNIFICANCE * white_variance
-                  or lengthscale < NUISANCE_MIN_LENGTHSCALE_STEPS * median_time_step)
+    # A nuisance one or two samples wide would interpolate the measurement noise
+    # point by point, leaving residuals -- and with them the scale the robust
+    # reweighting calibrates against -- near zero. The floor that prevents it is
+    # a constraint on the fit, not a verdict on the component: pinning the
+    # correlation time there and letting the two variances re-share the scatter
+    # keeps the split continuous, and the refit is what makes the clamp safe,
+    # since a process held to a longer correlation time has to hand the white
+    # noise back the short-lag variance it can no longer explain. Discarding the
+    # component instead put a well whose correlation time missed the floor by
+    # 0.4 % (AE-855_B2) 17 % out, because its correlated noise -- 65 times the
+    # white variance -- then had nowhere to go but the kinetic component.
+    lengthscale_floor = min(NUISANCE_MIN_LENGTHSCALE_STEPS * median_time_step, lengthscale_upper)
+    resolvable = len(lags) >= VARIOGRAM_MIN_RESOLVED_LAGS
+
+    if resolvable and lengthscale < lengthscale_floor:
+        free_parameters = fit.x[[0, 1, 3]]
+        free_bounds = (bounds[0][[0, 1, 3]], bounds[1][[0, 1, 3]])
+        refit = least_squares(variogram_residuals_at_fixed_lengthscale, free_parameters,
+                              args=(lags, variances, lengthscale_floor), bounds=free_bounds)
+        white_variance, correlated_variance = np.exp(refit.x[:2])
+        lengthscale = lengthscale_floor
+
+    # What is left unusable is a variogram too short to separate two components
+    # -- a four-parameter fit to a handful of lags lands anywhere on a ridge,
+    # and short, coarsely sampled series arrive here routinely -- or a component
+    # carrying too little variance to be worth a state of its own.
+    unresolved = (not resolvable
+                  or correlated_variance < CORRELATED_NOISE_SIGNIFICANCE * white_variance)
     if unresolved:
         white_variance += correlated_variance
         # Not zero: a nuisance block with no prior variance is singular and

@@ -193,30 +193,53 @@ similar height, and the optimizer lands in whichever it approaches first. The
 variogram settles the question outside the likelihood, from a statistic that a
 trend cannot bias and an artifact cannot move.
 
-Three guards apply to the result. A correlated component is kept only if it is
-actually resolvable, which means two things: it has to carry at least 10 % of
-the white variance, and it has to decorrelate no faster than **three sampling
-intervals**. Failing either, its variance is folded into the white noise and
-its correlation time collapsed to one time step, which switches the nuisance
-component off in all but name.
+Two guards decide whether there is a correlated component at all. It is
+discarded if the variogram has **fewer than six lags**, because the model has
+four parameters and a fit to a handful of points lands anywhere along a ridge
+rather than measuring anything; and it is discarded if it carries **less than
+10 % of the white variance**, because a state of its own is not worth adding
+for that. In either case its variance is folded into the white noise and its
+correlation time collapsed to one time step, which switches the nuisance
+component off in all but name. Short, coarsely sampled runs land in the first
+of these routinely — a 76-point run gets three lags.
 
-The second of those matters more than it looks. A Matern process with a
-correlation time of one or two samples is not distinguishable from white noise
-at that sampling — but it is *not* harmless, because the nuisance is a state in
-the model rather than observation noise. Left in, it interpolates the
-measurement scatter point by point: the residuals collapse towards zero, and
-with them the scale that the robust reweighting of section 4 calibrates
-against, so ordinary noise starts scoring as hundreds of standard deviations
-and a slice of the series is rejected as artifacts. Short, coarsely sampled
-runs land here routinely, because their variogram has too few lags to separate
-the two components in the first place. Folding the amplitude in, not just
-collapsing the length scale, is what fixes it.
+That matters more than it looks, because the nuisance is a state in the model
+rather than observation noise. A component invented out of an underdetermined
+fit interpolates the measurement scatter point by point: the residuals collapse
+towards zero, and with them the scale that the robust reweighting of section 4
+calibrates against, so ordinary noise starts scoring as hundreds of standard
+deviations and a slice of the series is rejected as artifacts. Folding the
+amplitude in, not just collapsing the length scale, is what fixes it.
 
-Third, the correlation time may not exceed 2 % of the run duration: a nuisance
+A third guard is a **floor** rather than a verdict. A Matern process with a
+correlation time of one or two samples is indistinguishable from white noise at
+that sampling and would interpolate it in the same way, so the correlation time
+may not fall below **three sampling intervals**. When the fit lands under it,
+the correlation time is pinned there and the two variances are *refitted* under
+that constraint — the component is kept, not deleted. The refit is what makes
+the clamp honest: a process held to a longer correlation time explains less of
+the short-lag variogram, so it has to hand the white noise back the variance it
+can no longer account for.
+
+The distinction is not academic. Discarding a sub-floor component instead — as
+this stage used to — re-labels its entire amplitude as white noise, and the
+smoother is then left with the kinetic component as the only thing that can
+explain wiggles which are, in fact, correlated. It obliges: the kinetic length
+scale collapses onto them and their crests become the reported rate. One well of
+a 110-well plate (AE-855_B2) missed the floor by 0.4 % with correlated noise 65
+times the white variance, and came out 17 % high on a rate curve that
+oscillated instead of decaying — with no flag raised, because the fold also set
+the nuisance correlation time to the value that suppresses
+`strong_correlated_noise`.
+
+Fourth, the correlation time may not exceed 2 % of the run duration: a nuisance
 allowed to decorrelate slowly stops being distinguishable from kinetics and
 starts absorbing the curvature of the reaction curve itself. Measured
-instrument disturbances sit an order of magnitude below that cap — and, at the
-other end, comfortably above the three-sample floor.
+instrument disturbances sit an order of magnitude below that cap. They do *not*
+keep a comparable distance from the three-sample floor at the other end: on the
+110-well plate above, the fitted correlation times run from 3.0 to 17.6 sampling
+intervals in an unbroken spread, which is precisely why that end has to be a
+constraint the fit is held to rather than a line it can fall off.
 
 ### Two components, one observation
 

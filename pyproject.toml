@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "pyKES"
-version = "0.1.9"
+version = "0.2.0"
 description = "Python package for kinetic modelling of chemical reaction networks."
 keywords = ["kinetics", "photocatalysis", "water-splitting", "reaction-networks", "ode"]
 authors = [
@@ -25,8 +25,6 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Chemistry",
 ]
 dependencies = [
-    # 1.49 introduced width="stretch"/"content" on st.dataframe, st.plotly_chart
-    # and the button family, which the Streamlit components rely on.
     "streamlit>=1.49",
     "pandas",
     "numpy",
@@ -51,3 +49,7 @@ include = ["pyKES*"]
 
 [tool.uv.build-backend]
 module-name = "pyKES"
+
+[tool.pytest.ini_options]
+norecursedirs = ["Untracked", "*.egg", ".*", "_darcs", "build", "CVS", "dist",
+                 "node_modules", "venv", "{arch}"]
