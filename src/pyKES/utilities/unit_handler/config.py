@@ -44,6 +44,7 @@ DIMENSIONS = {
         "base": "W",
         "conversions": {
             "W": 1.0,
+            "mW": 1e-3,
             "kW": 1e3,
             "MW": 1e6,
             "GW": 1e9,
@@ -72,6 +73,8 @@ DIMENSIONS = {
         "base": "m",
         "conversions": {
             "m": 1.0,
+            "nm": 1e-9,
+            "um": 1e-6,
             "mm": 1e-3,
             "cm": 1e-2,
             "km": 1e3, 
@@ -86,7 +89,6 @@ DIMENSIONS = {
             "mm2": 1e-6,
             "cm2": 1e-4,
             "km2": 1e6,
-            #"acre": 4046.8564224,
             "acre": 4046.86266972,
             "ha": 1e4
         }
@@ -143,6 +145,8 @@ DIMENSIONS = {
         "base": "mol",
         "conversions": {
             "mol": 1.0,
+            "pmol": 1e-12,
+            "nmol": 1e-9,
             "umol": 1e-6,
             "mmol": 1e-3, 
             "kmol": 1e3,
@@ -222,6 +226,7 @@ DIMENSIONS = {
         "base": "-",
         "conversions": {
             "-": 1.0,
+            "%": 0.01,
             "ppm": 1e-6,
             "ppb": 1e-9
         }
