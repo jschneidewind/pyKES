@@ -1,3 +1,5 @@
+"""Interpolate two time series onto one common time grid."""
+
 from scipy.interpolate import interp1d
 import numpy as np
 
@@ -40,6 +42,18 @@ def harmonize_time_series(time1, data1, time2, data2, method='linear'):
 
 
 def testing():
+    """
+    Harmonize two offset, noisy sine traces and plot the result.
+
+    The two inputs start and end at different times and are sampled at
+    different rates, which is the case the function exists for.
+
+    Returns
+    -------
+    None
+        Prints the harmonized arrays and shows the comparison plot.
+    """
+
     # write a simple test case with noisy data
     t1 = np.linspace(0, 10, 500)
     d1 = np.sin(t1) + 0.1 * np.random.randn(len(t1))

@@ -1,7 +1,28 @@
+"""Coerce arbitrary structures into something `json.dumps` accepts."""
+
 import json
 
 def make_json_serializable(obj):
-    """Recursively convert non-JSON-serializable objects to strings."""
+    """
+    Recursively replace anything JSON cannot represent with a string.
+
+    Used before storing configuration dictionaries in an HDF5 attribute — the
+    ``other_multipliers`` of a fitted model, for instance, hold callables, which
+    have no JSON representation but are worth recording by name so a stored fit
+    says which absorption function it used.
+
+    Parameters
+    ----------
+    obj : object
+        Value to convert. Dictionaries and sequences are walked recursively.
+
+    Returns
+    -------
+    object
+        A structure of JSON-representable values. Callables become
+        ``'<function: module.name>'``; anything else that cannot be serialized
+        becomes its `str`.
+    """
     if isinstance(obj, dict):
         return {k: make_json_serializable(v) for k, v in obj.items()}
     elif isinstance(obj, (list, tuple)):

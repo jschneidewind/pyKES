@@ -953,36 +953,25 @@ def create_json_export_data(
     Returns
     -------
     Dict[str, Any]
-        Dictionary with structure:
-        {
-            'plotting_data': {
-                'analysis_result_name': {
-                    'unit': str,
-                    'data': {
-                        'x_value': {
-                            'min': float,
-                            'max': float,
-                            'mean': float,
-                            'median': float,
-                            'std': float,
-                            'count': int,
-                            'experiments_at_this_x_value': [
-                                {
-                                    'experiment_name': str,
-                                    'y_value': float,
-                                    'subset_key': str,
-                                    'subset_value': str,
-                                    'group_name': str,
-                                    'color': str
-                                }
-                            ]
-                        }
-                    }
-                }
-            },
-            'metadata': {...}
-        }
-    
+        Dictionary of the shape::
+
+            {'plotting_data': {'<analysis result>': {
+                 'unit': str,
+                 'data': {'<x value>': {'min': float,
+                                       'max': float,
+                                       'mean': float,
+                                       'median': float,
+                                       'std': float,
+                                       'count': int,
+                                       'experiments_at_this_x_value': [
+                                           {'experiment_name': str,
+                                            'y_value': float,
+                                            'subset_key': str,
+                                            'subset_value': str,
+                                            'group_name': str,
+                                            'color': str}]}}}},
+             'metadata': {...}}
+
     Examples
     --------
     >>> json_data = create_json_export_data(

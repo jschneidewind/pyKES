@@ -43,3 +43,5 @@ htmlcov/
 .coverage
 coverage.xml
 CLAUDE.md
+# Sphinx documentation
+docs/_build/
