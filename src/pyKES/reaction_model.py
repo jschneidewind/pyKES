@@ -1,3 +1,24 @@
+"""Object-oriented front end to simulation and pathway analysis.
+
+`Reaction_Model` bundles a reaction network, its rate constants, initial
+conditions and multipliers into one object, and exposes the four things
+normally done with them in sequence: integrate the network
+(`Reaction_Model.solve_ode`), plot the concentration traces
+(`Reaction_Model.plot_solution`), trace where the absorbed photons end up at
+a chosen time (`Reaction_Model.calculate_reaction_network_propopagation`) and
+draw that as a pathway diagram
+(`Reaction_Model.plot_reaction_network_propagation`).
+
+It holds every intermediate result as an attribute rather than returning it,
+which is what makes it convenient in a notebook: the parsed network, the
+solution array, the concentrations at the analysed time point and the
+transformed pathway data all stay available for inspection afterwards.
+
+Use `pyKES.reaction_ODE` directly when the functional interface is enough, and
+`pyKES.fitting_ODE.Fitting_Model` when the rate constants are to be fitted
+rather than given.
+"""
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -9,10 +30,66 @@ from pyKES.utilities.calculate_absorption import calculate_excitations_per_secon
 from pyKES.utilities.find_nearest import find_nearest
 
 class Reaction_Model:
+    """
+    A reaction network together with everything needed to simulate it.
+
+    Parameters
+    ----------
+    reaction_network : list of str, optional
+        Reactions in the string format of `pyKES.reaction_ODE.parse_reactions`.
+    rate_constants : dict, optional
+        Mapping of rate constant identifiers to their values.
+    initial_conditions : dict, optional
+        Mapping of species names to their concentrations at t = 0. Species left
+        out start at zero.
+    other_multipliers : dict, optional
+        Mapping of multiplier identifiers to values or function specifications,
+        for example light-absorption terms; see
+        `pyKES.reaction_ODE.resolve_other_multipliers`.
+    times : array_like, optional
+        Time points the solution is reported at.
+
+    Attributes
+    ----------
+    parsed_reactions : list of dict
+        The parsed network, filled in on construction.
+    species : list of str
+        Sorted species of the network, fixing the column order of `solution`.
+    solution : numpy.ndarray
+        Concentration array of shape ``(len(times), len(species))``, available
+        after `solve_ode`.
+    propagation_results : dict
+        Nested pathway tree, available after
+        `calculate_reaction_network_propopagation`.
+    transformed_propagation_data : dict
+        Node/link representation of that tree, available after
+        `plot_reaction_network_propagation`.
+
+    Examples
+    --------
+    >>> model = Reaction_Model(reaction_network=['[A] > [B], k1'],
+    ...                        rate_constants={'k1': 0.1},
+    ...                        initial_conditions={'[A]': 1.0},
+    ...                        times=np.linspace(0, 60, 200))
+    >>> model.solve_ode()
+    >>> model.plot_solution()
+    """
 
     def __init__(self, **kwargs):
         '''
-        Initilize the Reaction_Model class.
+        Initialize the model and parse its reaction network.
+
+        Parameters
+        ----------
+        **kwargs
+            ``reaction_network``, ``rate_constants``, ``initial_conditions``,
+            ``other_multipliers`` and ``times``, as documented on the class.
+            Each defaults to an empty container, so a model can be built
+            piecewise by assigning to the attributes afterwards.
+
+        Returns
+        -------
+        None
         '''
         self.reaction_network: list = kwargs.get('reaction_network', [])
         self.rate_constants: dict = kwargs.get('rate_constants', {})
@@ -24,7 +101,12 @@ class Reaction_Model:
 
     def solve_ode(self):
         '''
-        Solve the ODE system for the reaction model.
+        Integrate the network and store the result on the model.
+
+        Returns
+        -------
+        None : None
+            The solution array is stored as ``self.solution``.
         '''
 
         self.solution = solve_ode_system(
@@ -37,7 +119,19 @@ class Reaction_Model:
         
     def plot_solution(self, exclude_species = [], ax = None):
         '''
-        Plot the solution of the ODE system.
+        Plot the concentration-time traces of the solved network.
+
+        Parameters
+        ----------
+        exclude_species : list of str, optional
+            Species left out of the figure, typically reagents in large excess
+            whose trace would flatten everything else.
+        ax : matplotlib.axes.Axes, optional
+            Axes drawn on. A new figure is created when omitted.
+
+        Returns
+        -------
+        None
         '''
 
         plot_solution(self.species,
@@ -52,6 +146,44 @@ class Reaction_Model:
                                                  photon_flux: float,
                                                  pathlength: float,
                                                  concentration_unit: str):
+        """
+        Trace where the absorbed photons end up, at one point in time.
+
+        The network is frozen at the requested time: the concentrations there
+        fix the branching ratio of every species, and the absorbed photons are
+        followed through those branches until each pathway terminates. The
+        result answers what an integrated trace cannot — which fraction of the
+        absorbed light reaches the product and which fraction is lost, and to
+        what.
+
+        Requires `solve_ode` to have been run.
+
+        Parameters
+        ----------
+        timepoint : float
+            Time the analysis is performed at. The nearest available point of
+            ``self.times`` is used.
+        absorbing_species_with_extinction_coefficients : dict
+            Mapping of every light-absorbing ground state to
+            ``{'excited_name': str, 'extinction_coefficient': float}``, the
+            latter in M^-1 cm^-1. Species listed here compete for the incident
+            photons.
+        photon_flux : float
+            Photon flux in photons cm^-2 s^-1.
+        pathlength : float
+            Optical path length of the sample in cm.
+        concentration_unit : str
+            Unit the concentrations of the network are expressed in, e.g.
+            ``'uM'``. Needed to turn them into absorbances.
+
+        Returns
+        -------
+        None : None
+            The pathway tree is stored as ``self.propagation_results``; the
+            time index, the picked solution and the concentrations at that time
+            are stored alongside it.
+        """
+
         # Storing photon flux and pathlength
         self.photon_flux = photon_flux
         self.pathlength = pathlength    
@@ -88,6 +220,38 @@ class Reaction_Model:
                                           backward_link_kwargs = {},
                                           **kwargs
                                           ):
+        """
+        Draw the pathway diagram of a computed network propagation.
+
+        Requires `calculate_reaction_network_propopagation` to have been run.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes drawn on. A new figure is created when omitted.
+        value_key : {'log_value', 'value'}, optional
+            Quantity the bar heights encode. Photon budgets span several orders
+            of magnitude, so the log-normalized value keeps minor pathways
+            visible; ``'value'`` draws true proportions instead.
+        fanning_factor : float, optional
+            Vertical space each node gives its children. Larger values spread
+            branches further apart.
+        assumed_branching_degree : float, optional
+            Assumed number of children per node, used to widen the layout of
+            early levels so that later ones still fit.
+        excluded_nodes, excluded_links : list, optional
+            Node names and ``(source, target)`` pairs omitted from the figure.
+        forward_link_kwargs, backward_link_kwargs : dict, optional
+            Matplotlib keyword arguments for forward-running and looping
+            (back-reaction) bands respectively.
+        **kwargs
+            Passed on to `pyKES.plotting.plotting_pathways_transformed.plot_pathway_bars`.
+
+        Returns
+        -------
+        None : None
+            The layout is stored as ``self.transformed_propagation_data``.
+        """
 
         self.transformed_propagation_data = transform_data_for_plotting(
             self.propagation_results,
@@ -109,6 +273,19 @@ class Reaction_Model:
 
 
 def full_testing():
+    """
+    Demonstrate the full model on a three-state photochemical cascade.
+
+    A absorbs light and either relaxes or converts to B; B absorbs in turn and
+    either relaxes, reverts to A or converts to C. Both the concentration
+    traces and the pathway diagram of the absorbed photons are drawn, which is
+    the pairing the class exists for.
+
+    Returns
+    -------
+    None
+        Shows two matplotlib figures.
+    """
 
     PHOTON_FLUX = 1e17 # photons/cm2/s
     PATHLENGTH = 2.25 # cm
@@ -229,6 +406,17 @@ def full_testing():
 
 
 def testing():
+    """
+    Simulate the Ru(bpy)3 / persulfate water-oxidation network.
+
+    The same network as `pyKES.reaction_ODE.test_function`, built through
+    `Reaction_Model` instead of the functional interface.
+
+    Returns
+    -------
+    None
+        Shows the concentration-time plot.
+    """
 
     reactions = ['[RuII] > [RuII-ex], k1 ; hv_functionA',
                  '[RuII-ex] > [RuII], k8',

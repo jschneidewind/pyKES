@@ -1,3 +1,31 @@
+"""Light absorption in a mixture of competing chromophores.
+
+A photochemical rate law needs the number of photons a species absorbs per
+second, which is not a constant: it depends on how much of that species is
+present, and on how much light everything else in the cuvette takes first. As a
+reaction proceeds and one chromophore is converted into another, that
+competition shifts, and with it the effective rate of every light-driven step.
+
+The functions here compute that quantity, in increasing generality:
+
+* `calculate_excitations_per_second` — a single absorber, no competition.
+* `calculate_excitations_per_second_competing` — two species sharing the light.
+* `calculate_excitations_per_second_multi_competing` and its faster twin
+  `..._fast` — any number of species, with the absorbed photons divided among
+  them in proportion to their contribution to the total absorbance.
+
+They are written to be used as multiplier functions of
+`pyKES.reaction_ODE`, which calls them at every integration step with the
+current concentrations, so the competition is resolved continuously rather than
+fixed at t = 0. The ``_fast`` variant exists because that call happens tens of
+thousands of times per fit: it works on plain Python dictionaries and avoids
+NumPy's per-call overhead, which dominates at these array sizes.
+
+All of them combine the Beer-Lambert law for the total absorbed fraction with a
+split of that fraction by relative absorbance, and normalize per mole of the
+species of interest, so the result is excitations per molecule per second.
+"""
+
 import numpy as np
 import cProfile 
 import pstats
@@ -241,15 +269,14 @@ def calculate_excitations_per_second_multi_competing(species_of_interest,
     Returns
     -------
     float or tuple
-        If ``return_full=False``:
-            Number of excitations per species of interest per second.
-        If ``return_full=True``:
-            A tuple containing:
-            - excitations_per_species_dict : dict
-                Dictionary mapping species names to excitations per second.
-            - absorbed_dict : dict
-                Dictionary mapping species names to fraction of light absorbed,
-                plus a 'transmitted' key with the fraction of light transmitted.
+        With ``return_full=False``, the number of excitations per molecule of
+        the species of interest per second.
+
+        With ``return_full=True``, a tuple of two dictionaries:
+        ``excitations_per_species_dict`` maps every species to its excitations
+        per second, and ``absorbed_dict`` maps every species to the fraction of
+        the incident light it absorbed, plus a ``'transmitted'`` key holding
+        the fraction that passed through unabsorbed.
     
     Raises
     ------
@@ -344,6 +371,19 @@ def calculate_excitations_per_second_multi_competing(species_of_interest,
 
 
 def test_function():
+    """
+    Benchmark the two multi-species implementations against each other.
+
+    Both are called a hundred thousand times, which is the order of magnitude a
+    single fit reaches, and the timings are printed together with the results
+    so the speedup can be seen not to have changed the numbers. The commented
+    blocks scale the same comparison up to ten and a hundred competing species.
+
+    Returns
+    -------
+    None
+        Prints the timings and the excitation rates of both implementations.
+    """
 
     photon_flux = 1000e17  # photons cm^-2 s^-1
 

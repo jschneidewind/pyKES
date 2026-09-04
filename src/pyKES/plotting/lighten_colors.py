@@ -1,3 +1,5 @@
+"""Mix a color towards white."""
+
 import matplotlib.colors as mcolors
 import numpy as np
 

@@ -92,9 +92,9 @@ def parse_reference(unit_str):
 
     Uses a single regex, REFERENCE_PATTERN, whose bracket group is
     optional, so one finditer pass walks through every real unit token
-    in the string -- labeled or not -- while operator characters (*,
-    /, (, )) are never matched at all and so never appear in the
-    output.
+    in the string -- labeled or not -- while operator characters
+    (``*``, ``/``, ``(``, ``)``) are never matched at all and so never
+    appear in the output.
 
     Parameters
     ----------

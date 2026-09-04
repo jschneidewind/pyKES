@@ -1,3 +1,39 @@
+"""Turn a nested pathway tree into plottable nodes, links and coordinates.
+
+`pyKES.pathways.pathways.calculate_reaction_network_propagation` returns a
+nested dictionary: a tree of species, each carrying the amount of it formed on
+that branch. This module flattens that tree into the flat ``nodes`` and
+``links`` structure a diagram needs, and computes where each of them belongs on
+the page. `transform_data_for_plotting` runs the whole chain; the individual
+stages are exposed for inspection.
+
+The stages, in order:
+
+1. `transform_pathways_data` walks the tree and emits one node per branch and
+   one link per parent-child relation. Node ids carry both the species name and
+   the depth (``'[B]~2/0'``), so the same species appearing on two branches
+   stays two nodes, and each node remembers the branch that led to it.
+2. `add_sibling_order` ranks the children of each node by size, which fixes
+   their vertical order in the figure — largest pathway on top.
+3. `post_process_pathways_data` consolidates the endpoints. A terminal node
+   whose species already occurred upstream is a *cycle*, and its link is
+   redirected back to that occurrence; the remaining terminal nodes are merged
+   per species into one node in a final column, so a product reached by three
+   routes is drawn once with three incoming bands.
+4. `add_y_coordinates` places every node vertically, each node distributing its
+   children inside a window whose width shrinks with depth.
+5. `add_link_starting_values`, `add_link_ending_values` and `process_links`
+   turn those node positions into the band endpoints the plotting code draws.
+
+Amounts in a photon budget span orders of magnitude — a main pathway carries a
+third of the light, a minor loss channel a thousandth — so every node also
+carries a log-normalized ``log_value``. Using it as the ``value_key`` keeps
+minor pathways visible in the figure; using ``'value'`` draws true proportions.
+
+`pyKES.plotting.plotting_pathways_transformed.plot_pathway_bars` draws the
+result.
+"""
+
 import numpy as np
 import pprint as pp
 from functools import partial
@@ -25,6 +61,32 @@ def transform_log_normalized(value, min_expected=0.001, max_expected=1.0):
     return (log_val - log_min) / (log_max - log_min)
 
 def adjust_fanning_factor(level, fanning_factor, assumed_branching_degree, max_level):
+    """
+    Widen the vertical window a node gives its children, by depth.
+
+    Each level of the tree subdivides the space its parent left it, so a window
+    of constant width would leave the deepest branches no room at all. The
+    window is therefore scaled by the assumed branching degree raised to the
+    number of levels still to come: early nodes fan out widely, late ones
+    barely at all.
+
+    Parameters
+    ----------
+    level : int
+        Depth of the node, 0 at the root.
+    fanning_factor : float
+        Base window width, applied at the deepest level.
+    assumed_branching_degree : float
+        Assumed number of children per node. Values above 1 widen upper levels;
+        it need not match the real branching degree, which varies per node.
+    max_level : int
+        Depth of the deepest level of the tree.
+
+    Returns
+    -------
+    float
+        Window width for nodes at `level`.
+    """
 
     multiplier = assumed_branching_degree ** (max_level - level - 1)
     fanning_factor_adjusted = fanning_factor * multiplier
@@ -66,7 +128,43 @@ def transform_pathways_data(data,
                             depth_level = 0,
                             history = None,
                             min_expected = None):
-    
+    """
+    Flatten a nested pathway tree into nodes and links.
+
+    Recurses through the tree, emitting one node per occurrence of a species
+    and one link per parent-child relation. The same species on two branches
+    becomes two nodes, distinguished by an id that carries its depth, since the
+    two are different pathways and are drawn separately.
+
+    Parameters
+    ----------
+    data : dict
+        Nested pathway tree, as returned by
+        `pyKES.pathways.pathways.calculate_reaction_network_propagation`. Keys
+        are species names; ``'amount_formed'`` and ``'absorbed'`` carry the
+        amount at that branch.
+    parent : str, optional
+        Node id of the parent. None at the root; set by the recursion.
+    depth_level : int, optional
+        Current depth. Set by the recursion.
+    history : list of str, optional
+        Node ids on the path from the root to here, used later to detect
+        cycles. Set by the recursion.
+    min_expected : float, optional
+        Smallest amount the log normalization maps to 0. Derived on the first
+        call from the smallest value in the tree, rounded down to its order of
+        magnitude, and passed down unchanged so every node shares one scale.
+
+    Returns
+    -------
+    dict
+        ``{'nodes': dict, 'links': list, 'min_expected': float}``, plus
+        ``'root_id'`` on the outermost call. Each node carries its ``name``,
+        ``value``, ``log_value``, ``level``, ``history``, ``parent`` and
+        ``is_terminal``; each link its ``source``, ``target``, ``value`` and
+        ``log_value``.
+    """
+
     if history is None:
         history = []
 
@@ -359,6 +457,33 @@ def compute_child_y_coordinate(y_window: tuple, num_siblings: int, order_idx: in
     return upper_edge - fraction * (upper_edge - lower_edge)
 
 def compute_y_window(y_coord, level, fanning_factor, assumed_branching_degree, max_level, value):
+    """
+    Compute the vertical window a node hands down to its children.
+
+    The window is centered on the node and scaled both by its depth (see
+    `adjust_fanning_factor`) and by its own size, so a pathway carrying little
+    material spreads its children over correspondingly little space.
+
+    Parameters
+    ----------
+    y_coord : float
+        Vertical position of the node.
+    level : int
+        Depth of the node.
+    fanning_factor : float
+        Base window width.
+    assumed_branching_degree : float
+        Assumed number of children per node.
+    max_level : int
+        Depth of the deepest level of the tree.
+    value : float
+        Size of the node, in whichever value key the layout uses.
+
+    Returns
+    -------
+    tuple of float
+        ``(lower_edge, upper_edge)`` of the window.
+    """
 
     window_size = adjust_fanning_factor(level, fanning_factor, assumed_branching_degree, max_level) 
     window_size *= value
@@ -370,7 +495,31 @@ def compute_y_window(y_coord, level, fanning_factor, assumed_branching_degree, m
 
 def computate_y_coordinates(data, level, fanning_factor, assumed_branching_degree,
                             value_key):
-    
+    """
+    Place every node of one level inside its parent's window.
+
+    Called level by level from `add_y_coordinates`, so that each node already
+    has its parent's window available when it is placed. Besides its position,
+    each node is given the extent of its bar and the window it hands on.
+
+    Parameters
+    ----------
+    data : dict
+        Pathway data; the nodes of `level` are modified in place.
+    level : int
+        Depth of the nodes placed by this call.
+    fanning_factor : float
+        Base window width.
+    assumed_branching_degree : float
+        Assumed number of children per node.
+    value_key : str
+        Node key giving the bar height, ``'value'`` or ``'log_value'``.
+
+    Returns
+    -------
+    None
+    """
+
     for node_id, node in data['nodes'].items():
         if node['level'] != level:
             continue
@@ -397,6 +546,26 @@ def computate_y_coordinates(data, level, fanning_factor, assumed_branching_degre
         )
 
 def compute_y_coordinates_terminal_nodes(data, value_key):
+    """
+    Place the consolidated terminal nodes of the final column.
+
+    Terminal nodes were merged per species by `post_process_pathways_data`, so
+    each has several parents rather than one and cannot be placed inside a
+    single parent window. It is placed at the lowest of its parents instead,
+    which keeps the incoming bands from having to cross each other on their way
+    down.
+
+    Parameters
+    ----------
+    data : dict
+        Pathway data; the terminal nodes are modified in place.
+    value_key : str
+        Node key giving the bar height, ``'value'`` or ``'log_value'``.
+
+    Returns
+    -------
+    None
+    """
 
     for node_id, node in data['nodes'].items():
         if not node['is_terminal']:
@@ -415,7 +584,33 @@ def compute_y_coordinates_terminal_nodes(data, value_key):
 
 def add_y_coordinates(data, fanning_factor, assumed_branching_degree,
                       value_key='log_value'):
-    
+    """
+    Give every node a vertical position and bar extent.
+
+    Starts from the root at y = 0 and walks down level by level, each node
+    distributing its children inside the window it received; the consolidated
+    terminal nodes of the final column are placed last, by
+    `compute_y_coordinates_terminal_nodes`.
+
+    Parameters
+    ----------
+    data : dict
+        Pathway data with sibling order and terminal consolidation already
+        applied. Modified in place.
+    fanning_factor : float
+        Base window width. Larger values spread branches further apart.
+    assumed_branching_degree : float
+        Assumed number of children per node, used to widen upper levels.
+    value_key : str, optional
+        Node key giving the bar height, ``'value'`` or ``'log_value'``.
+
+    Returns
+    -------
+    dict
+        The same dictionary, with ``y_coord``, ``y_min``, ``y_max`` and
+        ``y_window`` added to every node.
+    """
+
     # Add coordinates for root node
     root_node = data['nodes'][data['root_id']]
 
@@ -561,6 +756,33 @@ def add_link_ending_values(data):
     return data
 
 def process_links(data, value_key):
+    """
+    Turn node positions and link fractions into band coordinates.
+
+    A link leaves its source over the vertical extent that corresponds to its
+    share of that node, and arrives at its target over the same share of the
+    target. Those two intervals, together with the levels of the two nodes, are
+    the four numbers the plotting code needs to draw a band.
+
+    Links that run *backwards* — to a node at a lower level, i.e. a cycle
+    closing on an earlier species — are marked as looping and given the plain
+    extents of both nodes, since they are drawn as an elliptical band around
+    the outside rather than as a band between two columns.
+
+    Parameters
+    ----------
+    data : dict
+        Pathway data with node coordinates and link starting/ending values
+        already computed. The links are modified in place.
+    value_key : str
+        Node key giving the bar height, ``'value'`` or ``'log_value'``.
+
+    Returns
+    -------
+    dict
+        The same dictionary, with ``looping`` and ``coordinates`` added to
+        every link.
+    """
 
     for link in data['links']:
         source_node = data['nodes'][link['source']]
@@ -602,7 +824,42 @@ def process_links(data, value_key):
 def transform_data_for_plotting(data, value_key='value',
                                 fanning_factor=0.7,
                                 assumed_branching_degree=1.7):
-    
+    """
+    Turn a nested pathway tree into a ready-to-plot layout.
+
+    Runs the whole pipeline of this module: flatten, rank siblings, consolidate
+    terminal nodes and cycles, place the nodes vertically and compute the band
+    coordinates of the links.
+
+    Parameters
+    ----------
+    data : dict
+        Nested pathway tree, as returned by
+        `pyKES.pathways.pathways.calculate_reaction_network_propagation`.
+    value_key : {'value', 'log_value'}, optional
+        Quantity the bar heights encode. Photon budgets span several orders of
+        magnitude, so ``'log_value'`` is usually what keeps minor pathways
+        visible; ``'value'`` draws true proportions.
+    fanning_factor : float, optional
+        Base vertical window width. Larger values spread branches apart.
+    assumed_branching_degree : float, optional
+        Assumed number of children per node, used to widen upper levels.
+
+    Returns
+    -------
+    dict
+        ``{'nodes': dict, 'links': list, 'root_id': str, 'max_level': int,
+        'min_expected': float}``, with every node positioned and every link
+        given ``coordinates``. Ready for
+        `pyKES.plotting.plotting_pathways_transformed.plot_pathway_bars`.
+
+    Examples
+    --------
+    >>> layout = transform_data_for_plotting(propagation_results,
+    ...                                      value_key='log_value')
+    >>> plot_pathway_bars(layout)
+    """
+
     # Transform nested data into links/nodes structure
     results = transform_pathways_data(data)
 
@@ -627,7 +884,21 @@ def transform_data_for_plotting(data, value_key='value',
 
         
 def main():
- 
+    """
+    Transform and plot a recorded photon budget of a three-state cascade.
+
+    The two hard-coded trees are real output of
+    `pyKES.pathways.pathways.calculate_reaction_network_propagation`, with and
+    without excitation of the final product [C] — the second is the one
+    actually plotted. Having them inline makes the transformation runnable
+    without solving a network first.
+
+    Returns
+    -------
+    None
+        Prints the layout and shows the pathway diagram.
+    """
+
     # With C excitation
     test_data = {'Light absorption': {'[A]': {'[A-excited]': {'[A]': {'amount_formed': np.float64(0.25101450169405526)},
                                               '[B]': {'[A]': {'amount_formed': np.float64(0.0822802686631513)},

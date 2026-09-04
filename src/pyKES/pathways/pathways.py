@@ -1,3 +1,37 @@
+"""Follow absorbed photons through a reaction network.
+
+A solved reaction network says how concentrations change; it does not say
+*where the light went*. This module answers that question by freezing the
+network at one set of concentrations and asking, of every species, which
+fraction of it reacts along each of the reactions available to it.
+
+The chain of reasoning is short. At fixed concentrations the rates of all
+reactions consuming a species are known, and their ratio is the probability
+that a molecule of that species takes each route
+(`calculate_reaction_pathway_proportions`). Splitting an amount of a species
+along those routes gives amounts of its products, which can be split in turn —
+so the whole downstream fate follows by recursion
+(`propagate_species`). Starting that recursion from the excited states formed
+by light absorption gives the photon budget of the system
+(`calculate_reaction_network_propagation`): what fraction of the incident light
+is transmitted, what fraction is absorbed by which chromophore, and where each
+absorbed photon ends up.
+
+Two structural cases need care and are handled explicitly:
+
+* **Cycles.** A network with back-reactions would recurse forever, so each
+  branch carries the set of species already visited on the way down and stops
+  when it meets one of them again.
+* **Reconvergent pathways.** A species reachable by more than one route is
+  reached at different points of a depth-first walk, and its downstream tree
+  has to be summed rather than overwritten. `merge_propagation_trees` does that
+  recursively, so the amounts far downstream stay consistent with the total
+  amount of their ancestor.
+
+`pyKES.pathways.transform_pathways_data` turns the nested result into
+plottable coordinates.
+"""
+
 import pprint as pp
 
 from pyKES.reaction_ODE import calculate_reaction_rate, parse_reactions
@@ -253,25 +287,16 @@ def calculate_reaction_network_propagation(concentrations,
     -------
     dict
         Nested dictionary containing the full propagation tree starting from
-        light absorption. Structure:
-        {
-            'Light absorption': {
-                '[A]': {
-                    'absorbed': 0.3,
-                    '[A-excited]': {
-                        'amount_formed': 0.3,
-                        '[B]': {
-                            'amount_formed': 0.15,
-                            ...
-                        },
-                        ...
-                    }
-                },
-                '[B]': {...},
-                'transmitted': 0.1
-            }
-        }
-        
+        light absorption, of the shape::
+
+            {'Light absorption': {'[A]': {'absorbed': 0.3,
+                                        '[A-excited]': {'amount_formed': 0.3,
+                                                        '[B]': {'amount_formed': 0.15,
+                                                                ...},
+                                                        ...}},
+                                 '[B]': {...},
+                                 'transmitted': 0.1}}
+
     Examples
     --------
     >>> reactions = ['[A] > [A-excited], k1 ; hv_functionA',
@@ -342,6 +367,18 @@ def calculate_reaction_network_propagation(concentrations,
 # -----------------------------
 
 def testing_function():
+    """
+    Check pathway proportions on a network with competing reaction orders.
+
+    [A] can react unimolecularly, with [C], or with itself, so the three
+    proportions depend on the concentrations rather than on the rate constants
+    alone — the point the function demonstrates.
+
+    Returns
+    -------
+    None
+        Prints a parsed reaction and the computed proportions.
+    """
 
     reactions = ['[A] > [B], k1',
                  '[A] + [C] > [D], k2',
@@ -366,6 +403,18 @@ def testing_function():
     print(proportions)
 
 def testing_propagation():
+    """
+    Run the full photon-budget calculation on a three-chromophore network.
+
+    [A], [B] and [C] all absorb, so they compete for the incident light, and
+    the [B] -> 2 [A] step closes a cycle that the propagation has to terminate
+    on rather than follow forever.
+
+    Returns
+    -------
+    None
+        Prints the pathway proportions of [B] and the full propagation tree.
+    """
 
     PHOTON_FLUX = 1e17
     PATHLENGTH = 2.25
@@ -434,6 +483,24 @@ def testing_propagation():
     pp.pprint(network_propagation)
                         
 def test_propagate_species_function():
+    """
+    Check that reconvergent pathways are merged correctly.
+
+    The network reaches [B] both directly from [A] and via the bimolecular
+    ``[A] + [B]`` step. Because the walk is depth-first, the second route is
+    found after the downstream tree of the first has already been built, so the
+    amounts below [B] have to be updated rather than replaced — which is what
+    `merge_propagation_trees` does and what this demo verifies.
+
+    The commented-out networks above the active one are the cases the merging
+    must *not* fire on: a species formed at two different depths is genuinely
+    two different pathway endpoints and is kept separate.
+
+    Returns
+    -------
+    None
+        Prints the propagation tree.
+    """
 
     # Merging works correctly when comparing these two mechanism (two
     # pathways that both lead to [B])

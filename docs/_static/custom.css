@@ -1,0 +1,61 @@
+/* pyKES documentation — small refinements on top of sphinx_rtd_theme. */
+
+/* The theme caps content at 800px, which is cramped for the wide tables and
+   diagrams used throughout the guide. */
+.wy-nav-content {
+    max-width: 1000px;
+}
+
+/* Mermaid diagrams are rendered as SVG at their natural size; centre them and
+   keep them inside the content column on narrow screens. */
+div.mermaid {
+    text-align: center;
+    margin: 1.5em 0;
+    overflow-x: auto;
+}
+
+div.mermaid svg {
+    max-width: 100%;
+    height: auto;
+}
+
+/* Example figures read better with a little separation from the surrounding
+   text than the theme gives them. */
+.rst-content img {
+    margin: 1.2em auto;
+}
+
+/* Autodoc signatures run long once type hints are included; wrapping them
+   beats a horizontal scrollbar on every entry. */
+.rst-content dl.py > dt {
+    word-break: break-word;
+}
+
+/* Distinguish module headings from the functions inside them in the API
+   reference, where both are definition lists. */
+.rst-content dl.py.module > dt {
+    background: #f0f4f8;
+    border-left: 3px solid #2980b9;
+}
+
+/* The admonitions carry most of the "watch out for this" content in the guide;
+   give them a slightly stronger presence than the theme default. */
+.rst-content .admonition-title {
+    font-weight: 600;
+}
+
+/* sphinx-design cards on the landing page. */
+.sd-card {
+    border-radius: 6px;
+}
+
+.sd-card-title {
+    font-weight: 600;
+}
+
+/* Tables in the guide are mostly two- or three-column prose comparisons, and
+   the theme's default nowrap turns them into scrollbars. */
+.wy-table-responsive table td,
+.wy-table-responsive table th {
+    white-space: normal;
+}

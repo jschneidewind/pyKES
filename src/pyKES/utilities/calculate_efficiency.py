@@ -1,3 +1,13 @@
+"""Photocatalytic efficiency metrics, computed in explicit units.
+
+Both functions here take and return `pyKES.utilities.unit_handler.Quantity`
+objects rather than bare floats. Efficiency formulas mix wavelengths,
+irradiances, areas and reaction rates, each of which is habitually reported in
+a different unit, and a factor of 3600 or 1e-6 in the wrong place is not
+visible in the result — carrying the units through the calculation is what
+makes the arithmetic checkable.
+"""
+
 from pyKES.utilities.unit_handler import Quantity
 
 PLANCK_CONSTANT = Quantity(6.62607015e-34, "J*s")  # Planck's constant in Joule-seconds
@@ -118,6 +128,18 @@ def light_to_hydrogen_efficiency(irradiation_area: Quantity,
 
 
 def testing():
+    """
+    Compute both efficiency metrics for representative measurements.
+
+    Deliberately mixes units — nm, cm2, mW/cm2, mol/h — to show that the
+    conversions are handled by the `Quantity` arithmetic rather than by the
+    caller.
+
+    Returns
+    -------
+    None
+        Prints the apparent quantum yield and the light-to-hydrogen efficiency.
+    """
 
     aqy = calculate_apparent_quantum_yield(
         irradiation_wavelength = Quantity(365, "nm"),

@@ -1,3 +1,29 @@
+"""Build and integrate the ODE system of a chemical reaction network.
+
+A reaction network is written as a list of strings, one reaction per entry::
+
+    ['[RuII] > [RuII-ex], k1 ; hv_functionA',
+     '[RuII-ex] + [S2O8] > [RuIII] + [SO4], k7']
+
+`parse_reactions` turns that list into dictionaries of reactants, products,
+rate constant and optional multipliers, `build_ode_system` assembles the
+right-hand side of dc/dt from them by mass action, and `solve_ode_system`
+integrates it with `scipy.integrate.odeint`.
+
+The multipliers after the semicolon are what makes the module useful for
+photochemistry: an entry of ``other_multipliers`` may be a plain number or a
+``{'function': callable, 'arguments': {...}}`` specification whose arguments
+are resolved against the *current* concentrations at every integration step.
+A light-absorption term such as
+`pyKES.utilities.calculate_absorption.calculate_excitations_per_second_multi_competing_fast`
+therefore sees the instantaneous composition of the sample, so competitive
+absorption between ground and excited states is handled without writing it
+into the rate law by hand.
+
+`pyKES.reaction_model.Reaction_Model` wraps these functions in an object;
+`pyKES.fitting_ODE` fits their rate constants to measured data.
+"""
+
 import numpy as np
 from scipy.integrate import odeint
 import matplotlib.pyplot as plt
@@ -26,14 +52,12 @@ def parse_species(side, species_set):
         
     Returns
     -------
-    tuple
-        A tuple containing:
-        - species_count : dict
-            Dictionary mapping species names (str) to their stoichiometric
-            coefficients (float). Repeated species are summed.
-        - species_set : set
-            The updated set containing all unique species names encountered.
-            
+    species_count : dict
+        Dictionary mapping species names (str) to their stoichiometric
+        coefficients (float). Repeated species are summed.
+    species_set : set
+        The updated set containing all unique species names encountered.
+
     Examples
     --------
     >>> species_set = set()
@@ -83,17 +107,17 @@ def parse_reactions(reactions):
         
     Returns
     -------
-    tuple
-        A tuple containing:
-        - parsed_reactions: list of dict
-            Each dictionary contains:
-            * 'reactants': dict mapping species to stoichiometric coefficients
-            * 'products': dict mapping species to stoichiometric coefficients
-            * 'rate_constant': str, identifier of the rate constant
-            * 'other_multipliers': list of str, optional parameters for the reaction
-        - sorted_species: list
-            Alphabetically sorted list of all unique chemical species in the reaction network
-            
+    parsed_reactions : list of dict
+        One dictionary per reaction, with the keys:
+
+        * ``'reactants'`` -- species mapped to stoichiometric coefficients
+        * ``'products'`` -- species mapped to stoichiometric coefficients
+        * ``'rate_constant'`` -- identifier of the rate constant
+        * ``'other_multipliers'`` -- identifiers of the optional multipliers
+
+    sorted_species : list of str
+        Alphabetically sorted list of all unique species in the network.
+
     Examples
     --------
     >>> reactions = ['[A] + 2 [B] > [C], k1', '[C] > [A] + [B], k2 ; hv1, sigma1']
@@ -279,40 +303,48 @@ def calculate_reaction_rate(reaction,
 
 def build_ode_system(parsed_reactions, species, rate_constants, other_multipliers = {}):
     """
-    Build the system of ordinary differential equations.
-    
-    Parameters:
-    -----------
-    parsed_reactions : list
-        List of dictionaries with keys 'reactants', 'products', 'rate_constant', and optional 'photon_flux', 'sigma'
-    species : list
-        Sorted list of all unique chemical species
+    Build the right-hand side of the ODE system of a reaction network.
+
+    Every reaction contributes its mass-action rate to the derivative of each
+    of its species, negatively for reactants and positively for products, each
+    scaled by the stoichiometric coefficient.
+
+    Parameters
+    ----------
+    parsed_reactions : list of dict
+        Reactions as returned by `parse_reactions`.
+    species : list of str
+        Sorted list of all species of the network. Its order fixes the order of
+        the state vector, and hence of the columns of the solution array.
     rate_constants : dict
-        Dictionary mapping rate constant identifiers to values
+        Mapping of rate constant identifiers to their values.
     other_multipliers : dict, optional
-        Dictionary mapping other multipliers to values
-        
-    Returns:
-    --------
-    function
-        A function that computes the derivatives for each species.
+        Mapping of multiplier identifiers to values or function specifications;
+        see `resolve_other_multipliers`.
+
+    Returns
+    -------
+    callable
+        Function ``(y, t) -> dydt`` in the form `scipy.integrate.odeint`
+        expects, closing over the network definition.
     """
     
     def ode_system(y, t):
         """
-        Compute derivatives for each species.
-        
-        Parameters:
-        -----------
-        y : array-like
-            Current concentrations of each species.
+        Compute the derivative of every species at the current state.
+
+        Parameters
+        ----------
+        y : array_like
+            Current concentrations, ordered as `species`.
         t : float
-            Current time (not used explicitly in autonomous systems).
-            
-        Returns:
-        --------
-        array-like
-            Derivatives for each species.
+            Current time. Unused: the network is autonomous, and any time
+            dependence enters through the multipliers instead.
+
+        Returns
+        -------
+        numpy.ndarray
+            Derivative of every species, in the order of `species`.
         """
         dydt = np.zeros(len(species))
         
@@ -348,27 +380,43 @@ def solve_ode_system(parsed_reactions,
                      times, 
                      other_multipliers = {}):
     """
-    Solve the system of ODEs.
-    
-    Parameters:
-    -----------
-    parsed_reactions : list
-        List of dictionaries with keys 'reactants', 'products', 'rate_constant', and optional 'photon_flux', 'sigma'
-    species : list
-        Sorted list of all unique chemical species
+    Integrate the ODE system of a reaction network.
+
+    Species absent from `initial_conditions` start at zero, so only the species
+    actually present at t = 0 have to be listed. An initial condition naming a
+    species that is not part of the network is reported and ignored, since a
+    typo there would otherwise silently change the simulated experiment.
+
+    Parameters
+    ----------
+    parsed_reactions : list of dict
+        Reactions as returned by `parse_reactions`.
+    species : list of str
+        Sorted list of all species of the network; fixes the column order of
+        the returned array.
     rate_constants : dict
-        Dictionary mapping rate constant identifiers to values
+        Mapping of rate constant identifiers to their values.
     initial_conditions : dict
-        Dictionary mapping species to their initial concentrations
-    times : array-like
-        Time points at which to solve the ODEs
+        Mapping of species names to their concentrations at t = 0.
+    times : array_like
+        Time points the solution is reported at. The first entry is taken as
+        t = 0.
     other_multipliers : dict, optional
-        Dictionary mapping other multipliers to values
-        
-    Returns:
-    --------
-    array-like
-        Solution array with shape (len(times), len(species)).
+        Mapping of multiplier identifiers to values or function specifications;
+        see `resolve_other_multipliers`.
+
+    Returns
+    -------
+    numpy.ndarray
+        Solution of shape ``(len(times), len(species))``; column ``i`` holds
+        the concentration of ``species[i]``.
+
+    Notes
+    -----
+    Photochemical networks are stiff — excited-state decay is orders of
+    magnitude faster than the chemistry it feeds — so the tolerances are set
+    well below the `odeint` defaults (``rtol=1e-8``, ``atol=1e-10``) and the
+    step limit is raised to 5000.
     """
 
     y0 = np.zeros(len(species))  # Initial concentrations default to zero
@@ -393,18 +441,26 @@ def solve_ode_system(parsed_reactions,
 
 def plot_solution(species, times, solution, exclude_species = [], ax = None):
     """
-    Plot the solution.
-    
-    Parameters:
-    -----------
-    species : list
-        Sorted list of all unique chemical species
-    times : array-like
-        Time points at which the ODEs were solved
-    solution : array-like
-        Solution array with shape (len(times), len(species))
-    exclude_species : list, optional
-        List of species names to exclude from plotting. Default is None.
+    Plot concentration-time traces of a solved reaction network.
+
+    Parameters
+    ----------
+    species : list of str
+        Species of the network, in the column order of `solution`.
+    times : array_like
+        Time points the system was solved at.
+    solution : array_like
+        Solution array of shape ``(len(times), len(species))``, as returned by
+        `solve_ode_system`.
+    exclude_species : list of str, optional
+        Species left out of the figure. Useful for sacrificial reagents present
+        in large excess, whose trace would otherwise flatten everything else.
+    ax : matplotlib.axes.Axes, optional
+        Axes drawn on. A new figure is created when omitted.
+
+    Returns
+    -------
+    None
     """
 
     if ax is None:
@@ -424,7 +480,23 @@ def plot_solution(species, times, solution, exclude_species = [], ax = None):
 
 
 def test_function():
-    
+    """
+    Simulate the Ru(bpy)3 / persulfate water-oxidation network and plot it.
+
+    Runs the full module on a published photocatalytic system: a Ru(II)
+    photosensitizer excited by light, oxidatively quenched by persulfate to
+    Ru(III), which either turns over to O2 or is lost to dimerization and
+    decomposition. Both light-driven steps use competitive-absorption
+    multipliers, so their rates respond to the Ru(II)/Ru(III) balance as the
+    reaction proceeds.
+
+    Returns
+    -------
+    None
+        Prints the final O2 concentration and shows the concentration-time
+        plot.
+    """
+
     reactions = ['[RuII] > [RuII-ex], k1 ; hv_functionA',
                  '[RuII-ex] > [RuII], k8',
                  '[RuII-ex] + [S2O8] > [RuIII] + [SO4], k7',

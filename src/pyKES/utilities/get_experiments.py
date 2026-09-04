@@ -1,20 +1,32 @@
+"""Select experiments from a dataset by their metadata."""
+
 from typing import Dict
 import numpy as np
 
 def get_experiments_by_metadata(data_dict, 
                                 **metadata_criteria) -> Dict:
     """
-    Return experiments that match all specified metadata criteria.
-    
-    Args:
-        dataset: The ExperimentalDataset to search
-        **metadata_criteria: Key-value pairs that must match in experiment metadata
-        
-    Returns:
-        Dict of experiment_name -> Experiment for matching experiments
-        
-    Example:
-        matching = get_experiments_by_metadata(dataset, type='intensity', intensity=0.5)
+    Return the experiments whose metadata matches every given criterion.
+
+    Parameters
+    ----------
+    data_dict : dict
+        Mapping of experiment name to `Experiment`, typically
+        ``dataset.experiments``.
+    **metadata_criteria
+        Metadata keys and the values they must have. An experiment matches only
+        if all of them agree; an experiment lacking a key never matches.
+
+    Returns
+    -------
+    dict
+        The matching subset, in the same ``name -> Experiment`` form, so the
+        result can be filtered again.
+
+    Examples
+    --------
+    >>> matching = get_experiments_by_metadata(dataset.experiments,
+    ...                                        type='intensity', intensity=0.5)
     """
     matching_experiments = {}
     
@@ -28,17 +40,27 @@ def get_experiments_by_metadata(data_dict,
 def get_unique_metadata_values(experiment_group: Dict, 
                                 metadata_key: str) -> list:
     """
-    Get all unique values for a specific metadata key across a group of experiments.
-    
-    Args:
-        experiment_group: Dict of experiment_name -> Experiment
-        metadata_key: The metadata key to extract unique values for
-        
-    Returns:
-        Sorted np.arraynd of unique values for that metadata key (excluding None)
-        
-    Example:
-        unique_starts = get_unique_metadata_values(group, 'start')
+    Collect the distinct values a metadata key takes across experiments.
+
+    Useful for discovering the axis of a series — the light intensities a set of
+    experiments was run at, say — without having to state it in advance.
+
+    Parameters
+    ----------
+    experiment_group : dict
+        Mapping of experiment name to `Experiment`.
+    metadata_key : str
+        Metadata key read from each experiment. Experiments lacking it, or
+        holding None under it, are skipped.
+
+    Returns
+    -------
+    numpy.ndarray
+        The distinct values, sorted.
+
+    Examples
+    --------
+    >>> intensities = get_unique_metadata_values(group, 'intensity')
     """
     unique_values = set()
     
