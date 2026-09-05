@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project aims to follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+- [docs/photocatalytic_database.md](docs/photocatalytic_database.md): a plan for turning the group's pyKES datasets into one searchable database of photocatalytic results, without a server anyone has to maintain. The structural proposal is to split what is searched from what is plotted: a single index table with one row per experiment (identity, overview-sheet metadata, scalar results resolved through the existing `results_table_instructions` path syntax, and the `version` provenance) fetched once at startup, plus one HDF5 payload per experiment fetched only when its traces are opened. The document evaluates the alternatives (one large HDF5 file, DuckDB-WASM over Parquet, a managed server database, Zarr), hosting options against the privacy question, schema-driven search facets and URL-encoded shareable queries, and a write path that keeps interactive computation in the browser while bulk ingestion and reprocessing run on free CI. It also identifies the one unproven piece — fetching data from Python under stlite, where `requests` and `urllib` do not work and `pyodide.http.pyfetch` is a coroutine — as the thing to settle before anything else is built.
+- Measurements taken for that plan, on `src/tests/data/260507_Complete.h5` (6 experiments, raw data only): 96.3 KB of array bytes per experiment against ~0.2 KB of metadata, so the searchable part of an experiment is some three orders of magnitude smaller than its arrays. The files are written uncompressed; rewriting the same fixture with gzip level 4 gives 1.7x and casting float64 arrays to float32 first gives 2.2x.
+
 ## [0.2.1]
 
 ### Fixed
