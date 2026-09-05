@@ -419,7 +419,172 @@ which matters more in a shared archive than the convenience of editing in place.
 
 ---
 
-## 7. Frontend and UX
+## 7. Integrating with eLabFTW
+
+The group keeps its electronic lab notebook in
+[eLabFTW](https://www.elabftw.net/). Two things are worth wanting from that:
+the database should be reachable from an eLab login, and data attached to an
+eLab experiment should end up in the database without anybody re-uploading it.
+Both are practical. One of them is easy, the other needs a poll loop rather than
+a push — and pursuing the second properly replaces the overview Excel sheet,
+which is the more valuable outcome.
+
+### 7.1 What the eLabFTW API gives us
+
+Established from the v2 OpenAPI specification (`apidoc/v2/openapi.yaml`, tag
+5.3.6) and the project's documentation:
+
+| Capability | Status | Consequence |
+| --- | --- | --- |
+| REST API v2 | ✓ API key in the `Authorization` header | scriptable end to end |
+| Read-only keys | ✓ `POST /apikeys` with `canwrite: 0` | a sync account cannot damage the notebook |
+| CORS | ✓ configurable (`ALLOW_ORIGIN` / `ALLOW_METHODS` / `ALLOW_HEADERS` on the container); an official `elabapi-javascript-example` repository exists | browser-side calls are possible, given a sysadmin change |
+| Attachment download | ✓ `GET /{entity}/{id}/uploads/{subid}?format=binary` | raw files are fetchable directly |
+| Attachment content hash | ✓ `hash` + `hash_algorithm` on every upload | idempotent sync without re-downloading |
+| Typed metadata | ✓ `metadata.extra_fields`, with `units` on number fields | the overview sheet can move into eLab |
+| Bulk export | ✓ `POST /exports`, `format` ∈ `csv, eln, json, pdf, zip` | one-shot backfill, `.eln` being the RO-Crate interchange format |
+| **Webhooks** | **✗ not implemented** (open feature request since 2022; no plugin system) | **ingestion must poll, not be pushed** |
+| **Identity provider** | **✗ eLabFTW consumes SAML/OIDC, it does not issue it** | eLab cannot mint tokens for our app |
+
+The last two are the real constraints, and neither is fatal.
+
+### 7.2 Access after an eLab login
+
+Because eLabFTW is a SAML/OIDC *service provider* and not an identity provider,
+"log into eLab, then the database opens" cannot be built by asking eLab for a
+token. Three routes actually achieve the effect:
+
+**A — The same identity provider.** ← recommended
+If eLab already authenticates against the institutional IdP, put the static site
+behind that same IdP (Cloudflare Access, or `oauth2-proxy` behind nginx on
+institutional hosting). Anyone with a live institutional session reaches both
+without a second login. This is real single sign-on, it is the sysadmin's
+existing machinery, and the database still needs no application server.
+
+**B — Co-host under the eLab origin.** Serve the site from a path or subdomain on
+the same nginx that fronts eLabFTW, under the same access rules. Same-origin
+removes the CORS question entirely (§4), and access follows whatever already
+protects eLab.
+
+**C — An API-key gate.** The app asks for the user's own eLab API key, validates
+it with `GET /api/v2/info`, and unlocks. Zero sysadmin work, and it does tie
+access to an eLab account — but it is a pasted shared secret, not SSO, and it
+should not be described as one. Useful as a first step while A or B is arranged.
+
+A and B are policy and proxy configuration; C is a few lines in the app.
+
+### 7.3 Automatic ingestion: a poll loop, not a webhook
+
+With no webhooks, the sync is a scheduled job — the same GitHub Actions job that
+already builds the index (§6.1), run hourly rather than on push. The API's query
+parameters make the poll precise rather than a full crawl:
+
+```
+GET /api/v2/experiments?cat=<photocatalysis>&order=lastchange&sort=desc&limit=100
+```
+
+Walk the pages until `modified_at` falls below the last sync watermark, and stop.
+`cat`, `tags[]`, `scope` and `state` narrow it further, so a run that finds
+nothing new costs one request.
+
+Per changed experiment:
+
+```
+GET /api/v2/experiments/{id}                    → title, custom_id, tags, metadata.extra_fields
+GET /api/v2/experiments/{id}/uploads            → real_name, comment, hash, filesize per file
+GET /api/v2/experiments/{id}/uploads/{subid}?format=binary   → the raw data file
+```
+
+**The upload `hash` is what makes this idempotent.** Re-ingest an experiment only
+when a file's hash changes or its extra fields change; otherwise skip it. That
+pairs with the `Processed` flag and the per-experiment `version` dict the
+pipeline already maintains, so the incremental machinery is mostly built.
+
+For the initial backfill, `POST /exports` with `format: eln` pulls the whole
+category — experiments, metadata and attachments — in one archive.
+
+Latency equals the poll interval. Hourly is almost certainly fine for a lab
+notebook; there is no mechanism to do better without webhooks.
+
+### 7.4 The bigger prize: extra fields replace the overview sheet
+
+eLabFTW's extra fields are typed — `number` (with a `units` dropdown), `select`,
+`date`, `checkbox`, `text`, `radio`, `url` — with `options` and `position`. The
+group's nineteen overview columns map onto them almost directly, as one
+**"Photocatalysis run" experiment template**:
+
+| Overview column | Becomes |
+| --- | --- |
+| `Experiment` (NB-316) | eLab `custom_id`, or a dedicated text field — the pyKES `experiment_name` |
+| `group` | a tag, or a `select` field |
+| `File name H2`, `File name O2` | **nothing** — the files are attachments; identify each by its upload `comment` ("H2 logger", "O2 Pyroscience Ch2") |
+| `Irradiance [mW/cm2]` | `number` + units |
+| `Catalyst concentration (g/L)`, `Catalyst loading [wt% Rh/Cr]` | `number` + units |
+| `Temperature [°C]`, `Gas/Liquid phase volume [mL]` | `number` + units |
+| `Unisense` / `Pyroscience Irradiation start/end [s]` | `number` |
+| `D2O`, `Active` | `checkbox` |
+| `Notes` | `text`, or the experiment body |
+| `color` | `select`, or dropped and derived from `group` |
+| `Processed` | **stays out of eLab** — it is pipeline state, not lab metadata; it belongs in the index |
+
+Two things follow that are worth more than the automation itself.
+
+**The single shared mutable file goes away.** The overview sheet is one Excel
+file that everybody edits: merge conflicts, one editor at a time, no history of
+who changed a catalyst loading. eLab gives per-experiment records with
+permissions, revisions and an audit trail — and the metadata is entered once,
+where the experiment is recorded, instead of transcribed into a spreadsheet
+afterwards.
+
+**Units become machine-readable.** A `number` field with a units dropdown maps
+onto `pyKES.utilities.unit_handler.Quantity` directly, instead of being parsed
+out of a column header like `Catalyst concentration (g/L)`.
+
+In pyKES terms this is a narrow change: `metadata_retrival_function` builds its
+dict from the eLab JSON instead of an `overview_df` row, and the build assembles
+`overview_df` from the API rather than reading an Excel file. Everything
+downstream — `ingest_experiment`, the processing functions, the index — is
+untouched, because they only ever see the metadata dict. The Excel path should
+stay working regardless, for historical data and for anyone offline.
+
+### 7.5 Where each part runs
+
+The sync belongs in CI, not the browser: the service API key must not ship in a
+bundle any viewer can read, and the job has to write the rebuilt index to the
+host. That is the same free-runner argument as §6.1, and it leaves the
+"no maintained server" property intact.
+
+A browser-side complement is still worth building, and this is where CORS earns
+its configuration: a user pastes *their own* key and pulls *their own* recent
+experiments straight into a session, processes them client-side with the
+existing chunked machinery, and sees the result before anything is committed.
+Personal keys, personal scope, nothing shipped in the bundle.
+
+### 7.6 To verify before building
+
+* **Extra-field value types.** eLabFTW appears to store extra-field values as
+  strings even for `number` fields. If so the ingestion must coerce, and the
+  `D2O` / `Active` booleans need the same care as the `Processed` column already
+  does. Check one real experiment's JSON before designing around it.
+* **CORS variable names** against the version of the container the group runs.
+* **Which field carries `experiment_name`.** `custom_id`, `elabid` and the title
+  are all candidates; whichever is chosen has to be unique and stable, since it
+  is the database's primary key (§3.6).
+* **Free-text drift.** If people type units into a value field, parsing breaks.
+  Prefer `select` options and units dropdowns over free text in the template.
+* **Deletions and archiving.** The `state` parameter distinguishes normal,
+  archived and deleted; the sync has to decide what each means for an experiment
+  already in the database.
+
+### 7.7 What this changes in the plan
+
+Nothing structural. eLabFTW becomes the **source of metadata and raw files**
+feeding the build described in §6.1, replacing the Excel upload as the primary
+path; the index, the payloads, the hosting and the search are unaffected. It
+adds one phase of work and removes the most annoying part of the current
+workflow.
+
+## 8. Frontend and UX
 
 ### 7.1 Stay with Streamlit
 
@@ -489,7 +654,7 @@ and belongs in Phase 0.
 
 ---
 
-## 8. The compute budget
+## 9. The compute budget
 
 | Who | Does what | Needs |
 | --- | --- | --- |
@@ -504,14 +669,17 @@ without bound.
 
 ---
 
-## 9. Suggested phasing
+## 10. Suggested phasing
 
 **Phase 0 — measure and de-risk (days).** Build an index over the group's real
 archive and record its true size; measure a fully processed experiment with
 `processed_data` present, since every estimate above extrapolates from a
 raw-data-only fixture. Settle the fetch shim in a real browser. Confirm the
 pinned stlite version and whether Parquet is available in it. Decide hosting and
-privacy. *Nothing else should start before the fetch question is answered.*
+privacy. On the eLabFTW side, read one real experiment's JSON to settle how
+extra-field values are typed (§7.6) and confirm which field will carry
+`experiment_name`. *Nothing else should start before the fetch question is
+answered.*
 
 **Phase 1 — the data layer.** `pyKES/database/index.py`:
 `build_index`, `export_shards`, `load_index`, `fetch_experiment`, plus
@@ -528,16 +696,25 @@ manifest, publication to the chosen host, and the "last updated" banner.
 **Phase 4 — the write path.** Export-for-PR from the browser, the metadata
 patch mechanism, the reprocessing workflow.
 
-**Phase 5 — the payoff.** Property maps across the whole archive, saved queries,
+**Phase 5 — eLabFTW.** The "Photocatalysis run" template with typed extra
+fields; the polling sync in CI; `metadata_retrival_function` reading eLab JSON
+alongside the Excel path; access routed through the same identity provider as
+eLab. Sequenced here because it depends on the build pipeline of Phase 3, but
+the *template design* can start immediately — it is a conversation about
+metadata, not code, and everything downstream depends on getting those fields
+right.
+
+**Phase 6 — the payoff.** Property maps across the whole archive, saved queries,
 provenance dashboards, Zenodo snapshots.
 
 Phases 1–3 are the minimum that delivers "one place to look up all
-photocatalytic results". Phases 4–5 are what keep it current and make it worth
-more than the files it was built from.
+photocatalytic results". Phases 4–5 are what keep it current — and Phase 5 is
+what removes the shared Excel sheet, which is the part of the current workflow
+most likely to break as the group grows.
 
 ---
 
-## 10. Decisions needed, and open risks
+## 11. Decisions needed, and open risks
 
 **Needed from the group:**
 
@@ -548,6 +725,11 @@ more than the files it was built from.
    the fact.
 3. **Who may add data?** Everyone with a git account, or a maintainer who
    merges? This decides how much of §6.2 gets built.
+4. **Does eLabFTW become the source of metadata?** If yes, the overview Excel
+   sheet is retired for new work and the "Photocatalysis run" template has to be
+   designed and agreed before people start filling it in — changing typed fields
+   after a hundred experiments use them is expensive. If no, §7 reduces to
+   pulling raw files and the sheet stays as it is.
 
 **Risks:**
 
@@ -565,6 +747,13 @@ more than the files it was built from.
 * *The archive going stale.* The real risk is social, not technical: if
   contributing is harder than keeping a local file, people will keep local
   files. Phase 4 is not optional polish.
+* *No webhooks in eLabFTW*, so ingestion latency equals the poll interval and
+  cannot be improved without a feature that does not exist. Hourly is almost
+  certainly fine; it is worth saying out loud rather than discovering later.
+* *Free-text drift in eLab extra fields.* A units string typed into a value
+  field breaks parsing silently. Mitigated by preferring `select` options and
+  units dropdowns in the template, and by validating the sync's output against
+  the field types rather than trusting them.
 
 ---
 
@@ -578,3 +767,8 @@ more than the files it was built from.
   §6 builds on.
 * [plotting_instructions.md](plotting_instructions.md) — the instruction syntax
   the index instructions extend.
+* eLabFTW REST API v2 — the OpenAPI specification shipped in the eLabFTW
+  repository at `apidoc/v2/openapi.yaml` (read at tag 5.3.6), and the metadata /
+  extra-fields documentation at <https://doc.elabftw.net/metadata.html>. The
+  capability table in §7.1 was compiled from the specification directly rather
+  than from prose documentation.
