@@ -1,716 +1,580 @@
-# A searchable database of photocatalytic results
+# A private database of photocatalytic results
 
-A plan for turning the group's pyKES datasets into one place where every
-photocatalytic result can be looked up, filtered, plotted and traced back to the
-code that produced it — without a server anyone has to maintain.
+A plan for one place where the group can look up every photocatalytic result:
+searchable, plottable, traceable to the code that produced it, hosted on the
+group's own server, and readable only by people who have signed in.
 
-The requirement that shapes every decision below is the last one in the brief:
-**the database must not need a powerful server, and the computational work must
-happen on the client.** That rules out the obvious answer (Postgres plus an API)
-and rules *in* an answer that pyKES is already unusually well-placed to build,
-because the Streamlit pages already run entirely in the browser under stlite.
+Three constraints shape every decision below:
+
+1. **Strictly private, on our own hardware.** No third-party provider holds the
+   data. Not GitHub, not object storage, not a managed database.
+2. **Everyone uploads.** Users process their own data locally with a
+   purpose-built pyKES app, obtain an HDF5 file holding a batch of experiments,
+   and upload that file to the database.
+3. **The metadata will grow.** Experiments run next year will carry fields that
+   do not exist today, and the database must absorb them without a migration.
+
+It has to work at **10,000 experiments**. Every scale claim below is measured
+rather than estimated; the measurements are in §2 and §5.
 
 ---
 
-## 1. What we have today
+## 1. What changed, and what survives
 
-Three facts about the current data layer decide most of what follows.
+An earlier version of this plan targeted a static, server-free deployment: files
+on a static host, all computation in the browser under stlite. Two of the new
+constraints kill that outright, and it is worth being explicit about why.
 
-**The schema is already a database schema.** `ExperimentalDataset` holds
-`experiments` (name → `Experiment`), an `overview_df`, and three configuration
-dictionaries. Each `Experiment` holds `metadata` (one row of the overview
-sheet), `raw_data` (measured arrays), `processed_data` (derived arrays and
-scalars) and a `version` dict. That is a table of records with a blob per record
-— exactly the shape a searchable archive needs. Nothing has to be redesigned;
-it has to be *split*.
+**A static file server cannot authenticate users or accept uploads.** Both are
+now required. The moment the system has a login and an upload button, it is a
+web application with a backend, not a directory of files. That is not a
+regression — it is a different, and in most respects easier, problem.
 
-**The numbers that matter are small; the arrays are not.** Measured on
-`src/tests/data/260507_Complete.h5` (6 experiments, raw data only, no
-`processed_data`):
+**Loading the whole index into the browser stops being the obvious choice.**
+Measured on a synthetic 10,000-experiment index (§5), pulling the entire index
+into one pandas DataFrame costs 2.05 MB gzipped over the wire, 15.9 MB resident,
+**66.5 MB peak allocation** and 1.93 s to assemble — on server-class CPU, before
+Pyodide's overhead, on every page load, growing with every new metadata column.
+The same queries answered by SQLite on the server take **4–24 ms** and do not
+grow. With a server in the picture, the server should do the querying.
 
-| Quantity | Measured |
-| --- | --- |
-| File size | 768 KB |
-| Array bytes per experiment | 96.3 KB |
-| Metadata per experiment | ~0.2 KB |
-| Overview sheet | 41 rows × 19 columns |
+What survives from the earlier design, unchanged and still right:
 
-The metadata is ~500× smaller than the arrays. With `processed_data` present the
-gap widens: `PLOTTING_INSTRUCTIONS` defines roughly thirty time series per
-experiment (raw, reaction, smoothed, fits, rates, poly fits, flexible fits), so
-a fully processed experiment is estimated at **0.3–0.5 MB**, of which the
-searchable part — names, metadata, max rates, rate constants, AQY, LTH,
-provenance — is **under 1 KB**.
+* **The two-tier split** — separate the thing you search from the thing you plot.
+  An experiment carries ~0.2 KB of searchable metadata against 96.3 KB of arrays
+  (measured), so they belong in different places.
+* **Per-experiment HDF5 payloads** written by the existing `save_to_hdf5`, so
+  each one loads back through `load_from_hdf5` unchanged and is independently a
+  valid pyKES dataset.
+* **The index builder is the results table**, run over every experiment —
+  `resolve_experiment_attributes` already resolves the paths.
+* **Schema-driven facets**, now backed by a registry that grows by itself (§4.3).
 
-The files are also written uncompressed. Rewriting the same fixture with
-`gzip` level 4 gives 442 KB (**1.7×**), and casting float64 arrays to float32
-first gives 353 KB (**2.2×**).
-
-**The reader is all-or-nothing.** `load_from_hdf5` walks every dataset in the
-file with `visititems` and materialises the lot. There is no way to ask for one
-experiment, and no way to ask for metadata without the arrays. At 50
-experiments that is fine — it is what the Home page does today. At 2000
-experiments it is 600 MB–1 GB into a browser tab, which will not work.
-
-So the single structural change is: **separate the thing you search from the
-thing you plot.**
+**And the original "computation on the client" requirement is still met** — just
+by the workflow rather than by the runtime. The expensive work, turning raw
+traces into processed data, happens on each user's own machine in the local
+processing app, *before* anything is uploaded. The server never runs a
+processing function. It stores bytes, maintains an index, answers queries and
+draws plots, which is why it does not need to be a powerful machine (§9).
 
 ---
 
 ## 2. The shape of the answer
 
-Two tiers, both static files:
+One application on the group's server, behind a reverse proxy that handles TLS
+and authentication, with three storage tiers on local disk:
 
 ```
-site/
-  index.html, files.js …          the stlite app bundle
+/srv/photocat/
+  app/                        the Streamlit application
   data/
-    manifest.json                 database version, build time, counts
-    index.json.gz                 ONE ROW PER EXPERIMENT — the searchable table
-    experiments/
-      NB-316.h5                   one payload per experiment (arrays)
+    index.sqlite              THE SEARCHABLE INDEX — one row per experiment
+    payloads/
+      NB-316.h5               one payload per experiment, written by save_to_hdf5
       NB-318.h5
       …
+    uploads/
+      <sha256>.h5             every uploaded file, kept verbatim
 ```
 
-* The **index** is fetched once at startup and lives in memory. Every search,
-  filter, sort, cross-experiment plot and summary runs against it with pandas.
-  At 5000 experiments × ~60 columns it is a few MB raw, **~1 MB gzipped**.
-* A **payload** is fetched only when someone opens an experiment's traces.
-  0.15–0.3 MB compressed, one HTTP GET, cached.
+| Tier | Holds | Size at 10 000 | Read when |
+| --- | --- | --- | --- |
+| `index.sqlite` | metadata, scalar results, provenance, payload pointers | **16.4 MB** (measured) | every search — in milliseconds |
+| `payloads/` | raw + processed arrays, one file per experiment | 3–5 GB | someone opens an experiment's traces |
+| `uploads/` | the original uploaded files, untouched | 3–5 GB | never, except to rebuild |
 
-Everything the user experiences as "the database" — searching, faceting,
-comparing, exporting — touches only the index. The arrays are pulled on demand,
-in the amounts a human actually looks at.
+The third tier is the one that is easy to skip and shouldn't be. Keeping every
+uploaded file verbatim means **the entire database can be rebuilt from
+scratch** — when the index schema changes, when a mapping was wrong, when a bug
+in ingestion is found. It costs a few gigabytes of disk and it is the difference
+between a database you can fix and one you cannot. A full rebuild of 10,000
+experiments takes **about 2.5 minutes** (measured in §3.3).
 
-The web server's entire job is to return files. An nginx directory, GitHub
-Pages or an S3 bucket all qualify. There is nothing to provision, patch or
-secure beyond access control.
+Everything a user experiences as "the database" — searching, faceting,
+comparing, exporting — touches only `index.sqlite`. Payload files are opened one
+at a time, on demand.
 
 ---
 
-## 3. Building the database from the pyKES schema
+## 3. Two applications, one file format between them
 
-### 3.1 Options considered
+The workflow in the brief separates cleanly into two programs that share the
+HDF5 file as their interface. Naming that split explicitly is what keeps both
+simple.
 
-**A — One big HDF5 file (scale up the status quo).**
-Keep merging everything with `merge_hdf5_files` and hand people a single `.h5`.
-*For:* zero new code, one artefact, works offline, already implemented.
-*Against:* `load_from_hdf5` reads all of it, so the browser dies somewhere in
-the low hundreds of experiments; every write rewrites the whole file; two people
-cannot add experiments at once. Partial reads over HTTP would need a
-range-request virtual file driver under h5py in Pyodide — a project in itself.
-*Verdict:* keep it as the **interchange and offline format** (it already is),
-not as the lookup format.
+### 3.1 The processing app (local, per user)
 
-**B — Index table + per-experiment payloads.** ← **recommended**
-*For:* search is instant and entirely client-side; traffic is proportional to
-what is opened; static hosting; the index rebuild is cheap and incremental.
-*Against:* needs a build step and produces many files (a non-issue for static
-hosts).
+This is essentially what pyKES already ships. A user runs it on their own
+machine, uploads the metadata Excel sheet and the raw data files, the existing
+pipeline processes them, and the app produces one HDF5 file containing the batch
+— metadata, raw data and processed data for each experiment, plus the dataset
+level dictionaries.
 
-**C — SQL in the browser: DuckDB-WASM or sql.js-httpvfs.**
-DuckDB-WASM reads Parquet over HTTP range requests and can query files far
-larger than memory — the purest form of "searchable database, no server", and
-the right answer if the index ever outgrows a browser tab.
-*Against:* it is a JavaScript library. From Streamlit-in-Pyodide it is reachable
-only through a JS seam, which buys real SQL at the cost of the pattern the rest
-of the app uses. At group scale (thousands, not billions, of rows) pandas over
-the index is simpler and fast enough.
-*Verdict:* documented escape hatch, not the starting point.
+Nothing here needs to change except one addition: the file must also carry its
+**index mapping** (§6), so the database knows how to read its results.
 
-**D — A real server database (Postgres / Supabase / Firebase).**
-Explicitly excluded by the brief. Worth noting that a *managed* instance is not
-a server the group maintains, so it stays available for the write path (§6) if
-the git-based route proves too stiff. It should not be on the read path: it
-would make the archive unusable offline and unusable when the account lapses.
+This app can stay exactly as it is deployed today, in the browser under stlite
+or run locally with `streamlit run`. All the constraints in
+[browser_deployment.md](browser_deployment.md) continue to apply to *it*.
 
-**E — Zarr / chunked array store.**
-Designed exactly for range-reads of arrays over object storage. Genuinely
-better than whole-file HDF5 *if* we ever need to plot one channel out of thirty
-without downloading the other twenty-nine. At 0.3 MB per experiment we do not.
-*Verdict:* revisit only if payloads grow past a few MB.
+### 3.2 The database app (on the group's server)
 
-### 3.2 The index
+A server-side Streamlit application — an ordinary `streamlit run`, not stlite.
+It authenticates, accepts uploads, ingests them, and lets people search and plot.
 
-One row per experiment, with four kinds of column:
+Because it runs on a server with a real thread, **none of the stlite constraints
+apply to it**: no single-event-loop problem, no fetch shim, no chunked
+processing forced by the runtime. `chunked_processing` is still useful for
+drawing an upload progress bar, but it is a convenience here rather than the
+only thing that works.
 
-| Prefix | Content | Source |
-| --- | --- | --- |
-| — | `experiment_name`, `group`, `color`, `active` | `Experiment` fields |
-| `meta.` | every overview-sheet column | `overview_df` |
-| `result.` | scalar derived results | `processed_data`, via config |
-| `prov.` | `pykes_version`, `last_processed`, external app + version, `schema_version` | `Experiment.version` |
-| `payload.` | relative path, byte size, sha256 | build step |
+### 3.3 What ingestion actually does
 
-The derived-result columns are declared exactly like the existing results table,
-reusing its path syntax:
+When a user uploads `batch_2026_09.h5` holding 40 experiments, the server:
+
+1. **Hashes** the file. An identical file already ingested is a no-op.
+2. **Validates** it: readable by `load_from_hdf5`, `schema_version` understood,
+   experiment names present and unique within the file, index mapping present or
+   defaulted.
+3. **Checks for collisions** against experiment names already in the database,
+   and applies the collision policy (§10 — this is a decision the group has to
+   make, not one the code can make).
+4. **Splits** it into one payload file per experiment, gzip-compressed.
+5. **Applies the index mapping** to fill the `results` for each experiment.
+6. **Upserts** the index rows, and registers any metadata or result keys not
+   seen before (§4.3).
+7. **Records provenance**: who uploaded it, when, the file hash, the pyKES and
+   app versions carried in the file's `version` dict.
+8. **Stores the original** under its hash.
+
+Measured on `src/tests/data/260507_Complete.h5`, step 4 — the only step whose
+cost scales with data volume — takes **14.8 ms per experiment** with gzip
+compression (13.8 ms without; compression is essentially free in time and saves
+33% of disk). So:
+
+| Upload | Split time |
+| --- | --- |
+| 40-experiment batch | **~0.6 s** |
+| 10 000-experiment full rebuild | **~2.5 min** |
+
+**Ingestion can therefore run synchronously**, inside the request, with a
+progress bar. No job queue, no worker process, no broker. That is a substantial
+simplification and it holds comfortably at the stated scale. (The fixture
+carries raw data only; with `processed_data` present, expect roughly 3–5× the
+bytes and time, which still leaves a 40-experiment upload at a few seconds.)
+
+`server.maxUploadSize` defaults to 200 MB and will need raising — at 0.3–0.5 MB
+per experiment, a 200-experiment batch is around 100 MB, so 500–1000 MB is a
+sensible setting.
+
+---
+
+## 4. The index, and how it survives a growing schema
+
+This is the core engineering problem. "The metadata might change over time" is
+the requirement that decides the storage design, and getting it wrong means a
+schema migration every time somebody adds a column to their Excel sheet.
+
+### 4.1 Why SQLite
+
+| Option | Verdict |
+| --- | --- |
+| **SQLite** | **Recommended.** In the Python standard library, single file, WAL mode gives concurrent readers with one writer, JSON1 for schemaless metadata, FTS5 for free text, generated columns for hot fields. Nothing to install, nothing to administer, trivially backed up by copying one file. |
+| DuckDB | Equally good, better at wide analytic scans. Worth swapping in if property maps over all 10 000 rows become the dominant query. Adds a dependency for no gain at this scale. |
+| PostgreSQL | A service to run, secure, back up and upgrade, buying concurrency the group does not need. Reconsider above ~10 concurrent writers. |
+| A file-based index (Parquet / JSON) | What the previous plan proposed for a static host. With a server it is strictly worse: no incremental update without a full rewrite, no indexes, no concurrent access. |
+
+### 4.2 The table shape: typed core plus JSON
+
+Three patterns exist for schemaless-ish data, and only one of them is right here:
+
+* **A wide table, `ALTER TABLE ADD COLUMN` per new field.** Fast and typed, but a
+  migration for every new metadata field, and a table that grows steadily
+  sparser as eras of experiments accumulate.
+* **EAV** — one row per (experiment, key, value). Infinitely flexible; every
+  query becomes a pile of self-joins.
+* **A typed core plus a JSON column.** ← recommended
+
+```sql
+CREATE TABLE experiments (
+  id               INTEGER PRIMARY KEY,
+  experiment_name  TEXT UNIQUE NOT NULL,   -- the primary key users think in
+  exp_group        TEXT,
+  active           INTEGER,
+  payload_path     TEXT,                   -- payloads/NB-316.h5
+  payload_bytes    INTEGER,
+  payload_sha256   TEXT,
+  uploaded_by      TEXT,                   -- from the authenticated session
+  uploaded_at      TEXT,
+  upload_id        INTEGER REFERENCES uploads(id),
+  pykes_version    TEXT,
+  external_app     TEXT,
+  external_version TEXT,
+  last_processed   TEXT,
+  metadata         TEXT NOT NULL,          -- JSON: every overview-sheet field
+  results          TEXT NOT NULL           -- JSON: every mapped scalar result
+);
+```
+
+Stable things that every experiment has, and that the application itself depends
+on, are real columns. Everything that varies between experiments and eras —
+which is all of the scientific metadata — lives in `metadata` as JSON. **A new
+metadata column requires no migration at all**: it simply appears in the JSON of
+the experiments that have it, and in the registry below.
+
+### 4.3 The registries: what makes the growth manageable
+
+Two small tables, maintained at ingestion, turn "the schema grows" from a
+problem into a feature:
+
+```sql
+CREATE TABLE metadata_keys (
+  key             TEXT PRIMARY KEY,
+  label           TEXT,          -- display name, editable by an admin
+  canonical_key   TEXT,          -- set when this key is an alias of another
+  inferred_type   TEXT,          -- number | text | bool | date | mixed
+  unit            TEXT,
+  occurrences     INTEGER,
+  first_seen      TEXT,
+  last_seen       TEXT,
+  distinct_sample TEXT           -- JSON sample, for building facet widgets
+);
+
+CREATE TABLE result_keys (
+  label           TEXT PRIMARY KEY,
+  path            TEXT,          -- processed_data/H2_max_rate
+  unit            TEXT,
+  format          TEXT,
+  defined_by      INTEGER REFERENCES uploads(id),
+  conflicting     INTEGER DEFAULT 0
+);
+```
+
+`metadata_keys` is what the **search page generates its facets from** — numeric
+keys get range sliders, low-cardinality keys get multiselects, text keys get a
+contains box. Add a new column to your Excel sheet, upload, and the filter for
+it appears by itself. That is the schema-driven facet idea from the earlier
+plan, now with a registry behind it that maintains itself.
+
+It also carries the two failure modes that a growing free-form schema really
+has:
+
+**Key drift.** `Irradiance [mW/cm2]` and `Irradiance (mW/cm2)` are two different
+keys, created silently by two people typing two spreadsheet headers. Nothing can
+prevent this; what the registry can do is make it *visible* — an admin page
+lists near-duplicate keys, and `canonical_key` aliases one onto the other so
+both old and new uploads answer the same filter.
+
+**Type conflict.** The same key arriving as a number in one upload and a string
+in another. `inferred_type` records what has actually been seen; on conflict it
+becomes `mixed` and the UI degrades that facet to a text filter rather than
+producing a broken slider.
+
+Both are surfaced rather than silently resolved. Guessing here would corrupt
+searches in ways nobody would notice.
+
+### 4.4 Hot-key promotion
+
+JSON extraction is a full scan. At 10 000 rows that is already fast enough
+(17.1 ms, measured), but a frequently-filtered key can be promoted to an indexed
+generated column:
+
+```sql
+ALTER TABLE experiments ADD COLUMN irradiance REAL
+  GENERATED ALWAYS AS (CAST(json_extract(metadata,'$."Irradiance [mW/cm2]"') AS REAL)) VIRTUAL;
+CREATE INDEX idx_irr ON experiments(irradiance);
+```
+
+Measured: **17.1 ms → 4.3 ms**, with no measurable increase in database size.
+
+One practical finding worth recording, because it is not in the obvious place in
+the documentation: **SQLite's `ALTER TABLE` accepts only `VIRTUAL` generated
+columns, not `STORED`.** A `STORED` column fails with
+`cannot add a STORED column`. `VIRTUAL` columns can still be indexed, and the
+index is what carries the speed-up, so this costs nothing — but the promotion
+migration must say `VIRTUAL`.
+
+Free-text search over notes gets the same treatment with an FTS5 table:
+**16.5 ms → 1.3 ms**, measured.
+
+---
+
+## 5. Does it hold at 10 000 experiments?
+
+Measured on a synthetic index of 10 000 experiments with a deliberately
+*evolving* schema — the first 3 000 carry 19 metadata keys, the next 4 000 carry
+24, the last 3 000 carry 30 — plus 14 mapped results each:
+
+| Operation | Time |
+| --- | --- |
+| Build and insert all 10 000 rows | 0.49 s |
+| Numeric range filter on a metadata key (JSON scan) | **17.1 ms** |
+| Three predicates + a result threshold | **4.7 ms** |
+| Facet: distinct values and counts for one key | 23.9 ms |
+| Free-text scan across notes (`LIKE`) | 16.5 ms |
+| Property map: two numeric columns for every active row | 14.9 ms |
+| Key registry: every metadata key ever seen, with counts | 79.7 ms |
+| Numeric filter after promoting the key to an indexed column | **4.3 ms** |
+| Free-text via FTS5 instead of `LIKE` | **1.3 ms** |
+| **Database size, including FTS index** | **16.4 MB** |
+
+Every interactive query is comfortably under the threshold where a user notices
+delay, with a plain SQLite file and no tuning. The design has roughly two orders
+of magnitude of headroom before any of this needs revisiting.
+
+One number deserves attention: the key-registry query, which walks
+`json_each` over every row, is the slowest at 79.7 ms — and it is the one the
+search page needs on *every* load to build its facets. That is exactly why
+`metadata_keys` is a maintained table rather than a query: it is updated at
+ingestion, when the cost is paid once, instead of recomputed per page view.
+
+For comparison, the browser-side alternative at the same scale: 10 000 × 56
+columns, 2.05 MB gzipped download, 15.9 MB resident, **66.5 MB peak
+allocation**, 1.93 s to assemble on server-class CPU — per page load, growing
+with every new column. The server-side index is both faster and simpler.
+
+---
+
+## 6. The index mapping travels in the HDF5 file
+
+Each uploaded file declares how its own `processed_data` maps into the database's
+result columns. This is what lets the database absorb files produced by
+different versions of different processing apps without server-side changes.
+
+**Where it lives.** Inside the existing `plotting_instruction` dictionary, as an
+`index_instructions` entry:
 
 ```python
-INDEX_INSTRUCTIONS = {
-    'H2 max rate':  {'result': 'processed_data/H2_max_rate', 'unit': 'umol/L/s'},
-    'O2 max rate':  {'result': 'processed_data/O2_max_rate', 'unit': 'umol/L/s'},
-    'AQY':          {'result': 'processed_data/apparent_quantum_yield', 'format': '.2f'},
+plotting_instruction['index_instructions'] = {
+    'H2 max rate': {'result': 'processed_data/H2_max_rate',
+                    'unit': 'umol L^-1 s^-1'},
+    'O2 max rate': {'result': 'processed_data/O2_max_rate',
+                    'unit': 'umol L^-1 s^-1'},
+    'AQY':         {'result': 'processed_data/apparent_quantum_yield',
+                    'format': '.2f'},
 }
 ```
 
-This matters for feasibility: `resolve_experiment_attributes(..., mode='permissive')`
-already resolves those paths, and `results_table_component.resolve_result_value`
-already does it per experiment. **The index builder is the results table, run
-over every experiment and written to disk.** It is a small amount of genuinely
-new code.
+This deliberately reuses the syntax and the location of
+`results_table_instructions`, which already lives in `plotting_instruction` and
+is already resolved by `resolve_experiment_attributes`. **It needs no HDF5
+schema change at all** — `plotting_instruction` is already written to the file
+root as a JSON attribute, so an added key travels with the file and older
+readers ignore it.
 
-One deliberate choice: **take `meta.*` from `overview_df`, not from
-`Experiment.metadata`.** The two can diverge, because a corrected overview sheet
-only reaches `Experiment.metadata` when the experiment is reprocessed with a
-`metadata_retrival_function` (see `docs/versioning_and_reprocessing.md`).
-Reading the index from `overview_df` means a metadata fix shows up in search on
-the next index build — seconds — instead of after a full reprocessing run. The
-build should also *flag* divergence between the two, since a large divergence
-means the stored results were computed from stale metadata.
+**How the server applies it.** For each experiment in the upload, resolve every
+declared path in permissive mode, coerce what resolves to a scalar, and store
+the result under its label. A path that does not resolve for a given experiment
+is simply absent from that experiment's `results` — which is the correct
+behaviour when a batch mixes liquid-phase and gas-phase runs, and exactly what
+`mode='permissive'` already does.
 
-A second choice: **index inactive experiments too.** `filter_active_experiments`
-currently drops anything whose `metadata/Active` is not truthy. In an archive,
-knowing that a run was attempted and failed is a result. Keep `active` as a
-filter column, default the search to active-only, make it one click to include
-the rest.
+**Three cases the server has to decide, not discover:**
 
-### 3.3 Index format
+* **No mapping in the file.** Fall back to a server-side default mapping. Reject
+  only if there is no default either.
+* **A label defined with a different path than a previous upload declared.**
+  Record both in `result_keys`, mark `conflicting`, and surface it on the admin
+  page. Silently overwriting would change the meaning of a column for every
+  experiment already in the database.
+* **A new label never seen before.** Register it, and it becomes a searchable
+  column from that upload onward. Earlier experiments simply lack it — the same
+  sparsity the metadata already has, handled the same way.
 
-| Option | Size (5k rows) | Browser support | Notes |
-| --- | --- | --- | --- |
-| gzipped JSON `orient='split'` | ~1 MB | universal | **the format the repo already uses** for `overview_df` in `write_df_to_hdf` |
-| Parquet | ~0.5 MB | needs Pyodide ≥ 0.28 | pyarrow and fastparquet were added in Pyodide 0.28; stlite ships it from 0.89.0 |
-| Arrow IPC / Feather | ~0.7 MB | same constraint as Parquet | good if we ever want DuckDB-WASM |
-
-**Start with gzipped JSON-split.** It carries zero dependency risk, works on
-every stlite version the group might pin, and reuses the serialization already
-in `database_experiments.py`, so there is one round-trip convention in the
-codebase rather than two. Parquet is a drop-in upgrade once the pinned stlite
-version is confirmed — worth doing when the index passes a few MB, and worth
-verifying rather than assuming:
-
-```python
-# in the deployed browser app, once:
-import pandas as pd; pd.DataFrame({'a': [1]}).to_parquet('/tmp/t.parquet')
-```
-
-### 3.4 Payload format
-
-**A per-experiment HDF5 file written by the existing `save_to_hdf5`**, from a
-single-experiment `ExperimentalDataset`. No new format and no new reader: it
-loads back through `load_from_hdf5` unchanged, and every payload is
-independently a valid pyKES dataset — so "download this experiment and work on
-it locally" is free.
-
-Add gzip compression when writing payloads (measured 1.7×; 2.2× with float32
-display copies). Compression is transparent to h5py readers, so it needs no
-`SCHEMA_VERSION` bump and older files keep loading.
-
-### 3.5 Two small additions to the data layer
-
-Both are useful on their own, independently of the database:
-
-```python
-# database_experiments.py
-ExperimentalDataset.load_from_hdf5(filename, experiment_names=None)   # partial read
-ExperimentalDataset.load_metadata_only(filename)                      # skip the arrays
-```
-
-`load_metadata_only` is what makes an index build over a large archive cheap —
-today the builder would have to materialise every array to read a scalar next to
-it. `experiment_names` is what lets the offline single-file workflow scale.
-
-### 3.6 Identity
-
-Experiment names are the primary key: `add_experiment` overwrites silently and
-`merge_hdf5_files` skips duplicates with a printed warning. With several people
-contributing, that is a real hazard. The group's naming convention already
-carries an owner prefix (`NB-316`, `MZ-442`, `VSA-122`, `AE-855`), so the fix is
-to **enforce** it: the build fails loudly on a collision and names both source
-files. Cheap, and it prevents the one failure mode that silently loses data.
+Because the original uploads are kept (§2), a mapping mistake is recoverable:
+fix the default mapping and re-ingest from `uploads/` without asking anyone to
+re-upload anything.
 
 ---
 
-## 4. Hosting and deployment
+## 7. Authentication and privacy
 
-The server serves bytes. What differs between the options is access control,
-capacity and who administers it.
+The data is strictly private and lives only on the group's server. That makes
+sign-in the part of this system where a mistake is most expensive, so it is
+worth being deliberate about where authentication lives.
 
-| Option | Cost | Private? | Capacity | Notes |
+### 7.1 Authenticate at the reverse proxy, not inside Streamlit
+
+Three reasons, in order of importance:
+
+1. **Payload files are not served by Streamlit.** For any reasonable download
+   performance, nginx serves the HDF5 files directly. If the gate were inside
+   the application, those URLs would be unprotected — anyone who learned or
+   guessed a path could fetch experimental data without logging in.
+2. **A Streamlit session is not a security boundary.** The script runs, then
+   decides what to show. Anything that renders before the check, any exception
+   path, any stale session, is a potential leak. A proxy that refuses to forward
+   an unauthenticated request has no such failure mode.
+3. It is the standard, auditable pattern, and it keeps authentication out of the
+   application code entirely.
+
+The application still needs to know *who* is signed in, for attribution on
+uploads. The proxy sets a header (`Remote-User`), which Streamlit reads via
+`st.context.headers`. **Verify this early**: `st.context.headers` reflects the
+`/_stcore/stream` WebSocket request rather than the initial page request, so the
+header must be set on the WebSocket-upgrade location too, not only on `/`.
+
+### 7.2 The options
+
+| Option | Self-contained? | 2FA | Weight | Notes |
 | --- | --- | --- | --- | --- |
-| **GitHub Pages** | free | ✗ public (private needs Enterprise) | ~1 GB site, 100 MB/file, 100 GB/mo | already how the group deploys stlite apps |
-| **Cloudflare Pages + Access** | free tier covers a small group | ✓ SSO, ~50 users free | generous | **recommended for the internal archive** |
-| **Institutional web space** | already paid for | ✓ (basic auth / IP) | as provisioned | plain nginx; range requests work out of the box |
-| **S3 / Cloudflare R2 / MinIO** | pennies (R2 has no egress fee) | ✓ signed URLs | unlimited | best if the archive outgrows 1 GB |
-| **Zenodo** | free | ✗ public | 50 GB/record | **DOI per snapshot** — the citable, archival tier |
+| **Authelia** | ✓ fully | ✓ TOTP | container under 20 MB, under 30 MB RAM | **Recommended.** Forward-auth for nginx, one declarative config file you can version-control, local file or LDAP user backend. Exactly the "add a login page and 2FA to a self-hosted app" case. |
+| Institutional SSO (SAML/OIDC) | ✓ for data | ✓ inherited | none of your own | Accounts follow employment, no passwords to manage. The IdP sees *who logs in* — never the data — so this does not put research data with a third party. Costs a registration request to university IT. |
+| Authentik | ✓ | ✓ | needs PostgreSQL + Redis | A full IdP with an admin UI. Choose it if you need SAML, LDAP or dozens of managed users. |
+| Keycloak | ✓ | ✓ | heavy (JVM) | Enterprise-grade, far more than a research group needs. |
+| `streamlit-authenticator` | ✓ | limited | trivial | In-app, so it fails reason 1 and 2 above. Not recommended for private data. |
+| nginx basic auth | ✓ | ✗ | trivial | Acceptable as a stopgap on day one. No 2FA, no session management, no logout. |
 
-Three recommendations:
+**Recommendation:** Authelia in front of nginx if the group wants zero external
+dependencies, institutional SSO if university IT is responsive. Both are
+compatible with the same application code, because in both cases the app only
+ever reads a username from a header. Starting with basic auth and swapping later
+is a legitimate path — the application does not change.
 
-**Co-host the data with the app.** Put `data/` inside the same site as the
-stlite bundle and fetch it with relative URLs. Same-origin means **no CORS
-configuration at all**, which removes the most common way this kind of
-deployment fails. If the data must live elsewhere, that host needs
-`Access-Control-Allow-Origin` for the app's origin, and range support if we ever
-adopt DuckDB-WASM.
+Streamlit's own `st.login` (native OIDC since 1.42) is a real option if an OIDC
+provider is running anyway, but it protects only the application, not the
+payload files, so it does not remove the need for a proxy gate.
 
-**Decide privacy before building.** Unpublished photocatalytic results on
-public GitHub Pages is not a thing that can be undone. Cloudflare Access in
-front of Cloudflare Pages gives cookie-based SSO that `fetch` handles
-transparently — considerably smoother than HTTP basic auth, which `pyfetch`
-must be told about explicitly. An institutional host behind the university
-login is equally fine.
+### 7.3 Serving payloads safely
 
-**Publish snapshots to Zenodo.** A versioned DOI per database release means a
-paper can cite the exact state of the archive its numbers came from. The
-snapshot is one merged HDF5 plus the index — artefacts we are producing anyway.
+Payload downloads should be authorized by the application but served by nginx.
+The `auth_request` plus `X-Accel-Redirect` pattern does this: Streamlit decides
+whether this user may have this experiment, then hands nginx an internal
+redirect, and nginx streams the file without the bytes passing through Python.
 
-Do **not** use Git LFS: LFS objects are not served by GitHub Pages, and it bills
-bandwidth. Large-file needs are better met by GitHub Releases (2 GB per asset,
-CDN-served) or object storage.
+```nginx
+location /payloads/ {
+    internal;                          # unreachable from outside
+    alias /srv/photocat/data/payloads/;
+}
+```
 
-At an estimated 0.3 MB per experiment compressed, GitHub Pages' 1 GB ceiling is
-roughly **3000 experiments** — likely years of headroom, and the migration to
-object storage is a URL change in the manifest.
+The `internal` directive is what makes the path unreachable except by internal
+redirect. Without it, the files are simply on the web.
+
+### 7.4 The rest of the deployment
+
+Self-hosting means these are now the group's responsibility, and none of them
+are optional:
+
+* **TLS**, from the institutional certificate authority or Let's Encrypt, with
+  automatic renewal. Private data over plain HTTP is not private.
+* **WebSocket proxying** — Streamlit needs `proxy_http_version 1.1`, the
+  `Upgrade` and `Connection` headers, and generous `proxy_read_timeout`. Without
+  these the app loads and then appears frozen.
+* **Backups** of `index.sqlite` and `uploads/` (from which everything else can be
+  rebuilt). `payloads/` need not be backed up at all — it is derived.
+* **Rate limiting** on the login endpoint, and OS updates.
+* No directory listing anywhere under `data/`.
 
 ---
 
-## 5. Searching and visualizing
-
-### 5.1 Search
-
-Everything here runs against the in-memory index, so it is instantaneous and
-needs no server.
-
-**Free text** across `experiment_name`, `group`, `meta.Notes` and every other
-string column — one `st.text_input`, `str.contains` over a few thousand rows.
-The `Notes` column is where the knowledge that never made it into a numeric
-field lives, so it must be searchable.
-
-**Schema-driven facets.** Rather than hand-configuring nineteen widgets,
-generate them from the index dtypes and cardinality:
-
-| Column kind | Widget |
-| --- | --- |
-| numeric (`Irradiance`, `Catalyst loading`, `Temperature`, max rates, AQY) | range slider |
-| low-cardinality string / bool (`group`, `D2O`, `Active`) | multiselect |
-| datetime (`last_processed`) | date range |
-| high-cardinality string (`Notes`) | text contains |
-
-A `SearchConfig` dataclass overrides the automatic choice where it guesses
-wrong, in keeping with the repo's convention that new behaviour means a new
-config field rather than an edited component.
-
-**Shareable queries.** Encode the filter state in `st.query_params`, so a search
-is a URL. "Every D2O run above 80 mW/cm²" becomes a link that can be pasted into
-a group chat or a paper's SI. This is the single feature most likely to make
-people actually use the thing, and it works under stlite.
-
-**Expert mode.** One text box passed to `DataFrame.query()` for arbitrary
-boolean expressions. Fail-fast: show the exception rather than swallowing it.
-
-**Provenance queries** fall out for free, and are the reason the `prov.*`
-columns are in the index: *"show me everything processed before pyKES 0.2.0"* is
-how you find the results that need reprocessing after an algorithm change.
-
-### 5.2 Visualization
-
-Three views, two of which already exist:
-
-**Result grid** — the search result as `st.dataframe` with row selection
-(`on_select="rerun"`), column formatting from the index instructions, and CSV
-export. This is `results_table_component` with the index as its source instead
-of the loaded dataset.
-
-**Property map** — a scatter of any index column against any other, coloured by
-a third: AQY versus catalyst loading across the whole archive, max rate versus
-irradiance, rate constant versus temperature. `analysis_results_component`
-already does exactly this for one metadata axis and one result axis; generalising
-its axis selectors to "any index column" turns a per-dataset plot into a view of
-everything the group has ever measured. This is the feature that makes an
-archive worth more than the sum of its files.
-
-**Experiment detail** — selecting a row fetches that one payload and hands it
-to the unchanged `time_series_component`. Selecting several overlays them.
-
-Two guardrails, both learned from the existing code:
-
-* Overlaying hundreds of traces will exhaust the tab. Warn above ~25 selected
-  experiments, and use `utilities/time_series_resampling.py` to downsample for
-  display.
-* Cap the in-memory payload cache (LRU, ~50 experiments ≈ 25 MB). Unbounded
-  `st.session_state` growth is the browser failure mode here.
-
-**Subset export.** Any search result can be assembled into an
-`ExperimentalDataset` from its payloads and written with `save_to_hdf5` — one
-button that turns a query into exactly the file the current workflow already
-knows how to use. This is what keeps the database from being a walled garden.
-
----
-
-## 6. Adding, reprocessing and updating
-
-A static host is read-only, so the write path is the part that needs real
-design. Three mechanisms, which coexist.
-
-### 6.1 Bulk build — git plus CI
-
-**The database is a repository.** Raw files and overview sheets go in; a GitHub
-Actions job runs the existing pyKES pipeline and publishes index + payloads.
-
-```
-raw-data + overview sheet  →  read_in_experiments_single_threaded
-                           →  build_index / export_shards
-                           →  publish to the static host
-```
-
-This is free compute on CI runners, not a server the group maintains, and it
-gives review-before-merge, a full audit trail, and reproducibility. Incremental
-builds are already supported: `select_unprocessed_experiments` and the
-`Processed` flag mean only new rows are processed on each run.
-
-**Reprocessing after an algorithm change** is the same job with
-`reprocess_experiments` instead — it works from the stored `raw_data`, so the
-original raw files are not needed, and every experiment's `version` dict records
-the run. Bump pyKES, re-run, publish; the `prov.*` index columns then show the
-whole archive moving to the new version.
-
-This is the one place the brief's "computation client-side" has to bend, and it
-is worth being explicit about why: reprocessing 2000 experiments in a browser
-would mean downloading every payload (~600 MB) and hours of single-threaded
-work. *Interactive* computation stays on the client; *bulk rebuilds* go to free
-CI. No maintained server appears in either case.
-
-### 6.2 Contribution from the browser
-
-The elegant part: the app can already ingest raw data client-side. The existing
-`chunked_processing` machinery steps `ingest_experiment` one experiment per
-rerun precisely so this works in Pyodide. So a contributor can upload raw files
-and an overview row, watch them process **in their own browser**, and get back a
-single-experiment `.h5`. Then either:
-
-* **Download and attach** it to a pull request or an issue — zero credentials,
-  works today with the existing download button; or
-* **Push directly** via the GitHub contents API from the browser, using a
-  fine-grained, single-repo, contents-only token the user pastes in. Kept in
-  `sessionStorage` only, never in the bundle.
-
-Offer the download route first. It needs no token handling, and the review step
-is a feature rather than friction when the archive is the group's record.
-
-### 6.3 Metadata updates
-
-Metadata lives in `overview_df`, which comes from an Excel sheet the group
-already maintains — and `update_overview_df` already implements the merge, row
-by row, preferring incoming values where they differ. Keep that as the primary
-path: **edit the sheet, re-upload, rebuild the index.** Because §3.2 sources
-`meta.*` from `overview_df`, a corrected catalyst loading is searchable as soon
-as the index rebuilds, with no reprocessing at all.
-
-Reprocessing is needed only when the correction must reach the *results* — that
-is, when `processing_function` consumes the changed field. Then it is
-`reprocess_experiments` with `metadata_retrival_function` supplied, which is
-implemented and exposed in the app today.
-
-For quick corrections, an `st.data_editor` over the search grid can emit a
-patch — a small CSV of `experiment, column, new_value` — applied at build time
-and committed. That keeps every metadata change reviewable and attributable,
-which matters more in a shared archive than the convenience of editing in place.
-
----
-
-## 7. Integrating with eLabFTW
-
-The group keeps its electronic lab notebook in
-[eLabFTW](https://www.elabftw.net/). Two things are worth wanting from that:
-the database should be reachable from an eLab login, and data attached to an
-eLab experiment should end up in the database without anybody re-uploading it.
-Both are practical. One of them is easy, the other needs a poll loop rather than
-a push — and pursuing the second properly replaces the overview Excel sheet,
-which is the more valuable outcome.
-
-### 7.1 What the eLabFTW API gives us
-
-Established from the v2 OpenAPI specification (`apidoc/v2/openapi.yaml`, tag
-5.3.6) and the project's documentation:
-
-| Capability | Status | Consequence |
-| --- | --- | --- |
-| REST API v2 | ✓ API key in the `Authorization` header | scriptable end to end |
-| Read-only keys | ✓ `POST /apikeys` with `canwrite: 0` | a sync account cannot damage the notebook |
-| CORS | ✓ configurable (`ALLOW_ORIGIN` / `ALLOW_METHODS` / `ALLOW_HEADERS` on the container); an official `elabapi-javascript-example` repository exists | browser-side calls are possible, given a sysadmin change |
-| Attachment download | ✓ `GET /{entity}/{id}/uploads/{subid}?format=binary` | raw files are fetchable directly |
-| Attachment content hash | ✓ `hash` + `hash_algorithm` on every upload | idempotent sync without re-downloading |
-| Typed metadata | ✓ `metadata.extra_fields`, with `units` on number fields | the overview sheet can move into eLab |
-| Bulk export | ✓ `POST /exports`, `format` ∈ `csv, eln, json, pdf, zip` | one-shot backfill, `.eln` being the RO-Crate interchange format |
-| **Webhooks** | **✗ not implemented** (open feature request since 2022; no plugin system) | **ingestion must poll, not be pushed** |
-| **Identity provider** | **✗ eLabFTW consumes SAML/OIDC, it does not issue it** | eLab cannot mint tokens for our app |
-
-The last two are the real constraints, and neither is fatal.
-
-### 7.2 Access after an eLab login
-
-Because eLabFTW is a SAML/OIDC *service provider* and not an identity provider,
-"log into eLab, then the database opens" cannot be built by asking eLab for a
-token. Three routes actually achieve the effect:
-
-**A — The same identity provider.** ← recommended
-If eLab already authenticates against the institutional IdP, put the static site
-behind that same IdP (Cloudflare Access, or `oauth2-proxy` behind nginx on
-institutional hosting). Anyone with a live institutional session reaches both
-without a second login. This is real single sign-on, it is the sysadmin's
-existing machinery, and the database still needs no application server.
-
-**B — Co-host under the eLab origin.** Serve the site from a path or subdomain on
-the same nginx that fronts eLabFTW, under the same access rules. Same-origin
-removes the CORS question entirely (§4), and access follows whatever already
-protects eLab.
-
-**C — An API-key gate.** The app asks for the user's own eLab API key, validates
-it with `GET /api/v2/info`, and unlocks. Zero sysadmin work, and it does tie
-access to an eLab account — but it is a pasted shared secret, not SSO, and it
-should not be described as one. Useful as a first step while A or B is arranged.
-
-A and B are policy and proxy configuration; C is a few lines in the app.
-
-### 7.3 Automatic ingestion: a poll loop, not a webhook
-
-With no webhooks, the sync is a scheduled job — the same GitHub Actions job that
-already builds the index (§6.1), run hourly rather than on push. The API's query
-parameters make the poll precise rather than a full crawl:
-
-```
-GET /api/v2/experiments?cat=<photocatalysis>&order=lastchange&sort=desc&limit=100
-```
-
-Walk the pages until `modified_at` falls below the last sync watermark, and stop.
-`cat`, `tags[]`, `scope` and `state` narrow it further, so a run that finds
-nothing new costs one request.
-
-Per changed experiment:
-
-```
-GET /api/v2/experiments/{id}                    → title, custom_id, tags, metadata.extra_fields
-GET /api/v2/experiments/{id}/uploads            → real_name, comment, hash, filesize per file
-GET /api/v2/experiments/{id}/uploads/{subid}?format=binary   → the raw data file
-```
-
-**The upload `hash` is what makes this idempotent.** Re-ingest an experiment only
-when a file's hash changes or its extra fields change; otherwise skip it. That
-pairs with the `Processed` flag and the per-experiment `version` dict the
-pipeline already maintains, so the incremental machinery is mostly built.
-
-For the initial backfill, `POST /exports` with `format: eln` pulls the whole
-category — experiments, metadata and attachments — in one archive.
-
-Latency equals the poll interval. Hourly is almost certainly fine for a lab
-notebook; there is no mechanism to do better without webhooks.
-
-### 7.4 The bigger prize: extra fields replace the overview sheet
-
-eLabFTW's extra fields are typed — `number` (with a `units` dropdown), `select`,
-`date`, `checkbox`, `text`, `radio`, `url` — with `options` and `position`. The
-group's nineteen overview columns map onto them almost directly, as one
-**"Photocatalysis run" experiment template**:
-
-| Overview column | Becomes |
-| --- | --- |
-| `Experiment` (NB-316) | eLab `custom_id`, or a dedicated text field — the pyKES `experiment_name` |
-| `group` | a tag, or a `select` field |
-| `File name H2`, `File name O2` | **nothing** — the files are attachments; identify each by its upload `comment` ("H2 logger", "O2 Pyroscience Ch2") |
-| `Irradiance [mW/cm2]` | `number` + units |
-| `Catalyst concentration (g/L)`, `Catalyst loading [wt% Rh/Cr]` | `number` + units |
-| `Temperature [°C]`, `Gas/Liquid phase volume [mL]` | `number` + units |
-| `Unisense` / `Pyroscience Irradiation start/end [s]` | `number` |
-| `D2O`, `Active` | `checkbox` |
-| `Notes` | `text`, or the experiment body |
-| `color` | `select`, or dropped and derived from `group` |
-| `Processed` | **stays out of eLab** — it is pipeline state, not lab metadata; it belongs in the index |
-
-Two things follow that are worth more than the automation itself.
-
-**The single shared mutable file goes away.** The overview sheet is one Excel
-file that everybody edits: merge conflicts, one editor at a time, no history of
-who changed a catalyst loading. eLab gives per-experiment records with
-permissions, revisions and an audit trail — and the metadata is entered once,
-where the experiment is recorded, instead of transcribed into a spreadsheet
-afterwards.
-
-**Units become machine-readable.** A `number` field with a units dropdown maps
-onto `pyKES.utilities.unit_handler.Quantity` directly, instead of being parsed
-out of a column header like `Catalyst concentration (g/L)`.
-
-In pyKES terms this is a narrow change: `metadata_retrival_function` builds its
-dict from the eLab JSON instead of an `overview_df` row, and the build assembles
-`overview_df` from the API rather than reading an Excel file. Everything
-downstream — `ingest_experiment`, the processing functions, the index — is
-untouched, because they only ever see the metadata dict. The Excel path should
-stay working regardless, for historical data and for anyone offline.
-
-### 7.5 Where each part runs
-
-The sync belongs in CI, not the browser: the service API key must not ship in a
-bundle any viewer can read, and the job has to write the rebuilt index to the
-host. That is the same free-runner argument as §6.1, and it leaves the
-"no maintained server" property intact.
-
-A browser-side complement is still worth building, and this is where CORS earns
-its configuration: a user pastes *their own* key and pulls *their own* recent
-experiments straight into a session, processes them client-side with the
-existing chunked machinery, and sees the result before anything is committed.
-Personal keys, personal scope, nothing shipped in the bundle.
-
-### 7.6 To verify before building
-
-* **Extra-field value types.** eLabFTW appears to store extra-field values as
-  strings even for `number` fields. If so the ingestion must coerce, and the
-  `D2O` / `Active` booleans need the same care as the `Processed` column already
-  does. Check one real experiment's JSON before designing around it.
-* **CORS variable names** against the version of the container the group runs.
-* **Which field carries `experiment_name`.** `custom_id`, `elabid` and the title
-  are all candidates; whichever is chosen has to be unique and stable, since it
-  is the database's primary key (§3.6).
-* **Free-text drift.** If people type units into a value field, parsing breaks.
-  Prefer `select` options and units dropdowns over free text in the template.
-* **Deletions and archiving.** The `state` parameter distinguishes normal,
-  archived and deleted; the sync has to decide what each means for an experiment
-  already in the database.
-
-### 7.7 What this changes in the plan
-
-Nothing structural. eLabFTW becomes the **source of metadata and raw files**
-feeding the build described in §6.1, replacing the Excel upload as the primary
-path; the index, the payloads, the hosting and the search are unaffected. It
-adds one phase of work and removes the most annoying part of the current
-workflow.
-
-## 8. Frontend and UX
-
-### 7.1 Stay with Streamlit
-
-The group has four working pages, an established config-dataclass extension
-pattern, and a proven stlite deployment. A React/Observable SPA would be faster
-and would open the door to DuckDB-WASM, but it would leave the entire Python
-analysis stack — `max_rate`, `reaction_ODE`, `fitting_ODE`, the unit handler —
-on the other side of a language boundary, and those are the things that make
-opening an experiment worthwhile. Streamlit is the right call, and the honest
-cost is that the result will feel like a data app rather than a website.
-
-### 7.2 Pages
-
-| Page | Status |
-| --- | --- |
-| **Browse & Search** (new landing page) | new |
-| **Experiment detail** | new; wraps existing `time_series_component` |
-| Property map | generalise `analysis_results_component` |
-| Results table | point `results_table_component` at the index |
-| Contribute / Upload | existing `data_upload_component`, plus export-for-PR |
-
-**The Home page has to change.** Today it says "upload an HDF5 file" — correct
-for a personal dataset, wrong for a group archive, where the answer to "where is
-the data" must be "it is already here". The index loads at startup; the page
-opens on *N experiments, M groups, last updated on …*, which
-`_render_dataset_statistics` already computes. Uploading becomes an option, for
-working offline or viewing an unpublished file alongside the archive.
-
-### 7.3 New configuration
-
-Following the repo's convention that new behaviour is a new config field:
+## 8. Searching, visualizing, and the pages
+
+Largely as in the earlier plan, but with SQL underneath instead of a DataFrame.
+
+**Browse & Search** is the landing page. A free-text box over names, groups and
+notes (FTS5); facets generated from `metadata_keys`; results as a paginated
+`st.dataframe` with row selection. Filter state encoded in `st.query_params`, so
+**a search is a URL** that can be pasted into a group chat — the single feature
+most likely to make people actually use the thing. An expert mode passes a
+`WHERE` fragment straight through for anything the facets cannot express.
+
+Pagination matters at this scale: query with `LIMIT`/`OFFSET` and render a page
+at a time. Rendering 10 000 rows into a table is the one easy way to make a
+fast system feel slow.
+
+**Experiment detail** loads one payload from local disk — no network, a few
+milliseconds — and hands it to the existing `time_series_component` unchanged.
+Selecting several overlays them, with a warning past ~25 and display
+downsampling via `utilities/time_series_resampling.py`.
+
+**Property map** is a scatter of any index column against any other, coloured by
+a third: AQY against catalyst loading across the whole archive, max rate against
+irradiance. Measured at 14.9 ms for the underlying query over 10 000 rows. This
+is the view that makes an archive worth more than the sum of its files, and
+`analysis_results_component` already does the single-dataset version.
+
+**Upload** is the contribution page: file uploader, validation report, collision
+report with a decision, ingestion progress, and a summary of what was added,
+including any newly registered metadata or result keys.
+
+**Admin** covers the things a growing schema needs: the key registry with
+aliasing, result-key conflicts, the upload log, and a "rebuild from uploads"
+action.
+
+**Subset export** — any search result assembled into an `ExperimentalDataset`
+from its payloads and written with `save_to_hdf5`. One button that turns a query
+into exactly the file the local processing app already understands, which is
+what keeps the database from being a walled garden.
+
+Configuration follows the repo's convention that new behaviour is a new config
+field:
 
 ```python
 @dataclass
-class DatabaseSourceConfig:
-    manifest_url: str = "data/manifest.json"   # relative → same-origin, no CORS
-    index_url: str | None = None               # defaults to the manifest entry
-    payload_url_template: str | None = None
-    payload_cache_size: int = 50
-
-@dataclass
-class SearchConfig:
-    index_instructions: dict = field(default_factory=dict)
-    free_text_columns: list = field(default_factory=list)
-    default_columns: list = field(default_factory=list)
-    facet_overrides: dict = field(default_factory=dict)
-    default_filters: dict = field(default_factory=lambda: {'active': True})
+class DatabaseConfig:
+    data_root: Path = Path("/srv/photocat/data")
+    index_path: Path = Path("/srv/photocat/data/index.sqlite")
+    default_index_instructions: dict = field(default_factory=dict)
+    collision_policy: str = "reject"        # reject | version | replace
+    user_header: str = "Remote-User"
+    max_overlay_experiments: int = 25
 ```
 
-### 7.4 One shim that has to be written
+---
 
-Under `streamlit run`, fetching a URL is `urllib`. Under stlite it is
-`pyodide.http.pyfetch` — `requests` and `urllib` do not work in Pyodide, and
-`open_url` handles text only, not the binary payloads. So pyKES needs a small
-`fetch_bytes(url)` that picks the mechanism at runtime, in the same spirit as
-`chunked_processing`: one module that absorbs a browser constraint so the pages
-do not have to know about it.
+## 9. What the server needs
 
-The asynchrony is the catch — `pyfetch` is a coroutine, and a Streamlit script
-is synchronous. This needs measuring in a real browser before the design is
-settled, exactly as the progress-bar work in
-`docs/browser_deployment.md` did. Two candidate approaches: stlite's bundle
-mounting (`files` / `archives`) for the index, which side-steps fetching it
-altogether, and a `run_every` fragment for payloads, which is the pattern
-already proven to work here. **This is the main technical unknown in the plan**
-and belongs in Phase 0.
+| Resource | At 10 000 experiments |
+| --- | --- |
+| Disk | payloads 3–5 GB + originals 3–5 GB + index 16 MB → **under 15 GB** |
+| RAM | Streamlit holds a session per concurrent user; **4–8 GB** is ample for a research group |
+| CPU | queries 4–24 ms; ingestion ~15 ms per experiment. Any modern core. |
+| Services | nginx, the Streamlit app, and an auth service (Authelia is under 30 MB RAM) |
+
+This is a small virtual machine, or an existing group workstation. Nothing here
+needs a database server, a job queue, a message broker or a container
+orchestrator, and the plan should be resisted if it starts to acquire them.
+
+The division of labour that keeps it this small:
+
+| Who | Does what |
+| --- | --- |
+| **User's own machine** | reads Excel + raw data, runs the processing functions, produces the HDF5 — all the expensive computation |
+| **Server** | authenticates, stores bytes, splits uploads, maintains the index, answers queries, renders plots |
+| **Browser** | draws what Streamlit sends |
 
 ---
 
-## 9. The compute budget
+## 10. Phasing
 
-| Who | Does what | Needs |
-| --- | --- | --- |
-| **Web server** | returns static files, checks a cookie | nginx / CDN — nothing to maintain |
-| **Browser** | search, filter, plots, per-experiment processing, subset export | the tab it already has |
-| **CI (free runners)** | bulk ingestion, bulk reprocessing, index build, publish | a GitHub Actions workflow |
+**Phase 0 — decide and provision.** Pick the authentication route (§7.2) and the
+collision policy (§11); provision the server with TLS and a working
+nginx + Streamlit + WebSocket configuration; confirm `Remote-User` reaches
+`st.context.headers` through the WebSocket upgrade. *The auth decision gates the
+deployment, not the code — everything in Phase 1 can proceed in parallel.*
 
-Browser memory at 5000 experiments: index ~5 MB resident, plus at most 50 cached
-payloads at ~0.3 MB — **under 25 MB**. The current app loads a whole dataset
-into `st.session_state`; the two-tier split is what keeps that from growing
-without bound.
+**Phase 1 — the data layer.** A new `pyKES/database/index.py`: the SQLite schema,
+`ingest_upload`, payload splitting with gzip, the mapping application, the two
+registries, and `rebuild_from_uploads`. Round-trip tests against synthetic
+datasets with known contents, plus an explicit test that a second upload
+introducing new metadata keys is absorbed without migration.
 
----
+**Phase 2 — the database app.** Browse & Search against SQLite, experiment
+detail, pagination, facets from the registry.
 
-## 10. Suggested phasing
+**Phase 3 — the upload path.** Validation, collision handling, ingestion with
+progress, the upload log.
 
-**Phase 0 — measure and de-risk (days).** Build an index over the group's real
-archive and record its true size; measure a fully processed experiment with
-`processed_data` present, since every estimate above extrapolates from a
-raw-data-only fixture. Settle the fetch shim in a real browser. Confirm the
-pinned stlite version and whether Parquet is available in it. Decide hosting and
-privacy. On the eLabFTW side, read one real experiment's JSON to settle how
-extra-field values are typed (§7.6) and confirm which field will carry
-`experiment_name`. *Nothing else should start before the fetch question is
-answered.*
+**Phase 4 — deployment.** Auth, TLS, `internal` payload serving, backups,
+and the hardening list in §7.4.
 
-**Phase 1 — the data layer.** `pyKES/database/index.py`:
-`build_index`, `export_shards`, `load_index`, `fetch_experiment`, plus
-`load_metadata_only` and partial `load_from_hdf5`. Gzip compression on write.
-Collision enforcement. Round-trip tests against synthetic datasets with known
-contents, per the repo's testing convention.
+**Phase 5 — the rest.** Property maps, the admin page with key aliasing, subset
+export, provenance dashboards.
 
-**Phase 2 — the Browse & Search page,** with `DatabaseSourceConfig` and
-`SearchConfig`, schema-driven facets, URL-encoded queries, and detail-on-select.
-
-**Phase 3 — the build pipeline and hosting.** The Actions workflow, the
-manifest, publication to the chosen host, and the "last updated" banner.
-
-**Phase 4 — the write path.** Export-for-PR from the browser, the metadata
-patch mechanism, the reprocessing workflow.
-
-**Phase 5 — eLabFTW.** The "Photocatalysis run" template with typed extra
-fields; the polling sync in CI; `metadata_retrival_function` reading eLab JSON
-alongside the Excel path; access routed through the same identity provider as
-eLab. Sequenced here because it depends on the build pipeline of Phase 3, but
-the *template design* can start immediately — it is a conversation about
-metadata, not code, and everything downstream depends on getting those fields
-right.
-
-**Phase 6 — the payoff.** Property maps across the whole archive, saved queries,
-provenance dashboards, Zenodo snapshots.
-
-Phases 1–3 are the minimum that delivers "one place to look up all
-photocatalytic results". Phases 4–5 are what keep it current — and Phase 5 is
-what removes the shared Excel sheet, which is the part of the current workflow
-most likely to break as the group grows.
+Phases 1–4 are the minimum that delivers a private, searchable, uploadable
+database. Phase 5 is what makes it worth more than the files it was built from.
 
 ---
 
@@ -718,57 +582,56 @@ most likely to break as the group grows.
 
 **Needed from the group:**
 
-1. **How many experiments, now and in five years?** Everything above assumes
-   thousands. At tens of thousands, Parquet plus DuckDB-WASM moves from escape
-   hatch to starting point.
-2. **Public or private?** This decides the host, and it cannot be reversed after
-   the fact.
-3. **Who may add data?** Everyone with a git account, or a maintainer who
-   merges? This decides how much of §6.2 gets built.
-4. **Does eLabFTW become the source of metadata?** If yes, the overview Excel
-   sheet is retired for new work and the "Photocatalysis run" template has to be
-   designed and agreed before people start filling it in — changing typed fields
-   after a hundred experiments use them is expensive. If no, §7 reduces to
-   pulling raw files and the sheet stays as it is.
+1. **Which authentication route?** Institutional SSO if IT is responsive,
+   Authelia if you want zero external dependencies. The application code is the
+   same either way, so this can be decided late — but not after the data is on
+   the server.
+2. **What happens on an experiment-name collision?** With everyone uploading,
+   two people will eventually use the same name, or the same person will
+   re-upload a corrected batch. Reject the upload, keep both under a version
+   suffix, or replace the existing one? *This is a scientific-record policy
+   question, not a technical one, and the code cannot choose for you.*
+3. **Who may delete or correct an entry?** Anyone, or an owner and an admin? The
+   index carries `uploaded_by`, so either is implementable — but it should be
+   decided before people rely on it.
+4. **Are original uploads kept indefinitely?** Recommended yes (§2). It doubles
+   the disk, which is a few gigabytes, and it is what makes the database
+   repairable.
 
 **Risks:**
 
-* *The fetch shim.* The single unproven piece. Mitigated by Phase 0, and by
-  stlite's bundle mounting as a fallback for the index.
-* *Size estimates extrapolate from raw data only.* The fixtures in
-  `src/tests/data/` carry no `processed_data`. If a processed experiment turns
-  out to be 2 MB rather than 0.4 MB, payload compression and float32 display
-  copies stop being optional.
-* *Divergence between `overview_df` and `Experiment.metadata`.* Made visible by
-  the index build rather than left silent.
-* *`overview_df` round-trips through JSON,* which is lossy for exotic dtypes.
-  Already true today; the index inherits it. Worth a test with the group's real
-  sheet.
-* *The archive going stale.* The real risk is social, not technical: if
-  contributing is harder than keeping a local file, people will keep local
-  files. Phase 4 is not optional polish.
-* *No webhooks in eLabFTW*, so ingestion latency equals the poll interval and
-  cannot be improved without a feature that does not exist. Hourly is almost
-  certainly fine; it is worth saying out loud rather than discovering later.
-* *Free-text drift in eLab extra fields.* A units string typed into a value
-  field breaks parsing silently. Mitigated by preferring `select` options and
-  units dropdowns in the template, and by validating the sync's output against
-  the field types rather than trusting them.
+* **Metadata key drift** — two spellings of one field, created silently. The
+  registry makes it visible and aliasable, but somebody has to look at the admin
+  page occasionally. This is the most likely way the search quality degrades
+  over years.
+* **Streamlit is not a hardened multi-user framework.** The proxy gate in §7.1 is
+  load-bearing, not defence in depth. Do not move authentication into the app
+  for convenience.
+* **Self-hosting is now the group's responsibility** — TLS renewal, OS updates,
+  backups. A private server that nobody patches is not more secure than a
+  managed one; it is less.
+* **Scale figures come from raw-data-only fixtures.** The 96.3 KB and 14.8 ms
+  per experiment were measured on files with no `processed_data`. Expect 3–5× on
+  real files: still comfortable, but measure a real processed batch in Phase 1
+  before sizing the disk.
+* **One writer at a time.** SQLite in WAL mode gives concurrent readers and a
+  single writer, so ingestion must hold a lock. At the rate a research group
+  uploads, this will never be contended — but two simultaneous uploads must
+  queue rather than corrupt.
 
 ---
 
 ## References
 
-* [browser_deployment.md](browser_deployment.md) — the single-event-loop
-  constraint and the chunked-processing pattern every long-running page here
-  must use.
 * [versioning_and_reprocessing.md](versioning_and_reprocessing.md) — the version
-  dictionaries the `prov.*` index columns expose, and the reprocessing pipeline
-  §6 builds on.
+  dictionaries the index's provenance columns expose, and the reprocessing
+  pipeline the local processing app runs.
+* [browser_deployment.md](browser_deployment.md) — the single-event-loop
+  constraint. It governs the *local processing app*; the server-side database
+  app is free of it.
 * [plotting_instructions.md](plotting_instructions.md) — the instruction syntax
-  the index instructions extend.
-* eLabFTW REST API v2 — the OpenAPI specification shipped in the eLabFTW
-  repository at `apidoc/v2/openapi.yaml` (read at tag 5.3.6), and the metadata /
-  extra-fields documentation at <https://doc.elabftw.net/metadata.html>. The
-  capability table in §7.1 was compiled from the specification directly rather
-  than from prose documentation.
+  that `index_instructions` extends.
+
+Measurements in §2, §3.3, §4.4 and §5 were taken in this repository against
+`src/tests/data/260507_Complete.h5` and against a synthetic 10 000-experiment
+index built with an intentionally evolving metadata schema.
