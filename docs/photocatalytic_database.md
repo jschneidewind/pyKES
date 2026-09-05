@@ -13,9 +13,12 @@ Three constraints shape every decision below:
    and upload that file to the database.
 3. **The metadata will grow.** Experiments run next year will carry fields that
    do not exist today, and the database must absorb them without a migration.
+4. **Entries reference each other.** An experiment names the catalyst batch it
+   used, which names its precursor, which names its source material — and a
+   search must see the whole chain's metadata as if it were the experiment's own.
 
 It has to work at **10,000 experiments**. Every scale claim below is measured
-rather than estimated; the measurements are in §2 and §5.
+rather than estimated; the measurements are in §2, §5 and §6.
 
 ---
 
@@ -31,7 +34,7 @@ web application with a backend, not a directory of files. That is not a
 regression — it is a different, and in most respects easier, problem.
 
 **Loading the whole index into the browser stops being the obvious choice.**
-Measured on a synthetic 10,000-experiment index (§5), pulling the entire index
+Measured on a synthetic 10,000-experiment index (§6), pulling the entire index
 into one pandas DataFrame costs 2.05 MB gzipped over the wire, 15.9 MB resident,
 **66.5 MB peak allocation** and 1.93 s to assemble — on server-class CPU, before
 Pyodide's overhead, on every page load, growing with every new metadata column.
@@ -55,7 +58,7 @@ by the workflow rather than by the runtime. The expensive work, turning raw
 traces into processed data, happens on each user's own machine in the local
 processing app, *before* anything is uploaded. The server never runs a
 processing function. It stores bytes, maintains an index, answers queries and
-draws plots, which is why it does not need to be a powerful machine (§9).
+draws plots, which is why it does not need to be a powerful machine (§10).
 
 ---
 
@@ -68,7 +71,7 @@ and authentication, with three storage tiers on local disk:
 /srv/photocat/
   app/                        the Streamlit application
   data/
-    index.sqlite              THE SEARCHABLE INDEX — one row per experiment
+    index.sqlite              THE SEARCHABLE INDEX — one row per entity (§5)
     payloads/
       NB-316.h5               one payload per experiment, written by save_to_hdf5
       NB-318.h5
@@ -79,7 +82,7 @@ and authentication, with three storage tiers on local disk:
 
 | Tier | Holds | Size at 10 000 | Read when |
 | --- | --- | --- | --- |
-| `index.sqlite` | metadata, scalar results, provenance, payload pointers | **16.4 MB** (measured) | every search — in milliseconds |
+| `index.sqlite` | metadata, scalar results, provenance, payload pointers, and the reference graph (§5) | **16.4 MB** flat; **24 MB** with inherited metadata materialised (measured) | every search — in milliseconds |
 | `payloads/` | raw + processed arrays, one file per experiment | 3–5 GB | someone opens an experiment's traces |
 | `uploads/` | the original uploaded files, untouched | 3–5 GB | never, except to rebuild |
 
@@ -111,7 +114,7 @@ pipeline processes them, and the app produces one HDF5 file containing the batch
 level dictionaries.
 
 Nothing here needs to change except one addition: the file must also carry its
-**index mapping** (§6), so the database knows how to read its results.
+**index mapping** (§7), so the database knows how to read its results.
 
 This app can stay exactly as it is deployed today, in the browser under stlite
 or run locally with `streamlit run`. All the constraints in
@@ -137,15 +140,18 @@ When a user uploads `batch_2026_09.h5` holding 40 experiments, the server:
    experiment names present and unique within the file, index mapping present or
    defaulted.
 3. **Checks for collisions** against experiment names already in the database,
-   and applies the collision policy (§10 — this is a decision the group has to
+   and applies the collision policy (§12 — this is a decision the group has to
    make, not one the code can make).
 4. **Splits** it into one payload file per experiment, gzip-compressed.
 5. **Applies the index mapping** to fill the `results` for each experiment.
 6. **Upserts** the index rows, and registers any metadata or result keys not
    seen before (§4.3).
-7. **Records provenance**: who uploaded it, when, the file hash, the pyKES and
+7. **Records the references** the file declares, resolves the effective metadata
+   of everything it touches, and recomputes any existing entry that transitively
+   references something the upload changed (§5.5).
+8. **Records provenance**: who uploaded it, when, the file hash, the pyKES and
    app versions carried in the file's `version` dict.
-8. **Stores the original** under its hash.
+9. **Stores the original** under its hash.
 
 Measured on `src/tests/data/260507_Complete.h5`, step 4 — the only step whose
 cost scales with data volume — takes **14.8 ms per experiment** with gzip
@@ -195,6 +201,10 @@ Three patterns exist for schemaless-ish data, and only one of them is right here
   query becomes a pile of self-joins.
 * **A typed core plus a JSON column.** ← recommended
 
+The table is shown here as `experiments` for clarity; §5 generalises it to
+`entities`, which is what should actually be built — the columns below are
+unchanged by that.
+
 ```sql
 CREATE TABLE experiments (
   id               INTEGER PRIMARY KEY,
@@ -234,6 +244,8 @@ CREATE TABLE metadata_keys (
   canonical_key   TEXT,          -- set when this key is an alias of another
   inferred_type   TEXT,          -- number | text | bool | date | mixed
   unit            TEXT,
+  leaf_name       TEXT,          -- 'Synthesis temperature [degC]'
+  path            TEXT,          -- 'catalyst_batch/precursor/…' — NULL if own (§5.3)
   occurrences     INTEGER,
   first_seen      TEXT,
   last_seen       TEXT,
@@ -299,7 +311,185 @@ Free-text search over notes gets the same treatment with an FTS5 table:
 
 ---
 
-## 5. Does it hold at 10 000 experiments?
+## 5. References between entries
+
+A photocatalysis experiment is not a self-contained record. `ABC-67` was run on
+catalyst batch `ABC-12`, which was photodeposited at 360 nm from precursor
+`BC-2`, which was synthesised at 1150 °C. The question worth answering is
+*"find me the photocatalytic tests of samples synthesised at 1150 °C **and**
+photodeposited at 360 nm"* — and answering it means the metadata of the whole
+chain has to be reachable from the experiment.
+
+This has to be generic: any entry may reference any other, to any depth, in any
+combination.
+
+### 5.1 One table for everything, not one per kind
+
+The single change that makes this generic is to stop calling the table
+`experiments`. It becomes `entities`, with an `entity_type`:
+
+```sql
+CREATE TABLE entities (
+  entity_id     TEXT PRIMARY KEY,        -- ABC-67, ABC-12, BC-2 …
+  entity_type   TEXT NOT NULL,           -- experiment | catalyst_batch | precursor | …
+  metadata      TEXT NOT NULL,           -- JSON: this entry's OWN metadata
+  effective     TEXT NOT NULL,           -- JSON: own + everything inherited
+  payload_path  TEXT,                    -- NULL for entries that carry no data
+  …                                      -- provenance columns as before
+);
+
+CREATE TABLE edges (
+  source   TEXT NOT NULL REFERENCES entities(entity_id),
+  target   TEXT NOT NULL,
+  role     TEXT NOT NULL,                -- catalyst_batch, precursor, source …
+  resolved INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source, role, target)
+);
+CREATE INDEX idx_edges_target ON edges(target);
+```
+
+A photocatalysis experiment is an entity that happens to have a payload. A
+catalyst batch is an entity that happens not to. There is one identity space,
+one metadata mechanism, one search — and a catalyst batch becomes searchable in
+its own right, for free. Nothing in the design knows what a "precursor" is; new
+kinds of entry need no code.
+
+### 5.2 References are declared, never guessed
+
+A reference is a metadata field whose *value* is another entity's ID. Which
+fields those are is declared by the uploaded file, in the same place and the same
+style as the index mapping (§7):
+
+```python
+plotting_instruction['reference_instructions'] = {
+    'Catalyst batch': {'role': 'catalyst_batch'},
+    'Precursor':      {'role': 'precursor'},
+}
+```
+
+Declaring rather than inferring matters. Scanning every metadata value for
+something that looks like an entity ID would link `Lot: BC-2` to a precursor by
+accident, and the failure would be invisible.
+
+### 5.3 The merge: qualified by the path that reached it
+
+The effective metadata of an entity is its own, plus the effective metadata of
+everything it references, each inherited key **prefixed with the role path that
+reached it**:
+
+```
+ABC-67  own        Irradiance [mW/cm2]                                    = 50
+        1 hop      catalyst_batch/Photodeposition wavelength [nm]         = 360
+        2 hops     catalyst_batch/precursor/Synthesis temperature [degC]  = 1150
+        3 hops     catalyst_batch/precursor/source/Supplier               = …
+```
+
+Qualification is not decoration — it is what makes the merge **incapable of
+collision**. An experiment with its own `Temperature [degC]` and a precursor with
+its own `Temperature [degC]` produce `Temperature [degC]` and
+`catalyst_batch/precursor/Temperature [degC]`: two distinct, unambiguous keys.
+A flat merge would have to pick one and silently discard the other, which for a
+scientific record is not an acceptable failure mode.
+
+It also keeps provenance in the key itself: reading
+`catalyst_batch/precursor/Synthesis temperature [degC]` tells you exactly which
+entry the 1150 °C came from and how it was reached.
+
+**Searching by leaf name.** Users think "Synthesis temperature", not
+"catalyst_batch/precursor/Synthesis temperature". The key registry (§4.3)
+therefore stores each key's leaf name alongside its full path, and the facet UI
+groups by leaf. When a leaf occurs at exactly one path — the common case — the
+user never sees the path at all. When it occurs at several, the facet
+disambiguates and the query ORs across them (measured at 32.8 ms).
+
+### 5.4 Materialise, don't resolve at query time
+
+Two ways to answer a query over inherited metadata:
+
+| Approach | The target query | Notes |
+| --- | --- | --- |
+| Recursive CTE at query time | **92.3 ms**, for *one* inherited predicate | always fresh; each additional inherited predicate needs another join, so it degrades fast |
+| **Materialise `effective` at ingestion** | **32.9 ms** for the full three-predicate query — **2.7 ms** with hot keys promoted (§5.6) | must be recomputed when an ancestor changes |
+
+Materialisation wins clearly, and by more than the numbers suggest: the CTE
+figure is for a single predicate, while the materialised figure is for the whole
+"1150 °C **and** 360 nm **and** active" query. Resolving the full graph for
+12 340 entities takes **165 ms**, and writing the results **466 ms** — small
+enough that a full rebuild is never a problem.
+
+### 5.5 Keeping it correct
+
+Four cases decide whether this works in practice rather than in a demo.
+
+**Forward references.** `ABC-67` will sometimes be uploaded before `ABC-12`
+exists — people upload in whatever order suits them. The edge is recorded with
+`resolved = 0`, effective metadata is computed from whatever exists, and when
+`ABC-12` arrives everything referencing it is recomputed. Rejecting the upload
+instead would make the system unusable.
+
+**Invalidation.** When `BC-2` is corrected, every entity that transitively
+references it must be recomputed. The dependents are found by walking `edges`
+backwards — measured at **0.2 ms** to find the 27 dependents of one precursor, so
+this is free at any realistic rate of correction.
+
+**Cycles.** A mistake can make `ABC-12` reference `BC-2` reference `ABC-12`.
+Resolution carries a visited set and a depth cap, records the cycle, and flags it
+on the admin page rather than looping.
+
+**Multi-valued references — the trap.** If an experiment references two catalyst
+batches *both under the role* `catalyst_batch`, the second silently overwrites
+the first, because they produce identical qualified keys. Either the roles must
+be distinct (`catalyst_batch_a`, `catalyst_batch_b`) or the path must carry an
+index (`catalyst_batch[0]/…`). **Ingestion must reject a repeated role rather
+than accept it**, because the resulting data loss is invisible.
+
+### 5.6 Hot keys, and one measurement that changes the guidance
+
+Filtering an inherited key through JSON is a full scan, and the `effective` blob
+is larger than the raw metadata, so scans cost more than in the flat design:
+**39.5 ms** for one predicate. Promoting that key to an indexed generated column
+takes it to **0.4 ms** — roughly a hundredfold.
+
+Two findings that are not obvious, and that cost real time if discovered later:
+
+**Once one selective index narrows the set, remaining JSON predicates are free.**
+Two promoted keys plus a plain `json_extract` boolean ran in **2.6 ms** — the
+same as the two promoted keys alone. There is no need to promote everything; one
+selective predicate is enough to make the rest cheap.
+
+**Promote selective keys, and run `ANALYZE`.** Promoting the low-cardinality
+`Active` boolean *and skipping `ANALYZE`* made the same query **17.1 ms**,
+because SQLite chose the useless boolean index over the selective range one.
+Running `ANALYZE` restored the correct plan and **2.7 ms**. `ANALYZE` after every
+index creation belongs in the migration, not in a troubleshooting note.
+
+### 5.7 Where the non-experiment entries come from
+
+This requirement quietly introduces a second kind of contributor. The person who
+synthesised precursor `BC-2` has no raw traces, runs no processing, and will
+never open the processing app — but their metadata is what the search depends on.
+Three routes, all worth supporting:
+
+* **An entity sheet upload** — an Excel or CSV of entities of one type, with an
+  ID column and whatever metadata columns exist. This is the route the synthesis
+  people will actually use.
+* **Metadata-only entities inside an HDF5**, for anyone already producing one.
+  This works today with no change: `Experiment` accepts empty `raw_data` and
+  `processed_data` dicts.
+* **Direct creation and editing in the app**, for corrections.
+
+### 5.8 The graph is worth exploring in itself
+
+Once the edges exist, the reverse direction answers questions the group cannot
+currently ask at all: *"show me every photocatalytic test ever run on material
+descended from precursor `BC-2`"*, or *"which precursors have we never tested
+above 100 mW/cm²"*. An entity page showing what an entry references and what
+references it — one hop each way, expandable — is a small amount of UI on top of
+a table that already exists.
+
+---
+
+## 6. Does it hold at 10 000 experiments?
 
 Measured on a synthetic index of 10 000 experiments with a deliberately
 *evolving* schema — the first 3 000 carry 19 metadata keys, the next 4 000 carry
@@ -322,6 +512,24 @@ Every interactive query is comfortably under the threshold where a user notices
 delay, with a plain SQLite file and no tuning. The design has roughly two orders
 of magnitude of headroom before any of this needs revisiting.
 
+With the reference graph of §5 layered on — 10 000 experiments, 2 000 catalyst
+batches, 300 precursors and 40 source chemicals, chained four deep — the same
+kind of query still lands well inside the interactive budget:
+
+| Operation, with inherited metadata | Time |
+| --- | --- |
+| Resolve the effective metadata of all 12 340 entities | 165 ms |
+| Write it back | 466 ms |
+| **The target query** — synthesis T > 1100 °C *and* photodeposition 300–400 nm *and* active | **32.9 ms** |
+| The same, with the two inherited keys promoted and `ANALYZE` run | **2.7 ms** |
+| Filter by leaf name, ORed across every matching path | 32.8 ms |
+| Same question via recursive CTE, no materialisation, *one* predicate | 92.3 ms |
+| Find every dependent of one precursor (invalidation fan-out) | **0.2 ms** |
+| Index size: own metadata only → with inherited materialised | 7.5 MB → **24.0 MB** (3.18×) |
+
+The inheritance costs a 3.18× larger index and roughly doubles the scan time of
+an unpromoted filter — 24 MB and 33 ms, both comfortably irrelevant.
+
 One number deserves attention: the key-registry query, which walks
 `json_each` over every row, is the slowest at 79.7 ms — and it is the one the
 search page needs on *every* load to build its facets. That is exactly why
@@ -335,7 +543,7 @@ with every new column. The server-side index is both faster and simpler.
 
 ---
 
-## 6. The index mapping travels in the HDF5 file
+## 7. The index mapping travels in the HDF5 file
 
 Each uploaded file declares how its own `processed_data` maps into the database's
 result columns. This is what lets the database absorb files produced by
@@ -381,13 +589,17 @@ behaviour when a batch mixes liquid-phase and gas-phase runs, and exactly what
   column from that upload onward. Earlier experiments simply lack it — the same
   sparsity the metadata already has, handled the same way.
 
+`reference_instructions` (§5.2) lives in the same dictionary and follows the
+same rules — declared by the file, applied at ingestion, registered with
+provenance.
+
 Because the original uploads are kept (§2), a mapping mistake is recoverable:
 fix the default mapping and re-ingest from `uploads/` without asking anyone to
 re-upload anything.
 
 ---
 
-## 7. Authentication and privacy
+## 8. Authentication and privacy
 
 The data is strictly private and lives only on the group's server. That makes
 sign-in the part of this system where a mistake is most expensive, so it is
@@ -469,7 +681,7 @@ are optional:
 
 ---
 
-## 8. Searching, visualizing, and the pages
+## 9. Searching, visualizing, and the pages
 
 Largely as in the earlier plan, but with SQL underneath instead of a DataFrame.
 
@@ -499,9 +711,14 @@ is the view that makes an archive worth more than the sum of its files, and
 report with a decision, ingestion progress, and a summary of what was added,
 including any newly registered metadata or result keys.
 
+**Entity page** — for any entry, experiment or not: its own metadata, what it
+references, and what references it, one hop each way and expandable. This is
+where *"every photocatalytic test ever run on material descended from `BC-2`"*
+gets answered, and it is a small amount of UI over a table that already exists.
+
 **Admin** covers the things a growing schema needs: the key registry with
-aliasing, result-key conflicts, the upload log, and a "rebuild from uploads"
-action.
+aliasing, result-key conflicts, dangling and cyclic references, the upload log,
+and a "rebuild from uploads" action.
 
 **Subset export** — any search result assembled into an `ExperimentalDataset`
 from its payloads and written with `save_to_hdf5`. One button that turns a query
@@ -524,7 +741,7 @@ class DatabaseConfig:
 
 ---
 
-## 9. What the server needs
+## 10. What the server needs
 
 | Resource | At 10 000 experiments |
 | --- | --- |
@@ -547,10 +764,10 @@ The division of labour that keeps it this small:
 
 ---
 
-## 10. Phasing
+## 11. Phasing
 
-**Phase 0 — decide and provision.** Pick the authentication route (§7.2) and the
-collision policy (§11); provision the server with TLS and a working
+**Phase 0 — decide and provision.** Pick the authentication route (§8.2) and the
+collision policy (§12); provision the server with TLS and a working
 nginx + Streamlit + WebSocket configuration; confirm `Remote-User` reaches
 `st.context.headers` through the WebSocket upgrade. *The auth decision gates the
 deployment, not the code — everything in Phase 1 can proceed in parallel.*
@@ -561,24 +778,30 @@ registries, and `rebuild_from_uploads`. Round-trip tests against synthetic
 datasets with known contents, plus an explicit test that a second upload
 introducing new metadata keys is absorbed without migration.
 
-**Phase 2 — the database app.** Browse & Search against SQLite, experiment
-detail, pagination, facets from the registry.
+**Phase 2 — the reference graph.** `entities` and `edges`, the declared
+reference mapping, qualified resolution with cycle and depth guards, forward
+references, dependent recomputation, and the entity-sheet upload for
+metadata-only entries. Tests must cover a forward reference resolved by a later
+upload, a diamond, a cycle, and a repeated role being rejected.
 
-**Phase 3 — the upload path.** Validation, collision handling, ingestion with
+**Phase 3 — the database app.** Browse & Search against SQLite, experiment
+detail, pagination, facets grouped by leaf name, the entity page.
+
+**Phase 4 — the upload path.** Validation, collision handling, ingestion with
 progress, the upload log.
 
-**Phase 4 — deployment.** Auth, TLS, `internal` payload serving, backups,
-and the hardening list in §7.4.
+**Phase 5 — deployment.** Auth, TLS, `internal` payload serving, backups,
+and the hardening list in §8.4.
 
-**Phase 5 — the rest.** Property maps, the admin page with key aliasing, subset
+**Phase 6 — the rest.** Property maps, the admin page with key aliasing, subset
 export, provenance dashboards.
 
-Phases 1–4 are the minimum that delivers a private, searchable, uploadable
-database. Phase 5 is what makes it worth more than the files it was built from.
+Phases 1–5 are the minimum that delivers a private, searchable, uploadable
+database. Phase 6 is what makes it worth more than the files it was built from.
 
 ---
 
-## 11. Decisions needed, and open risks
+## 12. Decisions needed, and open risks
 
 **Needed from the group:**
 
@@ -597,6 +820,16 @@ database. Phase 5 is what makes it worth more than the files it was built from.
 4. **Are original uploads kept indefinitely?** Recommended yes (§2). It doubles
    the disk, which is a few gigabytes, and it is what makes the database
    repairable.
+5. **What are the entity types, and who owns each?** `experiment`,
+   `catalyst_batch`, `precursor`, `source_chemical` is the chain in the worked
+   example, but the design does not care — the list is a group convention. It
+   needs agreeing early, because the reference roles are what the qualified
+   metadata keys are named after, and renaming a role rewrites every
+   descendant's keys.
+6. **Who may edit a shared ancestor?** Correcting one precursor silently changes
+   the effective metadata of every experiment descended from it. That is the
+   point of the feature, but it means edits to widely-referenced entries deserve
+   more care — and probably an audit note — than edits to a single experiment.
 
 **Risks:**
 
@@ -604,7 +837,7 @@ database. Phase 5 is what makes it worth more than the files it was built from.
   registry makes it visible and aliasable, but somebody has to look at the admin
   page occasionally. This is the most likely way the search quality degrades
   over years.
-* **Streamlit is not a hardened multi-user framework.** The proxy gate in §7.1 is
+* **Streamlit is not a hardened multi-user framework.** The proxy gate in §8.1 is
   load-bearing, not defence in depth. Do not move authentication into the app
   for convenience.
 * **Self-hosting is now the group's responsibility** — TLS renewal, OS updates,
@@ -614,6 +847,13 @@ database. Phase 5 is what makes it worth more than the files it was built from.
   per experiment were measured on files with no `processed_data`. Expect 3–5× on
   real files: still comfortable, but measure a real processed batch in Phase 1
   before sizing the disk.
+* **A repeated reference role loses data silently.** Two references under one
+  role produce identical qualified keys and the second overwrites the first.
+  Ingestion must reject this rather than accept it (§5.5); it is the one failure
+  mode here that a user would never notice.
+* **Renaming an entity ID orphans its references.** Edges are stored by ID, and a
+  forward reference to an ID that never arrives looks identical to a typo. The
+  admin page must list dangling references, or they accumulate unnoticed.
 * **One writer at a time.** SQLite in WAL mode gives concurrent readers and a
   single writer, so ingestion must hold a lock. At the rate a research group
   uploads, this will never be contended — but two simultaneous uploads must
@@ -632,6 +872,7 @@ database. Phase 5 is what makes it worth more than the files it was built from.
 * [plotting_instructions.md](plotting_instructions.md) — the instruction syntax
   that `index_instructions` extends.
 
-Measurements in §2, §3.3, §4.4 and §5 were taken in this repository against
+Measurements in §2, §3.3, §4.4, §5 and §6 were taken in this repository against
 `src/tests/data/260507_Complete.h5` and against a synthetic 10 000-experiment
-index built with an intentionally evolving metadata schema.
+index built with an intentionally evolving metadata schema, and against a
+synthetic 12 340-entity reference graph chained four levels deep.
