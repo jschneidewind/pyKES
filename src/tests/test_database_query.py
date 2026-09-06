@@ -307,6 +307,58 @@ def test_the_results_table_carries_the_requested_columns(connection):
 
     # Looked up by the stored key, but headed by the name a person wrote: the
     # escaping is storage detail and never reaches the screen.
-    assert list(frame.columns) == ["entity_id", "entity_type", "group", "owner",
+    assert list(frame.columns) == ["Entity ID", "Kind", "Group", "Owner",
                                    "Irradiance A [mW/cm2]", "Max. rate (umol/s)"]
     assert frame["Max. rate (umol/s)"].notna().all()
+
+
+# =============================================================================
+# Display names
+# =============================================================================
+
+def test_entity_types_read_as_names_not_identifiers():
+    from pyKES.database.index_query import display_entity_type, display_role_path
+
+    assert display_entity_type("finished_semiconductor") == "Finished semiconductor"
+    assert display_role_path("catalyst_batch/finished_semiconductor") == \
+        "Catalyst batch › Finished semiconductor"
+    assert display_role_path(None) == ""
+
+
+def test_facets_are_ordered_by_reference_depth(connection):
+    from pyKES.database.index_query import reference_depth
+
+    depths = [reference_depth(facet) for facet in build_facets(connection, "experiment")]
+
+    # Own fields first, then one reference away, then two: the order somebody
+    # narrowing a search thinks in.
+    assert depths == sorted(depths)
+    assert depths[0] == 0 and max(depths) == 2
+
+
+# =============================================================================
+# Type-ahead
+# =============================================================================
+
+def test_prefix_matches_are_offered_before_containments(connection):
+    from pyKES.database.index_query import search_entity_ids
+
+    matches = search_entity_ids(connection, "EXP-")
+
+    assert matches[:3] == ["EXP-1", "EXP-2", "EXP-3"]
+    assert len(matches) == 6
+
+
+def test_an_empty_query_offers_nothing(connection):
+    from pyKES.database.index_query import search_entity_ids
+
+    assert search_entity_ids(connection, "   ") == []
+
+
+def test_the_type_ahead_can_be_scoped_to_one_kind(connection):
+    from pyKES.database.index_query import search_entity_ids
+
+    assert search_entity_ids(connection, "SEMI", entity_type="experiment") == []
+    assert search_entity_ids(connection, "SEMI",
+                             entity_type="finished_semiconductor") == \
+        ["SEMI-1", "SEMI-2"]

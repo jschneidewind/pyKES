@@ -49,6 +49,14 @@ IRRADIANCES = (12.0, 25.0, 44.25, 80.0, 120.0)
 COCATALYSTS = ("Rh", "Rh/Cr", "Pt", "none")
 OPERATORS = ("ae", "nb", "mz", "vsa")
 
+# Curves are coloured by the experiment's own colour, so a demo whose entries
+# are all black would make the comparison plot useless. Eleven colours, a prime,
+# so a filter selecting every nth experiment still gets a spread rather than
+# landing repeatedly on the same one.
+TRACE_COLORS = ("#22c55e", "#38bdf8", "#f59e0b", "#f472b6", "#a78bfa",
+                "#f87171", "#2dd4bf", "#facc15", "#c084fc", "#fb923c",
+                "#60a5fa")
+
 RANDOM_SEED = 20260906
 
 
@@ -190,7 +198,7 @@ def build_experiment_batch(directory: Path, generator) -> Path:
         dataset.add_experiment(Experiment(
             experiment_name=f"EXP-{index + 1:04d}",
             raw_data_file=f"EXP-{index + 1:04d}.csv",
-            color="black",
+            color=TRACE_COLORS[index % len(TRACE_COLORS)],
             group="Reference",
             metadata={
                 "Experiment": f"EXP-{index + 1:04d}",
@@ -214,6 +222,9 @@ def build_experiment_batch(directory: Path, generator) -> Path:
                 "rate_umol_s": rate,
                 "max_rate_umol_s": float(rate.max()),
                 "max_rate_time_s": float(time_s[int(rate.argmax())]),
+                "time_unit": "s",
+                "data_unit": "umol",
+                "rate_unit": "umol/s",
                 "apparent_quantum_yield": float(
                     rate.max() / irradiance * 1e4),
                 "light_to_hydrogen_efficiency": float(
@@ -222,6 +233,21 @@ def build_experiment_batch(directory: Path, generator) -> Path:
         ))
 
     dataset.plotting_instruction = {
+        # The curves the database application offers for comparison. Carried
+        # into every payload, so a payload describes its own plots.
+        "time_series_instructions": {
+            "Reaction": {"x": "processed_data/time_reaction_s",
+                         "y": "processed_data/data_reaction_umol",
+                         "unit_x": "processed_data/time_unit",
+                         "unit_y": "processed_data/data_unit"},
+            "Rate": {"x": "processed_data/time_reaction_s",
+                     "y": "processed_data/rate_umol_s",
+                     "x_point": "processed_data/max_rate_time_s",
+                     "y_point": "processed_data/max_rate_umol_s",
+                     "unit_x": "processed_data/time_unit",
+                     "unit_y": "processed_data/rate_unit"},
+            "Raw": {"x": "raw_data/time_s", "y": "raw_data/amount_umol"},
+        },
         "index_instructions": {
             "Max. rate (umol/s)": {"result": "processed_data/max_rate_umol_s"},
             "Apparent quantum yield (%)": {

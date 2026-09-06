@@ -20,6 +20,7 @@ from pyKES.database.index_ingest import (
     ingest_hdf5_upload,
 )
 from pyKES.database.index_references import ReferenceError, read_dangling_references
+from pyKES.database.index_query import display_entity_type
 from pyKES.database.index_schema import ENTITY_TYPES, analyse_index
 from pyKES.database_app.config import DEFAULT_CONFIG, DatabaseAppConfig
 from pyKES.database_app.session import index_paths, open_shared_index, read_identity
@@ -139,9 +140,9 @@ def render_hdf5_upload(connection, config: DatabaseAppConfig, identity) -> None:
     uploaded = st.file_uploader("HDF5 batch", type=HDF5_EXTENSIONS,
                                 key="hdf5_uploader")
     entity_type = st.selectbox("These entries are", PAYLOAD_ENTITY_TYPES,
-                               key="hdf5_type")
+                               key="hdf5_type", format_func=display_entity_type)
 
-    if uploaded is None or not st.button("Ingest batch", type="primary"):
+    if uploaded is None or not st.button("Ingest Batch", type="primary"):
         return
 
     with st.spinner(f"Ingesting {uploaded.name}…"):
@@ -185,8 +186,8 @@ def render_sheet_upload(connection, config: DatabaseAppConfig, identity) -> None
                                [kind for kind in ENTITY_TYPES
                                 if kind not in PAYLOAD_ENTITY_TYPES] +
                                list(PAYLOAD_ENTITY_TYPES),
-                               key="sheet_type")
-    identifier_column = st.text_input("Id column", value="Experiment")
+                               key="sheet_type", format_func=display_entity_type)
+    identifier_column = st.text_input("ID column", value="Experiment")
 
     declared = config.reference_instructions_by_type.get(entity_type, {})
     if declared:
@@ -197,7 +198,7 @@ def render_sheet_upload(connection, config: DatabaseAppConfig, identity) -> None
         st.caption("No reference columns are declared for this kind of entry, "
                    "so it will not link to anything.")
 
-    if uploaded is None or not st.button("Ingest sheet", type="primary"):
+    if uploaded is None or not st.button("Ingest Sheet", type="primary"):
         return
 
     with st.spinner(f"Ingesting {uploaded.name}…"):

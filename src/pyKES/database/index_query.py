@@ -22,6 +22,7 @@ from pyKES.database.index_registry import (
     TYPE_TEXT,
     split_qualified_key,
 )
+from pyKES.database.index_schema import ROLE_PATH_SEPARATOR
 
 
 # =============================================================================
@@ -93,6 +94,51 @@ def stored_metadata_key(key: str) -> str:
     return sanitize_key(key)
 
 
+def display_entity_type(entity_type: str) -> str:
+    """
+    Render a stored entity type the way it should read on screen.
+
+    ``'finished_semiconductor'`` becomes ``'Finished semiconductor'``: the
+    underscores are a storage convention, not something a user should have to
+    look at.
+
+    Parameters
+    ----------
+    entity_type : str
+        Stored entity type.
+
+    Returns
+    -------
+    label : str
+        Sentence-cased name.
+    """
+    return entity_type.replace("_", " ").capitalize()
+
+
+def display_role_path(role_path: Optional[str]) -> str:
+    """
+    Render a reference path as a readable chain.
+
+    ``'catalyst_batch/finished_semiconductor'`` becomes
+    ``'Catalyst batch › Finished semiconductor'``.
+
+    Parameters
+    ----------
+    role_path : str or None
+        Stored role path, or None for an entity's own field.
+
+    Returns
+    -------
+    label : str
+        Readable chain, empty for an own field.
+    """
+    if not role_path:
+        return ""
+
+    return " › ".join(display_entity_type(role)
+                      for role in role_path.split(ROLE_PATH_SEPARATOR))
+
+
 def display_key(key: str) -> str:
     """
     Render a stored key the way a person wrote it.
@@ -116,7 +162,7 @@ def display_key(key: str) -> str:
 
     role_path, leaf = split_qualified_key(key)
 
-    return f"{leaf}  ·  via {role_path}" if role_path else leaf
+    return f"{leaf}  ·  via {display_role_path(role_path)}" if role_path else leaf
 
 
 def json_path(key: str) -> str:
@@ -347,8 +393,9 @@ def rows_to_frame(rows: List, columns: Optional[List[str]] = None):
         effective = json.loads(row["effective"])
         results = json.loads(row["results"])
 
-        record = {"entity_id": row["entity_id"], "entity_type": row["entity_type"],
-                  "group": row["display_group"], "owner": row["owner"]}
+        record = {"Entity ID": row["entity_id"],
+                  "Kind": display_entity_type(row["entity_type"]),
+                  "Group": row["display_group"], "Owner": row["owner"]}
 
         for column in columns or []:
             if column.startswith(RESULT_PREFIX):
@@ -457,7 +504,10 @@ def build_facets(connection,
     Returns
     -------
     facets : list of Facet
-        Most frequently occurring keys first.
+        Ordered by reference depth — the entry's own fields first, then fields
+        one reference away, and so on — and by frequency within each depth.
+        That is the order somebody narrowing a search thinks in: what was done
+        in this experiment, then what it was made from.
     """
     from pyKES.database.index_registry import read_metadata_keys
 
@@ -489,12 +539,80 @@ def build_facets(connection,
             facets.append(Facet(row["key"], row["leaf_name"], "contains",
                                 role_path=row["role_path"]))
 
-    return facets
+    return sorted(facets, key=reference_depth)
+
+
+def reference_depth(facet: Facet) -> int:
+    """
+    Count how many references away a facet's field lives.
+
+    Parameters
+    ----------
+    facet : Facet
+        Facet to place.
+
+    Returns
+    -------
+    depth : int
+        0 for the entity's own metadata, 1 for one reference away, and so on.
+    """
+    if not facet.role_path:
+        return 0
+
+    return facet.role_path.count(ROLE_PATH_SEPARATOR) + 1
 
 
 # =============================================================================
 # One entity
 # =============================================================================
+
+def search_entity_ids(connection,
+                      prefix: str,
+                      entity_type: Optional[str] = None,
+                      limit: int = 25) -> List[str]:
+    """
+    List entity ids beginning with, or containing, a typed fragment.
+
+    Backs the type-ahead on the entry page: typing ``NB-6`` should offer every
+    entry whose id starts that way without the user having to remember the rest.
+    Prefix matches are offered before mere containments, since that is what a
+    person typing an id means.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+    prefix : str
+        What the user has typed.
+    entity_type : str, optional
+        Restrict to one kind of entry.
+    limit : int, optional
+        Most matches to return.
+
+    Returns
+    -------
+    entity_ids : list of str
+        Matching ids, prefix matches first.
+    """
+    if not prefix.strip():
+        return []
+
+    fragment = prefix.strip()
+    clause = "AND entity_type = ?" if entity_type else ""
+    parameters = [f"{fragment}%", f"%{fragment}%", f"{fragment}%"]
+    if entity_type:
+        parameters.insert(2, entity_type)
+
+    rows = connection.execute(
+        f"""SELECT entity_id FROM entities
+             WHERE (entity_id LIKE ? OR entity_id LIKE ?) {clause}
+             ORDER BY entity_id NOT LIKE ?, entity_id
+             LIMIT {int(limit)}""",
+        parameters,
+    ).fetchall()
+
+    return [row["entity_id"] for row in rows]
+
 
 def read_entity(connection, entity_id: str):
     """

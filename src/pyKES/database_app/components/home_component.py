@@ -8,7 +8,7 @@ the answer to *where is the data* must be *it is already here*.
 
 import streamlit as st
 
-from pyKES.database.index_query import database_statistics
+from pyKES.database.index_query import database_statistics, display_entity_type
 from pyKES.database_app.config import DEFAULT_CONFIG, DatabaseAppConfig
 from pyKES.database_app.session import open_shared_index, read_identity
 
@@ -51,17 +51,17 @@ def render_home(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
 
     columns = st.columns(4)
     columns[0].metric("Entries", statistics["entities"])
-    columns[1].metric("With traces", statistics["with_payload"])
+    columns[1].metric("With Traces", statistics["with_payload"])
     columns[2].metric("References", statistics["edges"])
-    columns[3].metric("Metadata fields", statistics["metadata_keys"])
+    columns[3].metric("Metadata Fields", statistics["metadata_keys"])
 
     if statistics["last_change"]:
         st.caption(f"Last change {statistics['last_change'][:19]} UTC")
 
-    st.subheader("What is in here")
+    st.subheader("What Is in the Database")
     for entity_type, count in sorted(statistics["by_type"].items(),
                                      key=lambda item: -item[1]):
-        st.write(f"- **{count}** {entity_type.replace('_', ' ')}")
+        st.write(f"- **{count}** · {display_entity_type(entity_type)}")
 
     st.markdown(
         "---\n"

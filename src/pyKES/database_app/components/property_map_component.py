@@ -12,6 +12,7 @@ import streamlit as st
 
 from pyKES.database.index_query import (
     RESULT_PREFIX,
+    display_entity_type,
     display_key,
     list_axis_options,
     property_map_data,
@@ -55,7 +56,8 @@ def render_property_map(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
                "including values inherited through references.")
 
     entity_type = st.selectbox("Kind of entry", ENTITY_TYPES,
-                               index=ENTITY_TYPES.index(config.default_entity_type))
+                               index=ENTITY_TYPES.index(config.default_entity_type),
+                               format_func=display_entity_type)
 
     options = list_axis_options(connection, entity_type)
     if len(options) < 2:
@@ -64,12 +66,12 @@ def render_property_map(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
         return
 
     left, middle, right = st.columns(3)
-    x_key = left.selectbox("x axis", options, index=0,
+    x_key = left.selectbox("X Axis", options, index=0,
                            format_func=display_key)
-    y_key = middle.selectbox("y axis", options,
+    y_key = middle.selectbox("Y Axis", options,
                              index=1 if len(options) > 1 else 0,
                              format_func=display_key)
-    color_key = right.selectbox("Colour by", ["(none)"] + options,
+    color_key = right.selectbox("Colour By", ["(none)"] + options,
                                 format_func=lambda key: (
                                     key if key == "(none)" else display_key(key)))
 
@@ -93,8 +95,10 @@ def render_property_map(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
                          margin=dict(l=10, r=10, t=30, b=10))
 
     st.plotly_chart(figure, width="stretch")
-    st.caption(f"{len(frame)} of the {entity_type} entries carry both quantities.")
+    st.caption(f"{len(frame)} of the "
+               f"{display_entity_type(entity_type).lower()} entries carry both "
+               f"quantities.")
 
-    st.download_button("Download these points as CSV",
+    st.download_button("Download Points as CSV",
                        data=frame.to_csv(index=False).encode("utf-8"),
                        file_name="photocat_property_map.csv", mime="text/csv")

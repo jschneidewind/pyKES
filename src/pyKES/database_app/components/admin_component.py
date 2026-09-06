@@ -98,7 +98,7 @@ def render_reference_health(connection) -> None:
     """
     import pandas as pd
 
-    st.subheader("Reference health")
+    st.subheader("Reference Health")
 
     dangling = read_dangling_references(connection)
     if dangling:
@@ -141,7 +141,7 @@ def render_result_conflicts(connection) -> None:
     frame = pd.DataFrame([dict(row) for row in rows])
     conflicting = frame[frame["conflicting"] == 1]
 
-    st.subheader("Result definitions")
+    st.subheader("Result Definitions")
     if not conflicting.empty:
         st.error(f"{len(conflicting)} labels were redefined with a different "
                  f"path. Both definitions are kept, because adopting the new "
@@ -173,9 +173,10 @@ def render_uploads(connection) -> None:
     st.caption("Every file is kept verbatim, which is what makes the database "
                "rebuildable from scratch.")
     st.dataframe(pd.DataFrame([{
-        "id": row["id"], "file": row["filename"], "kind": row["kind"],
-        "entries": row["entity_count"], "by": row["uploaded_by"],
-        "at": row["uploaded_at"][:19], "MB": round(row["byte_count"] / 1e6, 2),
+        "ID": row["id"], "File": row["filename"], "Kind": row["kind"],
+        "Entries": row["entity_count"], "Uploaded by": row["uploaded_by"],
+        "Uploaded at": row["uploaded_at"][:19],
+        "Size (MB)": round(row["byte_count"] / 1e6, 2),
     } for row in rows]), width="stretch", hide_index=True)
 
 
@@ -200,11 +201,11 @@ def render_maintenance(connection, identity) -> None:
     st.subheader("Maintenance")
     left, right = st.columns(2)
 
-    if left.button("Rebuild key registry", width="stretch"):
+    if left.button("Rebuild Key Registry", width="stretch"):
         count = rebuild_metadata_key_registry(connection)
         st.success(f"Registry rebuilt from the entities table: {count} keys.")
 
-    if right.button("Refresh query statistics (ANALYZE)", width="stretch"):
+    if right.button("Refresh Query Statistics (ANALYZE)", width="stretch"):
         analyse_index(connection)
         st.success("Statistics refreshed. This is what keeps the planner from "
                    "choosing a low-cardinality index over a selective one.")
@@ -231,12 +232,12 @@ def render_admin(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
     columns = st.columns(4)
     columns[0].metric("Entries", statistics["entities"])
     columns[1].metric("References", statistics["edges"])
-    columns[2].metric("Metadata keys", statistics["metadata_keys"])
+    columns[2].metric("Metadata Keys", statistics["metadata_keys"])
     columns[3].metric("Uploads", statistics["uploads"])
 
     render_reference_health(connection)
     render_result_conflicts(connection)
-    st.subheader("Metadata keys")
+    st.subheader("Metadata Keys")
     render_key_registry(connection)
     render_uploads(connection)
     render_maintenance(connection, identity)

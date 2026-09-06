@@ -17,13 +17,21 @@ from pyKES.database.index_query import (
     Filter,
     RESULT_PREFIX,
     build_facets,
+    display_entity_type,
     display_key,
+    display_role_path,
+    reference_depth,
     rows_to_frame,
     search_entities,
 )
 from pyKES.database.index_schema import ENTITY_TYPES
+from pyKES.database_app.components.time_series_panel import (
+    MAX_COMPARISON_ENTRIES,
+    payload_files_for,
+    render_time_series_panel,
+)
 from pyKES.database_app.config import DEFAULT_CONFIG, DatabaseAppConfig
-from pyKES.database_app.session import open_shared_index
+from pyKES.database_app.session import index_paths, open_shared_index
 
 
 # =============================================================================
@@ -38,10 +46,10 @@ TEXT_PARAMETER = "q"
 TYPE_PARAMETER = "type"
 FILTER_PARAMETER = "f"
 
-# How many facets to draw before hiding the rest behind an expander. A chain
-# four deep can register a hundred keys, and a sidebar of a hundred widgets is
-# not a filter panel.
-VISIBLE_FACET_LIMIT = 8
+# Headings the facets are grouped under, by how many references away the field
+# lives. Anything deeper than this falls back to the reference path itself.
+DEPTH_HEADINGS = ("This experiment", "One reference away", "Two references away",
+                  "Three references away")
 
 
 # =============================================================================
@@ -121,9 +129,7 @@ def render_facet(facet: Facet, position: int):
     search_filter : Filter or None
         The filter, or None when the widget is at its neutral setting.
     """
-    caption = f"{facet.label}"
-    if facet.role_path:
-        caption = f"{facet.label}  ·  via {facet.role_path}"
+    caption = facet.label
 
     if facet.kind == "range":
         low, high = facet.bounds
@@ -144,6 +150,43 @@ def render_facet(facet: Facet, position: int):
         return Filter(facet.key, "contains", typed)
 
     return None
+
+
+def seed_facet_widgets(facets: list, url_filters: list) -> None:
+    """
+    Pre-fill the filter widgets from a shared link.
+
+    Without this the query string is written but never read, so a pasted search
+    link opens the unfiltered page — which makes "a search is a URL" false.
+    Streamlit widgets take their initial value from session state, so the
+    seeding has to happen before they are created, and only while they have no
+    state of their own: after that the user's own interaction wins.
+
+    Parameters
+    ----------
+    facets : list of Facet
+        Facets about to be drawn, in the order they will be drawn in.
+    url_filters : list of Filter
+        Filters decoded from the query string.
+
+    Returns
+    -------
+    None : None
+    """
+    by_key = {search_filter.key: search_filter for search_filter in url_filters}
+
+    for position, facet in enumerate(facets):
+        widget_key = f"facet_{position}"
+        search_filter = by_key.get(facet.key)
+
+        if search_filter is None or widget_key in st.session_state:
+            continue
+
+        if facet.kind == "range":
+            st.session_state[widget_key] = (float(search_filter.value[0]),
+                                            float(search_filter.value[1]))
+        else:
+            st.session_state[widget_key] = search_filter.value
 
 
 def render_facet_panel(connection, entity_type: str) -> list:
@@ -168,22 +211,50 @@ def render_facet_panel(connection, entity_type: str) -> list:
         st.info("No metadata registered for this kind of entry yet.")
         return []
 
-    filters = []
+    seed_facet_widgets(facets, read_filters_from_url())
 
-    for position, facet in enumerate(facets[:VISIBLE_FACET_LIMIT]):
+    filters = []
+    current_depth = None
+
+    # `build_facets` already orders by reference depth, so a single pass emits
+    # the entry's own fields first and then each level of the chain. Every
+    # filter is shown: hiding two thirds of them behind an expander hid exactly
+    # the inherited ones the comparison is usually built from.
+    for position, facet in enumerate(facets):
+        depth = reference_depth(facet)
+
+        if depth != current_depth:
+            current_depth = depth
+            st.markdown(f"**{depth_heading(depth, facet)}**")
+
         chosen = render_facet(facet, position)
         if chosen:
             filters.append(chosen)
 
-    remaining = facets[VISIBLE_FACET_LIMIT:]
-    if remaining:
-        with st.expander(f"More filters ({len(remaining)})"):
-            for position, facet in enumerate(remaining, start=VISIBLE_FACET_LIMIT):
-                chosen = render_facet(facet, position)
-                if chosen:
-                    filters.append(chosen)
-
     return filters
+
+
+def depth_heading(depth: int, facet: Facet) -> str:
+    """
+    Name the group a facet belongs to.
+
+    Parameters
+    ----------
+    depth : int
+        How many references away the field lives.
+    facet : Facet
+        A facet at that depth, used for its reference path when the depth is
+        beyond the named headings.
+
+    Returns
+    -------
+    heading : str
+        Group heading.
+    """
+    if depth < len(DEPTH_HEADINGS):
+        return DEPTH_HEADINGS[depth]
+
+    return display_role_path(facet.role_path)
 
 
 # =============================================================================
@@ -218,7 +289,7 @@ def choose_columns(connection, entity_type: str, config: DatabaseAppConfig) -> l
     available = result_options + metadata_options
     default = [column for column in config.default_columns if column in available]
 
-    return st.multiselect("Columns", available, default=default,
+    return st.multiselect("Columns shown", available, default=default,
                           format_func=display_key)
 
 
@@ -258,12 +329,62 @@ def render_results(connection, rows, total: int, columns: list,
 
     chosen_rows = selection.get("selection", {}).get("rows", [])
     if chosen_rows:
-        st.session_state[SELECTED_ENTITY_KEY] = frame.iloc[chosen_rows[0]]["entity_id"]
+        st.session_state[SELECTED_ENTITY_KEY] = frame.iloc[chosen_rows[0]]["Entity ID"]
         st.switch_page("pages/02_Entity.py")
 
-    st.download_button("Download these results as CSV",
+    st.download_button("Download Results as CSV",
                        data=frame.to_csv(index=False).encode("utf-8"),
                        file_name="photocat_search.csv", mime="text/csv")
+
+
+def render_comparison(connection, config: DatabaseAppConfig,
+                      entity_type: str, filters: list, text: str,
+                      latest_only: bool, total: int) -> None:
+    """
+    Plot the traces of everything the current search selects.
+
+    Comparing a subset — every test of one catalyst, every catalyst descended
+    from one semiconductor — is the main thing the database is for, so the plot
+    follows the filters rather than needing a second selection. The panel's own
+    multiselect narrows what is drawn without touching the search.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+    config : DatabaseAppConfig
+        Deployment settings, supplying the payload directory.
+    entity_type : str
+        Kind of entry being searched.
+    filters : list of Filter
+        Active filters.
+    text : str
+        Free-text term.
+    latest_only : bool
+        Whether superseded versions are hidden.
+    total : int
+        Number of matches, used to decide whether a comparison is worth drawing.
+
+    Returns
+    -------
+    None : None
+    """
+    st.subheader("Compare traces")
+
+    if total > MAX_COMPARISON_ENTRIES:
+        st.info(f"{total} entries match. Narrow the search to "
+                f"{MAX_COMPARISON_ENTRIES} or fewer to compare their traces.")
+        return
+
+    # The whole matching set, not just the visible page: the comparison is of
+    # the subset the filters describe.
+    rows, _ = search_entities(connection, entity_type=entity_type,
+                              filters=filters, text=text,
+                              latest_only=latest_only, limit=None)
+
+    render_time_series_panel(
+        payload_files_for(rows, index_paths(config).payload_directory),
+        key_prefix="browse")
 
 
 # =============================================================================
@@ -290,19 +411,21 @@ def render_search(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
     url_type = st.query_params.get(TYPE_PARAMETER, config.default_entity_type)
     entity_type = st.selectbox(
         "Kind of entry", ENTITY_TYPES,
-        index=ENTITY_TYPES.index(url_type) if url_type in ENTITY_TYPES else 0)
+        index=ENTITY_TYPES.index(url_type) if url_type in ENTITY_TYPES else 0,
+        format_func=display_entity_type)
 
     text = st.text_input("Search names, groups and all metadata",
-                         value=st.query_params.get(TEXT_PARAMETER, ""))
+                         value=st.query_params.get(TEXT_PARAMETER, ""),
+                         placeholder="Catalyst, operator, note…")
 
     with st.sidebar:
         st.header("Filters")
-        st.caption("Generated from the metadata actually present — including "
-                   "fields inherited through references.")
-        filters = render_facet_panel(connection, entity_type)
+        st.caption("Generated from the metadata actually present, grouped by "
+                   "how far away the field lives.")
         latest_only = st.toggle("Latest version of each name only", value=True)
+        filters = render_facet_panel(connection, entity_type)
 
-    with st.expander("Advanced"):
+    with st.expander("Table columns"):
         columns = choose_columns(connection, entity_type, config)
 
     write_filters_to_url(filters, text, entity_type)
@@ -320,3 +443,7 @@ def render_search(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
                    f"the link reproduces it.")
 
     render_results(connection, rows, total, columns, offset, config.page_size)
+
+    st.divider()
+    render_comparison(connection, config, entity_type, filters, text,
+                      latest_only, total)

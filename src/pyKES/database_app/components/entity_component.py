@@ -10,10 +10,17 @@ import json
 
 import streamlit as st
 
-from pyKES.database.database_experiments import ExperimentalDataset
 from pyKES.database.index_ingest import may_edit, update_entity_metadata
-from pyKES.database.index_query import read_entity, read_neighbours, read_versions
+from pyKES.database.index_query import (
+    display_entity_type,
+    display_role_path,
+    read_entity,
+    read_neighbours,
+    read_versions,
+    search_entity_ids,
+)
 from pyKES.database.index_registry import split_qualified_key
+from pyKES.database_app.components.time_series_panel import render_time_series_panel
 from pyKES.database_app.config import DEFAULT_CONFIG, DatabaseAppConfig
 from pyKES.database_app.session import index_paths, open_shared_index, read_identity
 
@@ -62,7 +69,7 @@ def split_metadata(effective: dict, own: dict) -> tuple:
             own_rows.append({"Field": leaf, "Value": display})
         else:
             inherited_rows.append({"Field": leaf, "Value": display,
-                                   "Via": role_path})
+                                   "Via": display_role_path(role_path)})
 
     return own_rows, inherited_rows
 
@@ -86,13 +93,15 @@ def render_metadata(row) -> None:
     effective = json.loads(row["effective"])
     own_rows, inherited_rows = split_metadata(effective, own)
 
-    st.subheader("Metadata")
-    st.dataframe(pd.DataFrame(own_rows), width="stretch", hide_index=True)
+    with st.expander(f"Metadata ({len(own_rows)})", expanded=False):
+        st.dataframe(pd.DataFrame(own_rows), width="stretch", hide_index=True)
 
     if inherited_rows:
-        st.subheader(f"Inherited through references ({len(inherited_rows)})")
-        st.caption("Each value carries the reference path it came through.")
-        st.dataframe(pd.DataFrame(inherited_rows), width="stretch", hide_index=True)
+        with st.expander(f"Inherited Through References ({len(inherited_rows)})",
+                         expanded=False):
+            st.caption("Each value carries the reference path it came through.")
+            st.dataframe(pd.DataFrame(inherited_rows), width="stretch",
+                         hide_index=True)
 
 
 def render_results(row) -> None:
@@ -114,10 +123,10 @@ def render_results(row) -> None:
     if not results:
         return
 
-    st.subheader("Results")
-    st.dataframe(pd.DataFrame([{"Result": key, "Value": value}
-                               for key, value in sorted(results.items())]),
-                 width="stretch", hide_index=True)
+    with st.expander(f"Results ({len(results)})", expanded=False):
+        st.dataframe(pd.DataFrame([{"Result": key, "Value": value}
+                                   for key, value in sorted(results.items())]),
+                     width="stretch", hide_index=True)
 
 
 # =============================================================================
@@ -148,7 +157,8 @@ def render_neighbours(connection, entity_id: str) -> None:
             st.caption("This entry references nothing.")
         for edge in neighbours["references"]:
             state = "" if edge["resolved"] else "  ·  not uploaded yet"
-            if st.button(f"{edge['role']} → {edge['entity_id']}{state}",
+            if st.button(f"{display_entity_type(edge['role'])} → "
+                         f"{edge['entity_id']}{state}",
                          key=f"ref_{edge['role']}", width="stretch"):
                 open_entity(edge["entity_id"])
 
@@ -157,7 +167,8 @@ def render_neighbours(connection, entity_id: str) -> None:
         if not neighbours["referenced_by"]:
             st.caption("Nothing references this entry.")
         for edge in neighbours["referenced_by"][:25]:
-            if st.button(f"{edge['entity_id']}  ({edge['entity_type']})",
+            if st.button(f"{edge['entity_id']}  "
+                         f"({display_entity_type(edge['entity_type'])})",
                          key=f"back_{edge['entity_id']}", width="stretch"):
                 open_entity(edge["entity_id"])
 
@@ -189,11 +200,11 @@ def open_entity(entity_id: str) -> None:
 
 def render_payload(row, config: DatabaseAppConfig) -> None:
     """
-    Plot the entry's measured and processed traces, if it has any.
+    Plot this entry's traces, if it has any, and offer the payload.
 
-    The payload is a standalone pyKES dataset, so it is handed to the existing
-    time-series machinery unchanged and can also be downloaded and opened
-    locally.
+    The same panel the browse page uses for comparison, with the entry
+    selection switched off: comparing entries is done on the browse page, where
+    the filters decide the subset.
 
     Parameters
     ----------
@@ -215,81 +226,13 @@ def render_payload(row, config: DatabaseAppConfig) -> None:
         return
 
     st.subheader("Traces")
-    dataset = load_payload(str(payload_file))
-    experiment = next(iter(dataset.experiments.values()))
+    render_time_series_panel((str(payload_file),), key_prefix="entity",
+                             allow_deselection=False)
 
-    series = {name: value for name, value in
-              {**experiment.raw_data, **experiment.processed_data}.items()
-              if hasattr(value, "shape") and getattr(value, "ndim", 0) == 1
-              and value.size > 1}
-
-    if not series:
-        st.caption("This payload holds no plottable series.")
-    else:
-        names = sorted(series)
-        x_name = st.selectbox("x", names,
-                              index=next((i for i, n in enumerate(names)
-                                          if "time" in n.lower()), 0))
-        y_names = st.multiselect("y", [n for n in names if n != x_name],
-                                 default=[n for n in names if n != x_name][:2])
-        if y_names:
-            render_figure(series, x_name, y_names)
-
-    st.download_button("Download this entry as HDF5",
+    st.download_button("Download This Entry as HDF5",
                        data=payload_file.read_bytes(),
                        file_name=row["payload_path"],
                        mime="application/x-hdf")
-
-
-@st.cache_data(show_spinner=False)
-def load_payload(payload_file: str):
-    """
-    Load one payload, cached across reruns.
-
-    Parameters
-    ----------
-    payload_file : str
-        Absolute path to the payload.
-
-    Returns
-    -------
-    dataset : ExperimentalDataset
-        The single-experiment dataset stored there.
-    """
-    return ExperimentalDataset.load_from_hdf5(payload_file)
-
-
-def render_figure(series: dict, x_name: str, y_names: list) -> None:
-    """
-    Draw the selected series.
-
-    Parameters
-    ----------
-    series : dict
-        Named one-dimensional arrays.
-    x_name : str
-        Series used as the x axis.
-    y_names : list of str
-        Series to plot against it.
-
-    Returns
-    -------
-    None : None
-    """
-    import plotly.graph_objects as go
-
-    figure = go.Figure()
-    x_values = series[x_name]
-
-    for name in y_names:
-        y_values = series[name]
-        length = min(len(x_values), len(y_values))
-        figure.add_trace(go.Scatter(x=x_values[:length], y=y_values[:length],
-                                    mode="lines", name=name))
-
-    figure.update_layout(xaxis_title=x_name, height=420,
-                         margin=dict(l=10, r=10, t=30, b=10))
-    st.plotly_chart(figure, width="stretch")
 
 
 # =============================================================================
@@ -322,7 +265,7 @@ def render_editor(connection, row, identity, config: DatabaseAppConfig) -> None:
     permitted = may_edit(connection, row["entity_id"], identity.name,
                          identity.is_admin)
 
-    with st.expander("Correct this entry"):
+    with st.expander("Correct This Entry", expanded=False):
         if not permitted:
             st.info(f"Owned by **{row['owner']}**. Only the owner or an admin "
                     f"may correct it.")
@@ -383,6 +326,48 @@ def coerce_typed(text: str):
         return stripped
 
 
+def render_entity_picker(connection, entity_id: str) -> str:
+    """
+    Offer matching entries as the user types part of an id.
+
+    Typing ``NB-6`` should present every entry that starts that way rather than
+    requiring the whole id to be remembered and spelled correctly.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+    entity_id : str
+        Entry currently open, shown as the field's initial content.
+
+    Returns
+    -------
+    chosen : str
+        The entry the user picked, or an empty string if they have not picked
+        one yet.
+    """
+    typed = st.text_input("Find an Entry", value=entity_id or "",
+                          placeholder="Start typing an ID, e.g. NB-6",
+                          key="entity_search")
+
+    if not typed or typed == entity_id:
+        return ""
+
+    matches = search_entity_ids(connection, typed)
+
+    if not matches:
+        st.caption(f"No entry matches '{typed}'.")
+        return ""
+
+    # A single exact match needs no further choosing.
+    if matches == [typed]:
+        return typed
+
+    return st.selectbox(f"{len(matches)} matching entries", matches,
+                        index=None, placeholder="Select an entry…",
+                        key="entity_matches") or ""
+
+
 # =============================================================================
 # Entry point
 # =============================================================================
@@ -406,12 +391,12 @@ def render_entity(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
     entity_id = (st.query_params.get(ENTITY_PARAMETER)
                  or st.session_state.get(SELECTED_ENTITY_KEY))
 
-    typed = st.text_input("Entry id", value=entity_id or "")
-    if typed and typed != entity_id:
-        open_entity(typed)
+    chosen = render_entity_picker(connection, entity_id)
+    if chosen and chosen != entity_id:
+        open_entity(chosen)
 
     if not entity_id:
-        st.info("Choose an entry from Browse & Search, or type an id above.")
+        st.info("Search for an entry above, or choose one from Browse & Search.")
         return
 
     row = read_entity(connection, entity_id)
@@ -420,8 +405,9 @@ def render_entity(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
         return
 
     st.title(row["entity_id"])
-    st.caption(f"{row['entity_type']}  ·  group {row['display_group'] or '—'}  "
-               f"·  owner {row['owner']}  ·  updated {row['updated_at'][:19]}")
+    st.caption(f"{display_entity_type(row['entity_type'])}  ·  "
+               f"Group: {row['display_group'] or '—'}  ·  "
+               f"Owner: {row['owner']}  ·  Updated: {row['updated_at'][:19]}")
 
     versions = read_versions(connection, row["base_id"])
     if len(versions) > 1:

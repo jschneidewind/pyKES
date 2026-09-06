@@ -373,7 +373,8 @@ def split_identity_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
 
 def write_payload(experiment: Experiment,
                   paths: IndexPaths,
-                  entity_id: str) -> tuple:
+                  entity_id: str,
+                  plotting_instruction: Optional[Dict[str, Any]] = None) -> tuple:
     """
     Write one experiment out as a standalone, compressed HDF5 payload.
 
@@ -390,6 +391,10 @@ def write_payload(experiment: Experiment,
         Filesystem layout of the database.
     entity_id : str
         Id the payload is named after.
+    plotting_instruction : dict, optional
+        The upload's plotting instructions, carried into the payload so it can
+        describe its own curves. Without them a payload loads as data with no
+        way to know which series form a meaningful plot.
 
     Returns
     -------
@@ -402,7 +407,8 @@ def write_payload(experiment: Experiment,
     """
     payload_path = paths.payload_directory / f"{entity_id}.h5"
 
-    single = ExperimentalDataset(experiments={experiment.experiment_name: experiment})
+    single = ExperimentalDataset(experiments={experiment.experiment_name: experiment},
+                                plotting_instruction=plotting_instruction or {})
     single.save_to_hdf5(str(payload_path), compression=PAYLOAD_COMPRESSION,
                         verbose=False)
 
@@ -634,7 +640,8 @@ def ingest_hdf5_upload(connection,
             upload_id=upload_id,
             display_group=experiment.group,
             color=experiment.color,
-            payload=write_payload(experiment, paths, entity_id),
+            payload=write_payload(experiment, paths, entity_id,
+                                  dataset.plotting_instruction),
             provenance=experiment.version,
         )
 

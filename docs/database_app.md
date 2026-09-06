@@ -35,7 +35,12 @@ notice does not appear, and `allow_development_login` should be set to False.
 | **Contribute** | Upload a measured batch or a metadata sheet |
 | **Admin** | Reference health, key drift, result conflicts, the upload log |
 
-### Browse
+### Browse — search, then compare
+
+Comparing a subset is the main thing the database is for: every test of one
+catalyst, every catalyst descended from one semiconductor under one set of
+conditions. So the page is built around narrowing to a subset and then plotting
+it.
 
 Every filter is generated from the metadata-key registry, scoped to the kind of
 entry being searched. Nothing is configured by hand: a spreadsheet column that
@@ -44,33 +49,46 @@ been ingested, and the widget follows from the type the registry observed —
 a slider for numbers, a multiselect for low-cardinality text, a contains box for
 free text.
 
-**Inherited fields appear as ordinary filters**, captioned with the reference
-path they came through. In the seeded demo, an experiment search offers 23
-facets of which 13 are inherited:
+**Filters are grouped by how far away the field lives**, in that order: the
+entry's own metadata first, then one reference away, then two. That is the order
+somebody narrowing a search thinks in — what was done in this experiment, then
+what it was made from. Every filter is shown; there is no "more filters" fold,
+because the inherited ones are exactly what a comparison is usually built from
+and hiding them hid the point of the page.
 
-```
-Photodeposition wavelength [nm]     range    via catalyst_batch
-Cocatalyst                          select   via catalyst_batch
-Synthesis temperature [°C]          range    via catalyst_batch/finished_semiconductor
-Supplier                            select   via catalyst_batch/finished_semiconductor/precursor_chemical_a
-```
+**Once the filtered set is small enough, its traces are plotted.** Below
+`MAX_COMPARISON_ENTRIES` (50) matches the *whole* matching set — not just the
+visible page — is loaded and drawn by the same
+`time_series_component` the processing app uses. The curve picker offers
+whatever the payloads declare. A second multiselect narrows what is drawn
+without touching the search, so a curve can be taken out of the plot while the
+result table stays as it is.
 
-The filter state is written into the query string, so **a search is a URL**. So
+The filter state is written into the query string **and read back from it**, so
+a search is a link that reproduces the same subset and the same comparison. So
 is an entry: `/Entity?entity=EXP-0001` opens it directly.
 
 ### Entity
 
-Own metadata and inherited metadata are shown as two tables, the inherited one
-carrying the path each value arrived through — so the provenance of every number
-is visible without leaving the page.
+A type-ahead finds an entry without the whole identifier having to be
+remembered: typing `NB-6` offers every entry that starts that way, prefix
+matches first.
+
+Own metadata, inherited metadata and results are each a collapsed expander, so
+the page opens on what an entry *is* and its references rather than on a wall of
+fields. The inherited table carries the path each value arrived through, so the
+provenance of every number is visible without leaving the page.
 
 The references panel works both ways. Downwards it is what the entry was made
 from; upwards it answers the question the group could not previously ask at all
 — opening a precursor lists every semiconductor made from it, and from there
 every batch and every experiment.
 
-An entry with a payload gets its traces plotted and can be downloaded as a
-standalone pyKES HDF5 file, which loads in the processing app unchanged.
+An entry with a payload gets its traces plotted by the same panel the browse
+page uses, with the entry selection switched off — comparing entries belongs on
+the browse page, where the filters decide the subset. The payload can be
+downloaded as a standalone pyKES HDF5 file, which loads in the processing app
+unchanged.
 
 The correction form is visible to everyone and enabled only for the owner or an
 admin. Because correcting a widely-referenced entry changes the effective
@@ -133,6 +151,25 @@ DatabaseAppConfig(
 )
 ```
 
+## Styling
+
+The palette is Streamlit's own theming, in `.streamlit/config.toml`: a dark base
+with green as the one accent, so green means *active, primary or healthy* rather
+than decoration. `database_app/styling.py` adds only what configuration cannot
+express — the typeface and a little spacing and weight — as one stylesheet
+applied at the top of every page. No custom components and no markup injected
+around widgets, so a Streamlit upgrade cannot silently break the layout.
+
+Two things that stylesheet must not do, both found by running it:
+
+* The font rule must not select `[class*="st-"]`. That also matches Streamlit's
+  Material icon spans, whose glyphs are ligatures of their own font, and
+  overriding it renders every expander with the literal text
+  `keyboard_arrow_right` instead of a caret.
+* The font is loaded from Google Fonts with a full system stack behind it. On an
+  instrument network that cannot reach the font host the page still renders
+  correctly, which is not hypothetical — it happened here.
+
 ## Two things worth knowing about the implementation
 
 **Connections are per thread.** Streamlit runs each session's script on a thread
@@ -158,3 +195,7 @@ checked against a fixed set rather than interpolated.
 * Key aliasing is reported on the admin page but not yet editable there.
 * Bulk correction — the `st.data_editor` patch flow from the plan — is not
   built; corrections are one field at a time on the entry page.
+* Comparison colours come from each experiment's own `color` metadata, as the
+  shared plotting component has always done. A batch whose entries all carry the
+  same colour plots as one indistinguishable band; colouring a comparison by a
+  chosen metadata field instead would be a better default.
