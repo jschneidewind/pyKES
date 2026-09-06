@@ -12,6 +12,7 @@ import streamlit as st
 
 from pyKES.database.index_query import (
     RESULT_PREFIX,
+    display_key,
     list_axis_options,
     property_map_data,
 )
@@ -30,24 +31,6 @@ MARKER_SIZE = 9
 MARKER_OPACITY = 0.75
 
 FIGURE_HEIGHT = 560
-
-
-def axis_label(key: str) -> str:
-    """
-    Render an axis key as a human-readable label.
-
-    Parameters
-    ----------
-    key : str
-        Metadata key or ``'result:<label>'``.
-
-    Returns
-    -------
-    label : str
-        Label with the result prefix removed and the reference path kept, since
-        the path is what says which entry the value came from.
-    """
-    return key[len(RESULT_PREFIX):] if key.startswith(RESULT_PREFIX) else key
 
 
 def render_property_map(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
@@ -82,13 +65,13 @@ def render_property_map(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
 
     left, middle, right = st.columns(3)
     x_key = left.selectbox("x axis", options, index=0,
-                           format_func=axis_label)
+                           format_func=display_key)
     y_key = middle.selectbox("y axis", options,
                              index=1 if len(options) > 1 else 0,
-                             format_func=axis_label)
+                             format_func=display_key)
     color_key = right.selectbox("Colour by", ["(none)"] + options,
                                 format_func=lambda key: (
-                                    key if key == "(none)" else axis_label(key)))
+                                    key if key == "(none)" else display_key(key)))
 
     frame = property_map_data(connection, x_key, y_key,
                               None if color_key == "(none)" else color_key,
@@ -102,8 +85,8 @@ def render_property_map(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
         frame, x="x", y="y",
         color="color" if "color" in frame.columns else None,
         hover_name="entity_id",
-        labels={"x": axis_label(x_key), "y": axis_label(y_key),
-                "color": axis_label(color_key) if color_key != "(none)" else ""},
+        labels={"x": display_key(x_key), "y": display_key(y_key),
+                "color": display_key(color_key) if color_key != "(none)" else ""},
     )
     figure.update_traces(marker=dict(size=MARKER_SIZE, opacity=MARKER_OPACITY))
     figure.update_layout(height=FIGURE_HEIGHT,

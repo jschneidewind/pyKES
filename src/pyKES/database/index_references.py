@@ -14,7 +14,7 @@ experiment's own ``Temperature [°C]`` and a precursor's own ``Temperature [°C]
 become two distinct keys, so the merge is *incapable* of collision. A flat merge
 would have to pick one and discard the other, which for a scientific record is
 not an acceptable failure mode. The path also carries the provenance: reading
-``catalyst_batch::finished_semiconductor::Synthesis temperature [°C]`` tells you
+``catalyst_batch/finished_semiconductor/Synthesis temperature [°C]`` tells you
 which entry the value came from.
 
 **The merge is materialised, not resolved at query time.** Answering the same
@@ -28,6 +28,7 @@ changes — which takes 0.2 ms to find and is done here.
 import json
 from typing import Any, Dict, List, Optional
 
+from pyKES.database.database_experiments import sanitize_key
 from pyKES.database.index_registry import coerce_index_value, qualify_key
 from pyKES.database.index_schema import MAX_REFERENCE_DEPTH
 
@@ -89,7 +90,10 @@ def extract_references(metadata: Dict[str, Any],
 
     for metadata_key, instruction in reference_instructions.items():
         role = instruction.get("role", metadata_key)
-        target = metadata.get(metadata_key)
+
+        # Stored metadata keys are escaped, so a declared column name has to be
+        # escaped the same way before it will match.
+        target = metadata.get(sanitize_key(metadata_key))
 
         if target is None or (isinstance(target, str) and not target.strip()):
             continue
@@ -256,7 +260,7 @@ def resolve_effective_metadata(connection,
 
     Each inherited key is prefixed with the role that reached it, recursively,
     so a value two hops away arrives as
-    ``'catalyst_batch::finished_semiconductor::Synthesis temperature [°C]'``.
+    ``'catalyst_batch/finished_semiconductor/Synthesis temperature [°C]'``.
     Because own keys stay bare and inherited keys always carry a prefix, no
     inherited value can ever displace an entity's own.
 

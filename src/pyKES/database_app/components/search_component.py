@@ -17,6 +17,7 @@ from pyKES.database.index_query import (
     Filter,
     RESULT_PREFIX,
     build_facets,
+    display_key,
     rows_to_frame,
     search_entities,
 )
@@ -217,7 +218,8 @@ def choose_columns(connection, entity_type: str, config: DatabaseAppConfig) -> l
     available = result_options + metadata_options
     default = [column for column in config.default_columns if column in available]
 
-    return st.multiselect("Columns", available, default=default)
+    return st.multiselect("Columns", available, default=default,
+                          format_func=display_key)
 
 
 def render_results(connection, rows, total: int, columns: list,

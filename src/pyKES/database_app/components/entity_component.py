@@ -13,7 +13,7 @@ import streamlit as st
 from pyKES.database.database_experiments import ExperimentalDataset
 from pyKES.database.index_ingest import may_edit, update_entity_metadata
 from pyKES.database.index_query import read_entity, read_neighbours, read_versions
-from pyKES.database.index_schema import ROLE_PATH_SEPARATOR
+from pyKES.database.index_registry import split_qualified_key
 from pyKES.database_app.config import DEFAULT_CONFIG, DatabaseAppConfig
 from pyKES.database_app.session import index_paths, open_shared_index, read_identity
 
@@ -56,12 +56,13 @@ def split_metadata(effective: dict, own: dict) -> tuple:
 
     for key, value in sorted(effective.items()):
         display = MISSING_PLACEHOLDER if value is None else value
+        role_path, leaf = split_qualified_key(key)
 
         if key in own:
-            own_rows.append({"Field": key, "Value": display})
+            own_rows.append({"Field": leaf, "Value": display})
         else:
-            path, _, leaf = key.rpartition(ROLE_PATH_SEPARATOR)
-            inherited_rows.append({"Field": leaf, "Value": display, "Via": path})
+            inherited_rows.append({"Field": leaf, "Value": display,
+                                   "Via": role_path})
 
     return own_rows, inherited_rows
 

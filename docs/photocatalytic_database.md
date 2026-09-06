@@ -245,7 +245,7 @@ CREATE TABLE metadata_keys (
   inferred_type   TEXT,          -- number | text | bool | date | mixed
   unit            TEXT,
   leaf_name       TEXT,          -- 'Synthesis temperature [degC]'
-  path            TEXT,          -- 'catalyst_batch::precursor::…' — NULL if own (§5.3)
+  path            TEXT,          -- 'catalyst_batch/precursor/…' — NULL if own (§5.3)
   occurrences     INTEGER,
   first_seen      TEXT,
   last_seen       TEXT,
@@ -379,24 +379,24 @@ reached it**:
 
 ```
 ABC-67  own        Irradiance [mW/cm2]                                    = 50
-        1 hop      catalyst_batch::Photodeposition wavelength [nm]         = 360
-        2 hops     catalyst_batch::precursor::Synthesis temperature [degC]  = 1150
-        3 hops     catalyst_batch::precursor::source::Supplier               = …
+        1 hop      catalyst_batch/Photodeposition wavelength [nm]         = 360
+        2 hops     catalyst_batch/precursor/Synthesis temperature [degC]  = 1150
+        3 hops     catalyst_batch/precursor/source/Supplier               = …
 ```
 
 Qualification is not decoration — it is what makes the merge **incapable of
 collision**. An experiment with its own `Temperature [degC]` and a precursor with
 its own `Temperature [degC]` produce `Temperature [degC]` and
-`catalyst_batch::precursor::Temperature [degC]`: two distinct, unambiguous keys.
+`catalyst_batch/precursor/Temperature [degC]`: two distinct, unambiguous keys.
 A flat merge would have to pick one and silently discard the other, which for a
 scientific record is not an acceptable failure mode.
 
 It also keeps provenance in the key itself: reading
-`catalyst_batch::precursor::Synthesis temperature [degC]` tells you exactly which
+`catalyst_batch/precursor/Synthesis temperature [degC]` tells you exactly which
 entry the 1150 °C came from and how it was reached.
 
 **Searching by leaf name.** Users think "Synthesis temperature", not
-"catalyst_batch::precursor::Synthesis temperature". The key registry (§4.3)
+"catalyst_batch/precursor/Synthesis temperature". The key registry (§4.3)
 therefore stores each key's leaf name alongside its full path, and the facet UI
 groups by leaf. When a leaf occurs at exactly one path — the common case — the
 user never sees the path at all. When it occurs at several, the facet

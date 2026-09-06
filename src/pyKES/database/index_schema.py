@@ -56,14 +56,14 @@ DEFAULT_ENTITY_TYPE = "other_entity"
 # =============================================================================
 
 # Separates the role names of a reference path from the metadata key it reaches,
-# e.g. 'catalyst_batch::finished_semiconductor::Synthesis temperature [°C]'.
+# e.g. 'catalyst_batch/finished_semiconductor/Synthesis temperature [°C]'.
 #
-# Not a slash: real metadata keys contain them ('Catalyst concentration [g/L]',
-# 'Irradiance A [mW/cm2]', 'Measurement phase [liquid/gas]'), so a slash
-# separator cannot be split back apart and produces labels like
-# 'L] via Catalyst concentration [g'. A key carrying the separator itself is
-# refused at ingestion rather than silently mis-split.
-ROLE_PATH_SEPARATOR = "::"
+# Real metadata keys contain slashes too ('Catalyst concentration [g/L]'), so a
+# stored key escapes its own slashes to `KEY_SLASH_PLACEHOLDER` first — the same
+# convention `save_nested_dict_to_hdf5` already uses to keep HDF5 paths
+# splittable. A slash in a stored key is therefore always a separator, and no
+# key has to be refused for containing one.
+ROLE_PATH_SEPARATOR = "/"
 
 # How far inherited metadata is followed. Chains in practice are three or four
 # hops; the cap exists so a malformed graph fails loudly instead of hanging.

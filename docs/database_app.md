@@ -51,8 +51,8 @@ facets of which 13 are inherited:
 ```
 Photodeposition wavelength [nm]     range    via catalyst_batch
 Cocatalyst                          select   via catalyst_batch
-Synthesis temperature [°C]          range    via catalyst_batch::finished_semiconductor
-Supplier                            select   via catalyst_batch::finished_semiconductor::precursor_chemical_a
+Synthesis temperature [°C]          range    via catalyst_batch/finished_semiconductor
+Supplier                            select   via catalyst_batch/finished_semiconductor/precursor_chemical_a
 ```
 
 The filter state is written into the query string, so **a search is a URL**. So

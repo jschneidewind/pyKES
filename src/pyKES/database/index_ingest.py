@@ -466,6 +466,12 @@ def insert_entity(connection,
             f"Unknown entity type '{entity_type}'; expected one of {ENTITY_TYPES}."
         )
 
+    # Escaping is enforced here rather than trusted from every caller, so a key
+    # containing a slash can never be stored raw and later mistaken for a
+    # reference path. `sanitize_key` is idempotent, so coercing again costs
+    # nothing on the ingestion path that has already done it.
+    metadata = coerce_index_mapping(metadata)
+
     now = datetime.now(timezone.utc).isoformat()
     provenance = provenance or {}
     external = provenance.get("external_version") or {}

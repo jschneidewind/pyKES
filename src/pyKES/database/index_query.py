@@ -15,7 +15,13 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from pyKES.database.index_registry import TYPE_BOOLEAN, TYPE_NUMBER, TYPE_TEXT
+from pyKES.database.database_experiments import sanitize_key
+from pyKES.database.index_registry import (
+    TYPE_BOOLEAN,
+    TYPE_NUMBER,
+    TYPE_TEXT,
+    split_qualified_key,
+)
 
 
 # =============================================================================
@@ -51,7 +57,10 @@ class Filter:
     Parameters
     ----------
     key : str
-        Column name, qualified metadata key, or ``'result:<label>'``.
+        Column name, *stored* metadata key, or ``'result:<label>'``. Stored
+        keys have their own slashes escaped, which is the form the registry and
+        `build_facets` report; `stored_metadata_key` converts a key written out
+        by hand.
     operator : {'between', 'in', 'contains', 'equals'}
         How ``value`` is compared.
     value : Any
@@ -61,6 +70,53 @@ class Filter:
     key: str
     operator: str
     value: Any
+
+
+def stored_metadata_key(key: str) -> str:
+    """
+    Convert a human-written metadata key into the form the index stores.
+
+    Only needed when building a filter by hand: every key that comes from the
+    registry, from `build_facets` or from `list_axis_options` is already stored
+    form.
+
+    Parameters
+    ----------
+    key : str
+        Metadata key as written on the entity, possibly containing slashes.
+
+    Returns
+    -------
+    stored : str
+        Key with its own slashes escaped.
+    """
+    return sanitize_key(key)
+
+
+def display_key(key: str) -> str:
+    """
+    Render a stored key the way a person wrote it.
+
+    The escaping that keeps reference paths splittable is storage detail, so it
+    is undone everywhere a key reaches the screen — a column header reading
+    ``Irradiance A [mW__SLASH__cm2]`` is not an improvement on the bug it fixed.
+
+    Parameters
+    ----------
+    key : str
+        Stored metadata key, possibly qualified, or ``'result:<label>'``.
+
+    Returns
+    -------
+    label : str
+        Key with its escaped slashes restored; a result label loses its prefix.
+    """
+    if key.startswith(RESULT_PREFIX):
+        return key[len(RESULT_PREFIX):]
+
+    role_path, leaf = split_qualified_key(key)
+
+    return f"{leaf}  ·  via {role_path}" if role_path else leaf
 
 
 def json_path(key: str) -> str:
@@ -296,10 +352,10 @@ def rows_to_frame(rows: List, columns: Optional[List[str]] = None):
 
         for column in columns or []:
             if column.startswith(RESULT_PREFIX):
-                record[column[len(RESULT_PREFIX):]] = results.get(
+                record[display_key(column)] = results.get(
                     column[len(RESULT_PREFIX):])
             else:
-                record[column] = effective.get(column)
+                record[display_key(column)] = effective.get(column)
 
         records.append(record)
 

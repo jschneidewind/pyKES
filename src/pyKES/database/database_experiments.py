@@ -77,10 +77,51 @@ class Experiment:
     processed_data: Dict[str, any]
     version: Dict[str, Any] = field(default_factory=dict)
 
-def _sanitize_hdf5_key(key: Any) -> str:
-    """Convert dict keys to HDF5-safe strings without breaking nested paths."""
+# Metadata keys routinely contain slashes — 'Catalyst concentration [g/L]',
+# 'Irradiance A [mW/cm2]' — while '/' is also the separator of a nested path.
+# Escaping the one inside the other keeps a joined path splittable, which is
+# what both the HDF5 layout and the database index rely on.
+KEY_SLASH_PLACEHOLDER = '__SLASH__'
+
+
+def sanitize_key(key: Any) -> str:
+    """
+    Escape a dict key so it can be joined into a slash-separated path.
+
+    Parameters
+    ----------
+    key : Any
+        Key to escape; non-strings are stringified, since uploads can carry
+        integer keys in nested dictionaries.
+
+    Returns
+    -------
+    escaped : str
+        Key with any slash replaced by `KEY_SLASH_PLACEHOLDER`.
+    """
     key_str = key if isinstance(key, str) else str(key)
-    return key_str.replace('/', '__SLASH__')
+
+    return key_str.replace('/', KEY_SLASH_PLACEHOLDER)
+
+
+def restore_key(key: str) -> str:
+    """
+    Reverse `sanitize_key` on one component of a split path.
+
+    Applied per component *after* splitting on the separator, never to a whole
+    path — the whole point is that the escaped slashes survive the split.
+
+    Parameters
+    ----------
+    key : str
+        One escaped path component.
+
+    Returns
+    -------
+    restored : str
+        Key as it was originally written.
+    """
+    return key.replace(KEY_SLASH_PLACEHOLDER, '/')
 
 
 def compression_arguments(value, compression):
@@ -123,7 +164,7 @@ def save_nested_dict_to_hdf5(group, data_dict, prefix="", compression=None):
         # Replace '/' in keys to avoid HDF5 path interpretation issues.
         # Data uploads can include integer keys in nested dicts; stringify them
         # before building an HDF5 path.
-        safe_key = _sanitize_hdf5_key(key)
+        safe_key = sanitize_key(key)
         full_key = f"{prefix}/{safe_key}" if prefix else safe_key
         
         if isinstance(value, np.ndarray):
@@ -207,7 +248,7 @@ def load_nested_dict_from_hdf5(group, prefix=""):
             # Build nested dictionary structure
             keys = key.split('/')
             # Restore '/' characters in keys
-            keys = [k.replace('__SLASH__', '/') for k in keys]
+            keys = [restore_key(k) for k in keys]
             
             current_dict = result
             for k in keys[:-1]:

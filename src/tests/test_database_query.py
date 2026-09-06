@@ -14,6 +14,7 @@ import pytest
 from pyKES.database.index_ingest import finalise_entity, insert_entity
 from pyKES.database.index_query import (
     Filter,
+    stored_metadata_key,
     RESULT_PREFIX,
     build_facets,
     build_predicate,
@@ -125,15 +126,21 @@ def test_searching_one_kind_of_entry(connection):
 def test_filtering_on_the_entitys_own_metadata(connection):
     rows, total = search_entities(
         connection, "experiment",
-        filters=[Filter("Irradiance A [mW/cm2]", "between", [25.0, 45.0])])
+        filters=[Filter(stored_metadata_key("Irradiance A [mW/cm2]"),
+                        "between", [25.0, 45.0])])
 
     assert {row["entity_id"] for row in rows} == {"EXP-3", "EXP-4"}
+
+
+def test_a_hand_written_key_is_converted_to_the_stored_form():
+    assert stored_metadata_key("Irradiance A [mW/cm2]") == \
+        "Irradiance A [mW__SLASH__cm2]"
 
 
 def test_filtering_one_reference_away(connection):
     rows, _ = search_entities(
         connection, "experiment",
-        filters=[Filter("catalyst_batch::Photodeposition wavelength [nm]",
+        filters=[Filter("catalyst_batch/Photodeposition wavelength [nm]",
                         "between", [360, 370])])
 
     assert {row["entity_id"] for row in rows} == {"EXP-1", "EXP-2", "EXP-3"}
@@ -143,7 +150,7 @@ def test_filtering_two_references_away(connection):
     # The question the whole design exists to answer.
     rows, _ = search_entities(
         connection, "experiment",
-        filters=[Filter("catalyst_batch::finished_semiconductor::"
+        filters=[Filter("catalyst_batch/finished_semiconductor/"
                         "Synthesis temperature [degC]", "between", [1100, 1200])])
 
     assert {row["entity_id"] for row in rows} == {"EXP-1", "EXP-2", "EXP-3"}
@@ -153,7 +160,7 @@ def test_combining_an_inherited_filter_with_an_own_one(connection):
     rows, _ = search_entities(
         connection, "experiment",
         filters=[
-            Filter("catalyst_batch::finished_semiconductor::"
+            Filter("catalyst_batch/finished_semiconductor/"
                    "Synthesis temperature [degC]", "between", [1100, 1200]),
             Filter("Measured Analyte [O2 or H2]", "in", ["O2"]),
         ])
@@ -226,7 +233,7 @@ def test_inherited_facets_carry_the_path_they_came_through(connection):
 
     assert facets["Photodeposition wavelength [nm]"].role_path == "catalyst_batch"
     assert (facets["Synthesis temperature [degC]"].role_path
-            == "catalyst_batch::finished_semiconductor")
+            == "catalyst_batch/finished_semiconductor")
 
 
 def test_a_constant_numeric_key_gets_no_slider(connection):
@@ -244,7 +251,7 @@ def test_a_constant_numeric_key_gets_no_slider(connection):
 def test_the_property_map_pairs_an_inherited_axis_with_a_result(connection):
     frame = property_map_data(
         connection,
-        x_key="catalyst_batch::finished_semiconductor::Synthesis temperature [degC]",
+        x_key="catalyst_batch/finished_semiconductor/Synthesis temperature [degC]",
         y_key=f"{RESULT_PREFIX}Max. rate (umol/s)",
         entity_type="experiment")
 
@@ -253,7 +260,8 @@ def test_the_property_map_pairs_an_inherited_axis_with_a_result(connection):
 
 
 def test_rows_lacking_an_axis_are_dropped(connection):
-    frame = property_map_data(connection, x_key="Irradiance A [mW/cm2]",
+    frame = property_map_data(connection,
+                              x_key=stored_metadata_key("Irradiance A [mW/cm2]"),
                               y_key="Not measured anywhere",
                               entity_type="experiment")
 
@@ -294,9 +302,11 @@ def test_statistics_count_each_kind(connection):
 
 def test_the_results_table_carries_the_requested_columns(connection):
     rows, _ = search_entities(connection, "experiment", limit=2)
-    frame = rows_to_frame(rows, ["Irradiance A [mW/cm2]",
-                                 f"{RESULT_PREFIX}Max. rate (umol/s)"])
+    stored = stored_metadata_key("Irradiance A [mW/cm2]")
+    frame = rows_to_frame(rows, [stored, f"{RESULT_PREFIX}Max. rate (umol/s)"])
 
+    # Looked up by the stored key, but headed by the name a person wrote: the
+    # escaping is storage detail and never reaches the screen.
     assert list(frame.columns) == ["entity_id", "entity_type", "group", "owner",
                                    "Irradiance A [mW/cm2]", "Max. rate (umol/s)"]
     assert frame["Max. rate (umol/s)"].notna().all()
