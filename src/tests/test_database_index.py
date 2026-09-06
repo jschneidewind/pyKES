@@ -157,13 +157,21 @@ def test_coerced_metadata_survives_a_json_round_trip():
 # Qualified keys
 # =============================================================================
 
-def test_own_keys_have_no_role_path_even_when_they_contain_a_slash():
-    role_path, leaf = split_qualified_key("Irradiance [mW/cm2]")
+def test_a_key_containing_a_slash_is_not_mistaken_for_an_inherited_one():
+    # Real metadata keys contain slashes. Splitting on one would turn this into
+    # a role path of 'Catalyst concentration [g' and a leaf of 'L]', which is
+    # what the facet labels used to read.
+    role_path, leaf = split_qualified_key("Catalyst concentration [g/L]")
 
-    # A key containing a slash still splits, which is why the registry records
-    # the role path rather than trying to re-derive it later.
-    assert leaf == "cm2]"
-    assert role_path == "Irradiance [mW"
+    assert role_path is None
+    assert leaf == "Catalyst concentration [g/L]"
+
+
+def test_a_metadata_key_carrying_the_separator_is_refused():
+    from pyKES.database.index_registry import coerce_index_mapping
+
+    with pytest.raises(ValueError, match="may not contain"):
+        coerce_index_mapping({"Ratio::A": 1})
 
 
 def test_inherited_keys_carry_the_path_that_reached_them(connection):
@@ -172,9 +180,9 @@ def test_inherited_keys_carry_the_path_that_reached_them(connection):
     effective = resolve_effective_metadata(connection, "ABC-67")
 
     assert effective["Irradiance [mW/cm2]"] == 50
-    assert effective["catalyst_batch/Photodeposition wavelength [nm]"] == 360
+    assert effective["catalyst_batch::Photodeposition wavelength [nm]"] == 360
     assert effective[
-        "catalyst_batch/finished_semiconductor/Synthesis temperature [degC]"] == 1150
+        "catalyst_batch::finished_semiconductor::Synthesis temperature [degC]"] == 1150
 
 
 def test_the_target_query_finds_the_experiment_two_hops_away(connection):
@@ -183,10 +191,10 @@ def test_the_target_query_finds_the_experiment_two_hops_away(connection):
     found = connection.execute(
         """SELECT entity_id FROM entities WHERE entity_type = 'experiment'
              AND CAST(json_extract(effective,
-                 '$."catalyst_batch/finished_semiconductor/Synthesis temperature [degC]"')
+                 '$."catalyst_batch::finished_semiconductor::Synthesis temperature [degC]"')
                  AS REAL) = 1150
              AND CAST(json_extract(effective,
-                 '$."catalyst_batch/Photodeposition wavelength [nm]"') AS REAL) = 360"""
+                 '$."catalyst_batch::Photodeposition wavelength [nm]"') AS REAL) = 360"""
     ).fetchall()
 
     assert [row["entity_id"] for row in found] == ["ABC-67"]
@@ -206,7 +214,7 @@ def test_own_metadata_is_never_displaced_by_an_inherited_key(connection):
     effective = resolve_effective_metadata(connection, "EXP-1")
 
     assert effective["Temperature [degC]"] == 25
-    assert effective["precursor/Temperature [degC]"] == 1150
+    assert effective["precursor::Temperature [degC]"] == 1150
 
 
 def test_presentation_fields_are_not_inherited(connection):
@@ -220,9 +228,9 @@ def test_presentation_fields_are_not_inherited(connection):
 
     effective = resolve_effective_metadata(connection, "EXP-2")
 
-    assert "precursor/color" not in effective
-    assert "precursor/group" not in effective
-    assert effective["precursor/Purity [%]"] == 99.9
+    assert "precursor::color" not in effective
+    assert "precursor::group" not in effective
+    assert effective["precursor::Purity [%]"] == 99.9
 
 
 # =============================================================================
@@ -268,7 +276,7 @@ def test_a_forward_reference_resolves_when_its_target_arrives(connection):
     finalise_entity(connection, "EXP-3", {"Catalyst Batch": "LATE-1"}, CHAIN_REFERENCES)
 
     assert len(read_dangling_references(connection)) == 1
-    assert "catalyst_batch/Photodeposition wavelength [nm]" not in \
+    assert "catalyst_batch::Photodeposition wavelength [nm]" not in \
         resolve_effective_metadata(connection, "EXP-3")
 
     # The batch arrives later and the experiment picks its metadata up.
@@ -281,7 +289,7 @@ def test_a_forward_reference_resolves_when_its_target_arrives(connection):
     effective = json.loads(connection.execute(
         "SELECT effective FROM entities WHERE entity_id = 'EXP-3'"
     ).fetchone()["effective"])
-    assert effective["catalyst_batch/Photodeposition wavelength [nm]"] == 405
+    assert effective["catalyst_batch::Photodeposition wavelength [nm]"] == 405
 
 
 def test_a_diamond_reaches_the_shared_ancestor_by_both_paths(connection):
@@ -302,8 +310,8 @@ def test_a_diamond_reaches_the_shared_ancestor_by_both_paths(connection):
     effective = resolve_effective_metadata(connection, "EXP-D")
 
     # Both paths survive, because each carries its own role prefix.
-    assert effective["batch_one/precursor/Supplier"] == "Acme"
-    assert effective["batch_two/precursor/Supplier"] == "Acme"
+    assert effective["batch_one::precursor::Supplier"] == "Acme"
+    assert effective["batch_two::precursor::Supplier"] == "Acme"
 
 
 def test_a_cycle_is_detected_rather_than_hung(connection):
@@ -318,7 +326,7 @@ def test_a_cycle_is_detected_rather_than_hung(connection):
     effective = resolve_effective_metadata(connection, "LOOP-A")
 
     assert effective["A"] == 1
-    assert effective["next/B"] == 2
+    assert effective["next::B"] == 2
     assert set(find_cyclic_entities(connection)) == {"LOOP-A", "LOOP-B"}
 
 
@@ -335,7 +343,7 @@ def test_resolution_stops_at_the_depth_cap(connection):
                         {"Next": {"role": "next"}})
 
     effective = resolve_effective_metadata(connection, "N-0")
-    deepest = max(key.count("next/") for key in effective if "next/" in key)
+    deepest = max(key.count("next::") for key in effective if "next::" in key)
 
     assert deepest <= MAX_REFERENCE_DEPTH
 
@@ -355,7 +363,7 @@ def test_editing_an_ancestor_recomputes_every_descendant(connection):
     ).fetchone()["effective"])
 
     assert effective[
-        "catalyst_batch/finished_semiconductor/Synthesis temperature [degC]"] == 1200
+        "catalyst_batch::finished_semiconductor::Synthesis temperature [degC]"] == 1200
 
 
 # =============================================================================
@@ -426,7 +434,7 @@ def test_one_leaf_appears_at_one_path_per_entity_type(connection):
     for entity_type, expected_path in [
         ("finished_semiconductor", None),
         ("catalyst_batch", "finished_semiconductor"),
-        ("experiment", "catalyst_batch/finished_semiconductor"),
+        ("experiment", "catalyst_batch::finished_semiconductor"),
     ]:
         scoped = read_metadata_keys(connection,
                                     leaf_name="Synthesis temperature [degC]",
@@ -570,7 +578,7 @@ def test_entity_sheet_ingestion_links_the_chain(connection, paths, tmp_path):
     effective = json.loads(connection.execute(
         "SELECT effective FROM entities WHERE entity_id = 'EXP-A'").fetchone()["effective"])
 
-    assert effective["catalyst_batch/Photodeposition wavelength [nm]"] == 365
+    assert effective["catalyst_batch::Photodeposition wavelength [nm]"] == 365
 
 
 def test_a_sheet_without_the_identifier_column_is_refused(connection, paths, tmp_path):

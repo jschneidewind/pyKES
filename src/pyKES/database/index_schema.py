@@ -56,8 +56,14 @@ DEFAULT_ENTITY_TYPE = "other_entity"
 # =============================================================================
 
 # Separates the role names of a reference path from the metadata key it reaches,
-# e.g. 'catalyst_batch/finished_semiconductor/Synthesis temperature [°C]'.
-ROLE_PATH_SEPARATOR = "/"
+# e.g. 'catalyst_batch::finished_semiconductor::Synthesis temperature [°C]'.
+#
+# Not a slash: real metadata keys contain them ('Catalyst concentration [g/L]',
+# 'Irradiance A [mW/cm2]', 'Measurement phase [liquid/gas]'), so a slash
+# separator cannot be split back apart and produces labels like
+# 'L] via Catalyst concentration [g'. A key carrying the separator itself is
+# refused at ingestion rather than silently mis-split.
+ROLE_PATH_SEPARATOR = "::"
 
 # How far inherited metadata is followed. Chains in practice are three or four
 # hops; the cap exists so a malformed graph fails loudly instead of hanging.

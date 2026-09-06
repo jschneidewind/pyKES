@@ -83,8 +83,8 @@ recursively:
 
 ```
 EA-555   own      Irradiance A [mW/cm2]                                   = 12
-         1 hop    catalyst_batch/Photodeposition wavelength [nm]          = 365
-         2 hops   catalyst_batch/finished_semiconductor/
+         1 hop    catalyst_batch::Photodeposition wavelength [nm]          = 365
+         2 hops   catalyst_batch::finished_semiconductor::
                       Synthesis temperature [°C]                          = 1150
 ```
 
@@ -161,7 +161,7 @@ would notice.
 ### Leaf lookup must be scoped by entity type
 
 Users think *"Synthesis temperature"*, not
-*"catalyst_batch/finished_semiconductor/Synthesis temperature"*. But in a chain
+*"catalyst_batch::finished_semiconductor::Synthesis temperature"*. But in a chain
 one leaf necessarily appears at **one path per entity type** — bare on the
 semiconductor, one hop away on the batch, two hops away on the experiment — so
 an unscoped lookup returns all three:
@@ -172,7 +172,7 @@ read_metadata_keys(connection, leaf_name='Synthesis temperature [°C]')
 
 read_metadata_keys(connection, leaf_name='Synthesis temperature [°C]',
                    entity_type='experiment')
-# 1 row: catalyst_batch/finished_semiconductor/Synthesis temperature [°C]
+# 1 row: catalyst_batch::finished_semiconductor::Synthesis temperature [°C]
 ```
 
 A facet built for the experiment search passes `entity_type` and gets the single
@@ -303,10 +303,10 @@ predicates on one row:
 SELECT entity_id FROM entities
  WHERE entity_type = 'experiment'
    AND CAST(json_extract(effective,
-       '$."catalyst_batch/finished_semiconductor/Synthesis temperature [°C]"')
+       '$."catalyst_batch::finished_semiconductor::Synthesis temperature [°C]"')
        AS REAL) = 1150
    AND CAST(json_extract(effective,
-       '$."catalyst_batch/Photodeposition wavelength [nm]"') AS REAL) = 365;
+       '$."catalyst_batch::Photodeposition wavelength [nm]"') AS REAL) = 365;
 -- EA-555
 ```
 
@@ -337,7 +337,7 @@ frequently filtered key can be promoted to an indexed generated column:
 ```sql
 ALTER TABLE entities ADD COLUMN synthesis_temperature REAL
   GENERATED ALWAYS AS (CAST(json_extract(effective,
-    '$."catalyst_batch/finished_semiconductor/Synthesis temperature [°C]"') AS REAL))
+    '$."catalyst_batch::finished_semiconductor::Synthesis temperature [°C]"') AS REAL))
   VIRTUAL;
 CREATE INDEX idx_synthesis_temperature ON entities(synthesis_temperature);
 ANALYZE;

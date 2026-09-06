@@ -113,7 +113,20 @@ def coerce_index_mapping(mapping: Dict[str, Any]) -> Dict[str, Any]:
     -------
     coerced : dict
         Mapping with the same keys and storable values.
+
+    Raises
+    ------
+    ValueError
+        If a key contains the role-path separator, which would make an
+        inherited copy of it impossible to split back apart. Refused here
+        rather than mis-labelled in the interface later.
     """
+    offending = [key for key in mapping if ROLE_PATH_SEPARATOR in str(key)]
+    if offending:
+        raise ValueError(
+            f"Metadata keys may not contain '{ROLE_PATH_SEPARATOR}': {offending}"
+        )
+
     return {str(key): coerce_index_value(value) for key, value in mapping.items()}
 
 
@@ -175,14 +188,14 @@ def split_qualified_key(key: str) -> tuple:
     Separate a qualified metadata key into its role path and its leaf name.
 
     Inherited keys carry the path that reached them, so
-    ``'catalyst_batch/finished_semiconductor/Synthesis temperature [°C]'``
+    ``'catalyst_batch::finished_semiconductor::Synthesis temperature [°C]'``
     splits into that role path and ``'Synthesis temperature [°C]'``. An
     entity's own keys have no role path.
 
-    Metadata keys can themselves contain a slash — ``'Irradiance [mW/cm2]'`` —
-    so the leaf is taken as everything after the last role separator only when
-    the key actually carries a role prefix, which is decided by the caller
-    prefixing it.
+    The separator is ``::`` rather than ``/`` precisely so this is
+    unambiguous: real metadata keys contain slashes, and splitting on one turns
+    ``'Catalyst concentration [g/L]'`` into a role path of
+    ``'Catalyst concentration [g'``.
 
     Parameters
     ----------
@@ -241,8 +254,8 @@ def register_metadata_keys(connection,
     The entity types a key occurs on are recorded too, because in a reference
     chain one leaf name necessarily appears at several paths: a synthesis
     temperature is ``Synthesis temperature`` on the semiconductor,
-    ``finished_semiconductor/Synthesis temperature`` on the batch made from it,
-    and ``catalyst_batch/finished_semiconductor/Synthesis temperature`` on the
+    ``finished_semiconductor::Synthesis temperature`` on the batch made from it,
+    and ``catalyst_batch::finished_semiconductor::Synthesis temperature`` on the
     experiment. Scoping by entity type is what reduces that back to one path per
     kind of entry, so a facet on the experiment search offers a single filter.
 
@@ -398,7 +411,7 @@ def read_metadata_keys(connection,
 
     Searching by leaf name is what lets a user filter on ``Synthesis
     temperature [°C]`` without knowing it is reached through
-    ``catalyst_batch/finished_semiconductor``. A leaf in a reference chain
+    ``catalyst_batch::finished_semiconductor``. A leaf in a reference chain
     resolves to one key *per entity type*, not one overall, so a facet built for
     the experiment search should pass ``entity_type='experiment'`` and will then
     usually get a single path back.
