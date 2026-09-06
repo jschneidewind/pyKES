@@ -1,0 +1,20 @@
+# Fallback schema for anything that does not fit the other kinds. Deliberately
+# almost empty: an entry of this type is checked for nothing beyond a name, so
+# something unusual can be recorded now and given a proper schema later.
+
+entity_type: other_entity
+label: Other entity
+identifier_field: Experiment
+description: Anything the other kinds do not cover.
+
+fields:
+  - name: Description
+    type: text
+    required: true
+
+  - name: Active
+    type: boolean
+    default: true
+
+  - name: Notes
+    type: text

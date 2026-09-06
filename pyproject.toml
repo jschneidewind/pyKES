@@ -32,7 +32,8 @@ dependencies = [
     "matplotlib",
     "scipy",
     "h5py",
-    "openpyxl",  
+    "openpyxl",
+    "pyyaml",
 ]
 
 [project.urls]

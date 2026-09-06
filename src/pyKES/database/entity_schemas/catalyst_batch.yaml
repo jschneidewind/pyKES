@@ -1,0 +1,58 @@
+# Metadata schema for a catalyst batch — a semiconductor after cocatalyst
+# loading. See experiment.yaml for what the keys mean.
+
+entity_type: catalyst_batch
+label: Catalyst batch
+identifier_field: Experiment
+description: A semiconductor after cocatalyst deposition, as tested.
+
+fields:
+  - name: Finished Semiconductor
+    type: reference
+    role: finished_semiconductor
+    required: true
+
+  - name: Loading method [photodeposition/wet impregnation]
+    type: select
+    options: [photodeposition, wet impregnation]
+    required: true
+
+  - name: Photodeposition wavelength [nm]
+    type: number
+    unit: nm
+
+  - name: Photodeposition time [min]
+    type: number
+    unit: min
+
+  - name: Co-catalyst A
+    type: multiselect
+    options: [Rh, Cr, Pt, Ru, Ir, Co, Ni, Au]
+    help: Elements deposited together as the first cocatalyst.
+
+  - name: Co-catalyst A loading [wt%]
+    type: number
+    unit: wt%
+
+  - name: Co-catalyst B
+    type: multiselect
+    options: [Rh, Cr, Pt, Ru, Ir, Co, Ni, Au]
+
+  - name: Co-catalyst B loading [wt%]
+    type: number
+    unit: wt%
+
+  - name: Coating [coating material]
+    type: select
+    options: [none, SiOx, TiOx, Al2O3]
+
+  - name: Coating loading [wt%]
+    type: number
+    unit: wt%
+
+  - name: Active
+    type: boolean
+    default: true
+
+  - name: Notes
+    type: text

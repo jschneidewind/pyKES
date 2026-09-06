@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
 
+from pyKES.database.entity_schema import DEFAULT_SCHEMA_DIRECTORY, load_entity_schemas
+
 
 # =============================================================================
 # Where the data lives
@@ -63,6 +65,10 @@ class DatabaseAppConfig:
     allow_development_login : bool
         Whether to fall back to ``DEVELOPMENT_USER`` when no proxy header is
         present. Must be False in a deployment.
+    schema_directory : Path
+        Directory of the per-entity-type metadata schemas. Defaults to the ones
+        shipped with pyKES; a deployment maintaining its own copy points this at
+        it, so the group can edit its vocabulary without touching the package.
     """
 
     title: str = "Photocatalysis Database"
@@ -74,39 +80,25 @@ class DatabaseAppConfig:
     reference_instructions_by_type: Dict[str, Any] = field(default_factory=dict)
     page_size: int = 50
     allow_development_login: bool = True
+    schema_directory: Path = DEFAULT_SCHEMA_DIRECTORY
 
     def __post_init__(self) -> None:
         self.data_root = Path(self.data_root)
+        self.schema_directory = Path(self.schema_directory)
 
 
 # =============================================================================
 # The group's own wiring
 # =============================================================================
 
-# Which spreadsheet column of each kind of entry names another entry. This is
-# the one piece of the deployment that encodes the group's own chain, and it is
-# offered as a default on the upload page rather than hard-coded into ingestion.
+# Which column of each kind of entry names another entry. Derived from the
+# schema files rather than written twice: a field of type `reference` already
+# says which column it is and what role the link takes, so a second hard-coded
+# copy here could only ever disagree with it.
 GROUP_REFERENCE_INSTRUCTIONS = {
-    "experiment": {
-        "Catalyst Batch [experiment no.]": {"role": "catalyst_batch"},
-    },
-    "catalyst_batch": {
-        "Finished Semiconductor": {"role": "finished_semiconductor"},
-    },
-    "finished_semiconductor": {
-        "Precursor Chemical A": {"role": "precursor_chemical_a"},
-        "Precursor Chemical B": {"role": "precursor_chemical_b"},
-    },
-    "precursor_semiconductor": {
-        "Precursor Chemical A": {"role": "precursor_chemical_a"},
-        "Precursor Chemical B": {"role": "precursor_chemical_b"},
-    },
-    "precursor_chemical": {
-        "Commercial Chemical": {"role": "commercial_chemical"},
-    },
-    "stock_solution": {
-        "Commercial Chemical": {"role": "commercial_chemical"},
-    },
+    entity_type: schema.reference_instructions()
+    for entity_type, schema in load_entity_schemas().items()
+    if schema.reference_instructions()
 }
 
 DEFAULT_CONFIG = DatabaseAppConfig(

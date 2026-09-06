@@ -1,0 +1,35 @@
+# PLACEHOLDER schema for a purchased chemical. Replace the fields with the
+# group's own.
+
+entity_type: commercial_chemical
+label: Commercial chemical
+identifier_field: Experiment
+description: A chemical bought in, as delivered.
+
+fields:
+  - name: Supplier
+    type: select
+    options: [Sigma-Aldrich, Merck, Alfa Aesar, TCI, Thermo Fisher, Other]
+    required: true
+    help: PLACEHOLDER — confirm the group's suppliers.
+
+  - name: Product number
+    type: text
+
+  - name: Lot number
+    type: text
+
+  - name: Purity [%]
+    type: number
+    unit: '%'
+
+  - name: Storage
+    type: select
+    options: [Ambient, Refrigerated, Inert atmosphere, Desiccator]
+
+  - name: Active
+    type: boolean
+    default: true
+
+  - name: Notes
+    type: text

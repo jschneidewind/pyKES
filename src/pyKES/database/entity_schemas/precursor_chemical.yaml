@@ -1,0 +1,32 @@
+# PLACEHOLDER schema for a precursor chemical prepared in-house. Replace the
+# fields with the group's own.
+
+entity_type: precursor_chemical
+label: Precursor chemical
+identifier_field: Experiment
+description: A chemical prepared in-house and used in a synthesis.
+
+fields:
+  - name: Commercial Chemical
+    type: reference
+    role: commercial_chemical
+    help: The purchased chemical this was prepared from, where there is one.
+
+  - name: Preparation route
+    type: text
+    help: PLACEHOLDER — free text until the group's routes are settled.
+
+  - name: Purity [%]
+    type: number
+    unit: '%'
+
+  - name: Batch size [g]
+    type: number
+    unit: g
+
+  - name: Active
+    type: boolean
+    default: true
+
+  - name: Notes
+    type: text

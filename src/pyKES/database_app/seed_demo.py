@@ -46,7 +46,7 @@ TRACE_POINTS = 900
 SYNTHESIS_TEMPERATURES = (1000, 1050, 1100, 1150, 1200)
 PHOTODEPOSITION_WAVELENGTHS = (365, 405, 455)
 IRRADIANCES = (12.0, 25.0, 44.25, 80.0, 120.0)
-COCATALYSTS = ("Rh", "Rh/Cr", "Pt", "none")
+COCATALYSTS = ("Rh", "Cr", "Pt", "Ru")
 OPERATORS = ("ae", "nb", "mz", "vsa")
 
 # Curves are coloured by the experiment's own colour, so a demo whose entries
@@ -114,6 +114,7 @@ def build_semiconductor_sheet(directory: Path, generator) -> Path:
             "group": "Reference",
             "Precursor Chemical A": f"BC-{(index % PRECURSOR_COUNT) + 1}",
             "Precursor Chemical B": f"BC-{((index + 1) % PRECURSOR_COUNT) + 1}",
+            "Catalyst material": "Al:SrTiO3",
             "Synthesis temperature [°C]": int(
                 generator.choice(SYNTHESIS_TEMPERATURES)),
             "Synthesis route": ("Osterloh", "Lercher")[index % 2],
@@ -148,11 +149,13 @@ def build_batch_sheet(directory: Path, generator) -> Path:
             "Experiment": f"ABC-{index + 1:03d}",
             "group": "Reference",
             "Finished Semiconductor": f"SEMI-{(index % SEMICONDUCTOR_COUNT) + 1:03d}",
+            "Loading method [photodeposition/wet impregnation]": str(
+                generator.choice(("photodeposition", "wet impregnation"))),
             "Photodeposition wavelength [nm]": int(
                 generator.choice(PHOTODEPOSITION_WAVELENGTHS)),
             "Photodeposition time [min]": int(generator.choice((20, 30, 45))),
-            "Cocatalyst": str(generator.choice(COCATALYSTS)),
-            "Cocatalyst loading [wt%]": float(
+            "Co-catalyst A": str(generator.choice(COCATALYSTS)),
+            "Co-catalyst A loading [wt%]": float(
                 generator.choice((0.05, 0.1, 0.2, 0.5))),
             "Notes": "",
         })
@@ -211,6 +214,8 @@ def build_experiment_batch(directory: Path, generator) -> Path:
                     generator.choice((0.5, 1.0, 2.0))),
                 "Liquid phase volume [mL]": 2,
                 "Measured Analyte [O2 or H2]": str(generator.choice(("O2", "H2"))),
+                "Measurement phase [liquid/gas]": str(
+                    generator.choice(("liquid", "gas"))),
                 "Active": True,
                 "Operator": str(generator.choice(OPERATORS)),
                 "Notes": "",

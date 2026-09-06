@@ -489,7 +489,7 @@ def test_hdf5_upload_is_split_into_payloads_and_indexed(connection, paths, tmp_p
                  index_instructions={"Max rate": {"result": "processed_data/max_rate_umol_s"}}
                  ).save_to_hdf5(str(source), verbose=False)
 
-    report = ingest_hdf5_upload(connection, paths, source, "alice")
+    report = ingest_hdf5_upload(connection, paths, source, "alice", schemas={})
 
     assert sorted(report.added) == ["EXP-A", "EXP-B"]
     assert (paths.payload_directory / "EXP-A.h5").exists()
@@ -502,7 +502,7 @@ def test_hdf5_upload_is_split_into_payloads_and_indexed(connection, paths, tmp_p
 def test_a_payload_is_independently_a_valid_dataset(connection, paths, tmp_path):
     source = tmp_path / "batch.h5"
     make_dataset(["EXP-A"]).save_to_hdf5(str(source), verbose=False)
-    ingest_hdf5_upload(connection, paths, source, "alice")
+    ingest_hdf5_upload(connection, paths, source, "alice", schemas={})
 
     reloaded = ExperimentalDataset.load_from_hdf5(
         str(paths.payload_directory / "EXP-A.h5"))
@@ -516,8 +516,8 @@ def test_reingesting_the_same_file_changes_nothing(connection, paths, tmp_path):
     source = tmp_path / "batch.h5"
     make_dataset(["EXP-A"]).save_to_hdf5(str(source), verbose=False)
 
-    ingest_hdf5_upload(connection, paths, source, "alice")
-    second = ingest_hdf5_upload(connection, paths, source, "alice")
+    ingest_hdf5_upload(connection, paths, source, "alice", schemas={})
+    second = ingest_hdf5_upload(connection, paths, source, "alice", schemas={})
 
     assert second.already_ingested is True
     assert connection.execute(
@@ -531,8 +531,8 @@ def test_a_name_collision_keeps_both_under_a_version_suffix(connection, paths, t
     # A different file holding the same experiment name.
     make_dataset(["EXP-A", "EXP-C"]).save_to_hdf5(str(second), verbose=False)
 
-    ingest_hdf5_upload(connection, paths, first, "alice")
-    report = ingest_hdf5_upload(connection, paths, second, "bob")
+    ingest_hdf5_upload(connection, paths, first, "alice", schemas={})
+    report = ingest_hdf5_upload(connection, paths, second, "bob", schemas={})
 
     assert "EXP-A__v2" in report.added
     assert report.versioned == ["EXP-A__v2"]
@@ -581,8 +581,9 @@ def test_entity_sheet_ingestion_links_the_chain(connection, paths, tmp_path):
                  reference_instructions={"Catalyst Batch": {"role": "catalyst_batch"}}
                  ).save_to_hdf5(str(source), verbose=False)
 
-    ingest_hdf5_upload(connection, paths, source, "alice")
-    ingest_entity_sheet(connection, paths, sheet, "catalyst_batch", "bob")
+    ingest_hdf5_upload(connection, paths, source, "alice", schemas={})
+    ingest_entity_sheet(connection, paths, sheet, "catalyst_batch", "bob",
+                        schemas={})
 
     effective = json.loads(connection.execute(
         "SELECT effective FROM entities WHERE entity_id = 'EXP-A'").fetchone()["effective"])
@@ -595,7 +596,8 @@ def test_a_sheet_without_the_identifier_column_is_refused(connection, paths, tmp
     pd.DataFrame([{"Name": "BATCH-X"}]).to_excel(sheet, index=False)
 
     with pytest.raises(IngestionError, match="has no 'Experiment' column"):
-        ingest_entity_sheet(connection, paths, sheet, "catalyst_batch", "bob")
+        ingest_entity_sheet(connection, paths, sheet, "catalyst_batch", "bob",
+                        schemas={})
 
 
 def test_an_empty_hdf5_upload_is_refused(connection, paths, tmp_path):
@@ -603,7 +605,7 @@ def test_an_empty_hdf5_upload_is_refused(connection, paths, tmp_path):
     ExperimentalDataset().save_to_hdf5(str(source), verbose=False)
 
     with pytest.raises(IngestionError, match="holds no experiments"):
-        ingest_hdf5_upload(connection, paths, source, "alice")
+        ingest_hdf5_upload(connection, paths, source, "alice", schemas={})
 
 
 def test_new_metadata_columns_are_absorbed_without_migration(connection, paths, tmp_path):
@@ -611,13 +613,13 @@ def test_new_metadata_columns_are_absorbed_without_migration(connection, paths, 
     # fields this year's do not, and nothing has to be migrated.
     first = tmp_path / "old.h5"
     make_dataset(["OLD-1"]).save_to_hdf5(str(first), verbose=False)
-    ingest_hdf5_upload(connection, paths, first, "alice")
+    ingest_hdf5_upload(connection, paths, first, "alice", schemas={})
 
     newer = make_dataset(["NEW-1"])
     newer.experiments["NEW-1"].metadata["Sacrificial agent"] = "methanol"
     second = tmp_path / "new.h5"
     newer.save_to_hdf5(str(second), verbose=False)
-    ingest_hdf5_upload(connection, paths, second, "alice")
+    ingest_hdf5_upload(connection, paths, second, "alice", schemas={})
 
     keys = {row["key"] for row in read_metadata_keys(connection)}
     assert "Sacrificial agent" in keys
@@ -638,7 +640,7 @@ def test_the_index_can_be_rebuilt_from_the_retained_uploads(connection, paths, t
     make_dataset(["EXP-A", "EXP-B"],
                  index_instructions={"Max rate": {"result": "processed_data/max_rate_umol_s"}}
                  ).save_to_hdf5(str(source), verbose=False)
-    ingest_hdf5_upload(connection, paths, source, "alice")
+    ingest_hdf5_upload(connection, paths, source, "alice", schemas={})
 
     before = connection.execute(
         "SELECT entity_id, results FROM entities ORDER BY entity_id").fetchall()

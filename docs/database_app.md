@@ -32,7 +32,7 @@ notice does not appear, and `allow_development_login` should be set to False.
 | **Browse** | Search and filter; results table; CSV export |
 | **Entity** | One entry: metadata, references both ways, traces, corrections |
 | **Property map** | Any indexed quantity against any other, across everything |
-| **Contribute** | Upload a measured batch or a metadata sheet |
+| **Contribute** | Upload a batch or sheet, add one entry by form, download templates |
 | **Admin** | Reference health, key drift, result conflicts, the upload log |
 
 ### Browse — search, then compare
@@ -105,19 +105,79 @@ spreadsheet exercise.
 
 ### Contribute
 
-Two routes, both attributed to the signed-in user:
+Three routes, all attributed to the signed-in user:
 
 * **Measured batch (HDF5)** — what the processing app produces.
 * **Metadata sheet (Excel or CSV)** — one row per entry, for the catalyst
   batches, semiconductors and precursors whose makers have no raw traces.
+* **A single entry through a form**, for one batch or chemical without making a
+  spreadsheet for it.
 
-The reference columns for each kind of entry are declared in
-`GROUP_REFERENCE_INSTRUCTIONS` in `config.py` and shown on the page before
-upload, so it is clear what will and will not link.
+All three are checked against the entity schemas (below), and the sidebar offers
+the **Excel template** for each kind of entry, generated from the same schema
+the upload will be checked against so the two cannot drift apart. The template's
+second sheet says what each column expects, since a template of bare headings
+gets filled in wrongly.
+
+The form is written as a one-row sheet and ingested through the ordinary sheet
+route. That is not a detour: it means a form entry is stored, validated,
+versioned and **rebuildable** exactly like an uploaded one. A form that wrote
+straight to the database would produce entries `rebuild_index` could not
+reconstruct.
 
 Uploading never overwrites. A name already in the database is kept alongside the
 newcomer under a version suffix, and the page says so. Re-uploading a
 byte-identical file does nothing.
+
+## Entity schemas
+
+`src/pyKES/database/entity_schemas/*.yaml` — one hand-editable file per entity
+type, saying which metadata fields are expected, their types, and the options a
+choice field allows. They are the group's own vocabulary rather than application
+code, so they carry comments and are read at runtime.
+
+```yaml
+fields:
+  - name: Measured Analyte [O2 or H2]
+    type: select
+    options: [O2, H2]
+    required: true
+
+  - name: Catalyst Batch [experiment no.]
+    type: reference
+    role: catalyst_batch
+    required: true
+```
+
+One file drives four things, which is the reason to have it: the contribution
+form's widgets, the Excel template, the validation an upload is checked against,
+and the **reference declarations** — a field of type `reference` already says
+which column links to what, so `GROUP_REFERENCE_INSTRUCTIONS` is derived from
+the schemas rather than written a second time that could disagree.
+
+Field types: `text`, `number`, `integer`, `boolean`, `select`, `multiselect`,
+`date`, `reference`. A deployment maintaining its own copy points
+`DatabaseAppConfig.schema_directory` at it.
+
+### What validation does and does not do
+
+A schema says what is **expected**, not what is **allowed**. That distinction is
+the whole design:
+
+* A **declared field filled in wrongly is an error** — missing when required, a
+  value outside the options, a number that is not one. The batch is checked
+  before anything is written, so a file with one bad row is refused whole rather
+  than leaving half its experiments in the database.
+* A **field nobody declared is reported, then accepted**. Absorbing metadata
+  that did not exist when the schema was written is what the database is for; a
+  schema that rejected it would defeat the thing it is protecting. The upload
+  page lists the undeclared fields so a typo is visible.
+
+**A rebuild is not re-validated.** Files in the upload store were checked
+against the schema in force when they arrived and accepted. Re-checking them
+against today's would make every historical upload un-rebuildable the moment a
+field is made required — which would destroy the guarantee the upload store
+exists to provide.
 
 ### Admin
 

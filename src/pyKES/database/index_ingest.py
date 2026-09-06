@@ -31,6 +31,11 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from pyKES.database.database_experiments import ExperimentalDataset, Experiment
+from pyKES.database.entity_schema import (
+    EntitySchema,
+    load_entity_schemas,
+    validate_entries,
+)
 from pyKES.database.index_references import (
     extract_references,
     recompute_entity_and_dependents,
@@ -106,6 +111,10 @@ class IngestionReport:
         Entities whose inherited metadata was rewritten as a consequence.
     result_conflicts : list of str
         Result labels this upload redefined with a different path.
+    undeclared_fields : list of str
+        Metadata fields the entity's schema does not mention. Reported rather
+        than refused: absorbing fields that did not exist when the schema was
+        written is the point of the design.
     already_ingested : bool
         True when the file's hash was already known and nothing was done.
     """
@@ -116,6 +125,7 @@ class IngestionReport:
     skipped: List[str] = field(default_factory=list)
     recomputed: List[str] = field(default_factory=list)
     result_conflicts: List[str] = field(default_factory=list)
+    undeclared_fields: List[str] = field(default_factory=list)
     already_ingested: bool = False
 
     def summary(self) -> str:
@@ -134,6 +144,55 @@ class IngestionReport:
                 f"({len(self.versioned)} under a version suffix), "
                 f"{len(self.recomputed)} recomputed, "
                 f"{len(self.result_conflicts)} result conflicts.")
+
+
+def check_against_schema(entity_type: str,
+                         entries: Dict[str, Dict[str, Any]],
+                         schemas: Optional[Dict[str, EntitySchema]] = None) -> List[str]:
+    """
+    Check an upload against the schema for its kind of entry, before writing.
+
+    Checking the whole batch first keeps an ingestion all-or-nothing: a file
+    with one bad row is refused whole rather than leaving half its experiments
+    in the database.
+
+    Parameters
+    ----------
+    entity_type : str
+        Kind of entry the upload holds.
+    entries : dict
+        Mapping of entry name to its raw metadata, before key escaping — schema
+        field names are written the way a person writes them.
+    schemas : dict, optional
+        Loaded schemas. Defaults to the shipped ones; a kind of entry with no
+        schema is not checked at all.
+
+    Returns
+    -------
+    undeclared : list of str
+        Fields the schema does not mention.
+
+    Raises
+    ------
+    IngestionError
+        If any entry violates the schema.
+    """
+    schemas = load_entity_schemas() if schemas is None else schemas
+    schema = schemas.get(entity_type)
+
+    if schema is None:
+        return []
+
+    report = validate_entries(schema, entries)
+
+    if report.errors:
+        raise IngestionError(
+            f"{len(report.errors)} entries do not match the "
+            f"'{schema.label}' schema:\n- " + "\n- ".join(report.errors[:20])
+            + ("\n…" if len(report.errors) > 20 else "")
+        )
+
+    return report.undeclared
 
 
 # =============================================================================
@@ -580,7 +639,8 @@ def ingest_hdf5_upload(connection,
                        paths: IndexPaths,
                        file_path: Path,
                        uploaded_by: str,
-                       entity_type: str = "experiment") -> IngestionReport:
+                       entity_type: str = "experiment",
+                       schemas: Optional[Dict[str, EntitySchema]] = None) -> IngestionReport:
     """
     Ingest one HDF5 batch produced by the processing app.
 
@@ -596,6 +656,8 @@ def ingest_hdf5_upload(connection,
         Authenticated user the entries are attributed to.
     entity_type : str, optional
         Type assigned to every experiment in the file.
+    schemas : dict, optional
+        Schemas to check the metadata against.
 
     Returns
     -------
@@ -605,16 +667,25 @@ def ingest_hdf5_upload(connection,
     Raises
     ------
     IngestionError
-        If the file holds no experiments.
+        If the file holds no experiments, or any of them violates the schema.
     """
     dataset = ExperimentalDataset.load_from_hdf5(str(file_path))
 
     if not dataset.experiments:
         raise IngestionError(f"{Path(file_path).name} holds no experiments.")
 
+    # Checked before the file is stored, so a rejected upload leaves nothing
+    # behind at all.
+    undeclared = check_against_schema(
+        entity_type,
+        {name: split_identity_metadata(experiment.metadata)
+         for name, experiment in dataset.experiments.items()},
+        schemas)
+
     upload_id, already = store_upload(connection, paths, file_path,
                                       uploaded_by, UPLOAD_KIND_HDF5)
-    report = IngestionReport(upload_id=upload_id, already_ingested=already)
+    report = IngestionReport(upload_id=upload_id, already_ingested=already,
+                             undeclared_fields=undeclared)
     if already:
         return report
 
@@ -673,7 +744,8 @@ def ingest_entity_sheet(connection,
                         uploaded_by: str,
                         reference_instructions: Optional[Dict[str, Any]] = None,
                         identifier_column: str = "Experiment",
-                        sheet_name: str = "Sheet1") -> IngestionReport:
+                        sheet_name: str = "Sheet1",
+                        schemas: Optional[Dict[str, EntitySchema]] = None) -> IngestionReport:
     """
     Ingest a sheet of entries that carry metadata but no measurements.
 
@@ -701,6 +773,8 @@ def ingest_entity_sheet(connection,
         Column holding the entry's id.
     sheet_name : str, optional
         Worksheet to read from an Excel file.
+    schemas : dict, optional
+        Schemas to check the metadata against.
 
     Returns
     -------
@@ -710,7 +784,7 @@ def ingest_entity_sheet(connection,
     Raises
     ------
     IngestionError
-        If the identifier column is missing.
+        If the identifier column is missing, or a row violates the schema.
     """
     file_path = Path(file_path)
     frame = (pd.read_csv(file_path) if file_path.suffix.lower() == ".csv"
@@ -722,15 +796,24 @@ def ingest_entity_sheet(connection,
             f"found {list(frame.columns)}."
         )
 
+    rows = frame.to_dict(orient="records")
+    undeclared = check_against_schema(
+        entity_type,
+        {str(row[identifier_column]).strip():
+             {key: value for key, value in row.items() if key != identifier_column}
+         for row in rows},
+        schemas)
+
     upload_id, already = store_upload(connection, paths, file_path,
                                       uploaded_by, UPLOAD_KIND_ENTITY_SHEET)
-    report = IngestionReport(upload_id=upload_id, already_ingested=already)
+    report = IngestionReport(upload_id=upload_id, already_ingested=already,
+                             undeclared_fields=undeclared)
     if already:
         return report
 
     reference_instructions = reference_instructions or {}
 
-    for row in frame.to_dict(orient="records"):
+    for row in rows:
         base_id = str(row[identifier_column]).strip()
         entity_id, version = allocate_entity_id(connection, base_id)
         metadata = coerce_index_mapping(
@@ -919,13 +1002,20 @@ def rebuild_index(connection,
     for upload in uploads:
         stored_path = Path(upload["stored_path"])
 
+        # Deliberately not re-validated. These files were checked against the
+        # schema in force when they arrived and accepted; re-checking them
+        # against today's would make every historical upload un-rebuildable the
+        # moment a field is made required, which would destroy the guarantee the
+        # upload store exists to provide.
         if upload["kind"] == UPLOAD_KIND_HDF5:
             entity_type = entity_type_by_upload.get(upload["id"], "experiment")
             reports.append(ingest_hdf5_upload(connection, paths, stored_path,
-                                              upload["uploaded_by"], entity_type))
+                                              upload["uploaded_by"], entity_type,
+                                              schemas={}))
         else:
             entity_type = entity_type_by_upload.get(upload["id"], DEFAULT_ENTITY_TYPE)
             reports.append(ingest_entity_sheet(connection, paths, stored_path,
-                                               entity_type, upload["uploaded_by"]))
+                                               entity_type, upload["uploaded_by"],
+                                               schemas={}))
 
     return reports

@@ -1,0 +1,54 @@
+# Metadata schema for a finished semiconductor — the support before any
+# cocatalyst is deposited. See experiment.yaml for what the keys mean.
+
+entity_type: finished_semiconductor
+label: Finished semiconductor
+identifier_field: Experiment
+description: A synthesised semiconductor, before cocatalyst loading.
+
+fields:
+  - name: Precursor Chemical A
+    type: reference
+    role: precursor_chemical_a
+    required: true
+    help: Two precursors take two distinct roles; one shared role would
+          silently keep only the second.
+
+  - name: Precursor Chemical B
+    type: reference
+    role: precursor_chemical_b
+
+  - name: Catalyst material
+    type: text
+    required: true
+    help: PLACEHOLDER — replace with a select once the group's list is settled.
+
+  - name: Synthesis route
+    type: select
+    options: [Osterloh, Lercher, Flux, Solid state, Hydrothermal]
+    required: true
+
+  - name: Synthesis temperature [°C]
+    type: number
+    unit: °C
+    required: true
+
+  - name: Flux treatment temperature [°C]
+    type: number
+    unit: °C
+
+  - name: Added Al2O3 [wt%]
+    type: number
+    unit: wt%
+
+  - name: Dopants
+    type: text
+    help: >-
+      PLACEHOLDER — free text for now, e.g. {'Ir' 0.04, 'Sb' 0.16}.
+
+  - name: Active
+    type: boolean
+    default: true
+
+  - name: Notes
+    type: text
