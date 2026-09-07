@@ -26,6 +26,7 @@ from pyKES.database.index_query import (
     rows_to_frame,
     search_entities,
 )
+from pyKES.database.entity_schema import load_entity_schemas
 from pyKES.database.index_schema import ENTITY_TYPES, ROLE_PATH_SEPARATOR
 from pyKES.database_app.components.time_series_panel import (
     MAX_COMPARISON_ENTRIES,
@@ -109,7 +110,9 @@ def write_filters_to_url(filters: list, text: str, entity_type: str) -> None:
 
     if filters:
         st.query_params[FILTER_PARAMETER] = json.dumps(
-            [{"key": item.key, "operator": item.operator, "value": item.value}
+            [{"key": item.key, "operator": item.operator, "value": item.value,
+              "sub_key": item.sub_key,
+              "alternative_keys": item.alternative_keys}
              for item in filters])
     elif FILTER_PARAMETER in st.query_params:
         del st.query_params[FILTER_PARAMETER]
@@ -140,9 +143,9 @@ def facet_widget_key(facet: Facet) -> str:
     return f"{FACET_KEY_PREFIX}{facet.key}"
 
 
-def render_facet(facet: Facet):
+def render_facet(facet: Facet) -> list:
     """
-    Draw one filter widget and return the filter it produces.
+    Draw one filter widget and return the filters it produces.
 
     Parameters
     ----------
@@ -151,31 +154,107 @@ def render_facet(facet: Facet):
 
     Returns
     -------
-    search_filter : Filter or None
-        The filter, or None when the widget is at its neutral setting.
+    filters : list of Filter
+        Empty while the widget is at its neutral setting. A mapping facet can
+        produce several — one per name the user picked.
     """
     caption = facet.label
     widget_key = facet_widget_key(facet)
+
+    if facet.kind == "mapping":
+        return render_mapping_facet(facet, widget_key)
 
     if facet.kind == "range":
         low, high = facet.bounds
         chosen = st.slider(caption, float(low), float(high),
                            (float(low), float(high)), key=widget_key)
         if chosen != (float(low), float(high)):
-            return Filter(facet.key, "between", list(chosen))
-        return None
+            return [build_filter(facet, "between", list(chosen))]
+        return []
 
     if facet.kind == "select":
         chosen = st.multiselect(caption, facet.options, key=widget_key)
         if chosen:
-            return Filter(facet.key, "in", chosen)
-        return None
+            return [build_filter(facet, "in", chosen)]
+        return []
 
     typed = st.text_input(caption, key=widget_key)
     if typed:
-        return Filter(facet.key, "contains", typed)
+        return [build_filter(facet, "contains", typed)]
 
-    return None
+    return []
+
+
+def render_mapping_facet(facet: Facet, widget_key: str) -> list:
+    """
+    Draw the two-level filter for a field holding a set of named numbers.
+
+    A set of dopant concentrations is not one number, so it gets a name picker
+    and then a slider per chosen name, over the range that name actually spans.
+    Choosing a name and leaving its slider alone is already a filter — it asks
+    for entries that carry that dopant at all — which is what somebody picking
+    it from the list means.
+
+    Parameters
+    ----------
+    facet : Facet
+        Mapping facet from the registry.
+    widget_key : str
+        Key of the name picker; each slider takes one derived from it.
+
+    Returns
+    -------
+    filters : list of Filter
+        One per chosen name.
+    """
+    chosen = st.multiselect(f"{facet.label} — {facet.key_label or 'name'}",
+                            facet.options, key=widget_key)
+
+    filters = []
+
+    for name in chosen:
+        low, high = facet.sub_bounds.get(name, (0.0, 0.0))
+        label = f"{name} [{facet.value_label}]" if facet.value_label else name
+
+        # A name every entry carries at one value has nothing to slide, but the
+        # filter still means "carries this one", so it is emitted regardless.
+        if low == high:
+            st.caption(f"{label}: {low:g}")
+            filters.append(build_filter(facet, "between", [low, high], name))
+            continue
+
+        selected = st.slider(label, float(low), float(high),
+                             (float(low), float(high)),
+                             key=f"{widget_key}#{name}")
+        filters.append(build_filter(facet, "between", list(selected), name))
+
+    return filters
+
+
+def build_filter(facet: Facet, operator: str, value, sub_key: str = None) -> Filter:
+    """
+    Make a filter that reaches every path this facet covers.
+
+    Parameters
+    ----------
+    facet : Facet
+        Facet the filter came from.
+    operator : str
+        Comparison to apply.
+    value : Any
+        What to compare against.
+    sub_key : str, optional
+        Name inside a mapping-valued field.
+
+    Returns
+    -------
+    search_filter : Filter
+        Filter carrying the facet's alternative paths, so a field reachable
+        through more than one kind of entry is not answered for half the
+        entries.
+    """
+    return Filter(facet.key, operator, value, sub_key=sub_key,
+                  alternative_keys=facet.alternative_keys)
 
 
 def reset_filters() -> None:
@@ -223,20 +302,27 @@ def seed_facet_widgets(facets: list, url_filters: list) -> None:
     -------
     None : None
     """
-    by_key = {search_filter.key: search_filter for search_filter in url_filters}
-
     for facet in facets:
         widget_key = facet_widget_key(facet)
-        search_filter = by_key.get(facet.key)
+        matching = [search_filter for search_filter in url_filters
+                    if search_filter.key == facet.key]
 
-        if search_filter is None or widget_key in st.session_state:
+        if not matching or widget_key in st.session_state:
             continue
 
-        if facet.kind == "range":
-            st.session_state[widget_key] = (float(search_filter.value[0]),
-                                            float(search_filter.value[1]))
+        if facet.kind == "mapping":
+            # The picker holds the names; each name's slider is seeded under
+            # its own key, which is why they are set together here.
+            st.session_state[widget_key] = [item.sub_key for item in matching]
+            for item in matching:
+                st.session_state[f"{widget_key}#{item.sub_key}"] = (
+                    float(item.value[0]), float(item.value[1]))
+
+        elif facet.kind == "range":
+            st.session_state[widget_key] = (float(matching[0].value[0]),
+                                            float(matching[0].value[1]))
         else:
-            st.session_state[widget_key] = search_filter.value
+            st.session_state[widget_key] = matching[0].value
 
 
 def render_facet_group(facets: list) -> list:
@@ -253,11 +339,11 @@ def render_facet_group(facets: list) -> list:
     filters : list of Filter
         The filters those widgets are currently set to.
     """
-    return [chosen for chosen in (render_facet(facet) for facet in facets)
-            if chosen]
+    return [chosen for facet in facets for chosen in render_facet(facet)]
 
 
-def render_facet_panel(connection, entity_type: str) -> list:
+def render_facet_panel(connection, entity_type: str,
+                       config: DatabaseAppConfig) -> list:
     """
     Draw the whole filter sidebar.
 
@@ -274,13 +360,17 @@ def render_facet_panel(connection, entity_type: str) -> list:
         Open connection to the index database.
     entity_type : str
         Kind of entry being searched.
+    config : DatabaseAppConfig
+        Deployment settings, supplying the schema directory the mapping filters
+        take their labels from.
 
     Returns
     -------
     filters : list of Filter
         Every active filter.
     """
-    facets = build_facets(connection, entity_type=entity_type)
+    facets = build_facets(connection, entity_type=entity_type,
+                          schemas=load_entity_schemas(config.schema_directory))
 
     if not facets:
         st.info("No metadata registered for this kind of entry yet.")
@@ -542,7 +632,7 @@ def render_search(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
                    "the entity each field describes.")
         latest_only = st.toggle("Latest version of each name only", value=True)
         st.button("Reset All Filters", on_click=reset_filters, width="stretch")
-        filters = render_facet_panel(connection, entity_type)
+        filters = render_facet_panel(connection, entity_type, config)
 
     with st.expander("Table columns"):
         columns = choose_columns(connection, entity_type, config)

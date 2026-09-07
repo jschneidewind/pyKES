@@ -201,6 +201,68 @@ def read_dangling_references(connection) -> List:
     ).fetchall()
 
 
+def read_reference_type_mismatches(connection,
+                                   accepted: Dict[tuple, List[str]]) -> List:
+    """
+    List edges pointing at a kind of entry their field does not accept.
+
+    A role may accept several kinds — an experiment's catalyst batch can be an
+    ordinary batch or a modified one — and which kinds is declared in the
+    schema. The check runs here, over resolved edges, rather than at upload:
+    an entry may legitimately name a target that has not been uploaded yet, and
+    refusing the upload for a fact not yet knowable would break the forward
+    references the whole ingestion order depends on.
+
+    A mismatch is reported, never corrected. The metadata still merges, because
+    a wrong-kind reference is a labelling mistake and discarding the values
+    would hide it instead of showing it.
+
+    Recomputed from the schemas each time rather than stored, so editing the
+    accepted kinds in a YAML file is reflected immediately.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+    accepted : dict
+        ``{(source_entity_type, role): [entity_type, ...]}``, from
+        `entity_schema.accepted_types`.
+
+    Returns
+    -------
+    mismatches : list of dict
+        One entry per offending edge, naming the source, the role, the target,
+        the kind the target actually is, and the kinds the field accepts.
+    """
+    rows = connection.execute(
+        """SELECT edges.source, edges.role, edges.target,
+                  source_entity.entity_type AS source_type,
+                  target_entity.entity_type AS target_type
+           FROM edges
+           JOIN entities AS source_entity ON source_entity.entity_id = edges.source
+           JOIN entities AS target_entity ON target_entity.entity_id = edges.target
+           ORDER BY edges.source"""
+    ).fetchall()
+
+    mismatches = []
+
+    for row in rows:
+        allowed = accepted.get((row["source_type"], row["role"]))
+
+        # A role nobody declared is not checked: an upload may declare its own
+        # references, and inventing a constraint for it would refuse data the
+        # group deliberately sent.
+        if not allowed or row["target_type"] in allowed:
+            continue
+
+        mismatches.append({"source": row["source"], "role": row["role"],
+                           "target": row["target"],
+                           "target_type": row["target_type"],
+                           "accepts": allowed})
+
+    return mismatches
+
+
 # =============================================================================
 # Resolving inherited metadata
 # =============================================================================

@@ -10,6 +10,7 @@ fields:
   - name: Precursor Chemical A
     type: reference
     role: precursor_chemical_a
+    accepts: [precursor_chemical, commercial_chemical]
     required: true
     help: Two precursors take two distinct roles; one shared role would
           silently keep only the second.
@@ -17,6 +18,7 @@ fields:
   - name: Precursor Chemical B
     type: reference
     role: precursor_chemical_b
+    accepts: [precursor_chemical, commercial_chemical]
 
   - name: Catalyst material
     type: text
@@ -41,10 +43,33 @@ fields:
     type: number
     unit: wt%
 
-  - name: Dopants
-    type: text
+  - name: Dopants [mol%]
+    type: mapping
+    key_label: Dopant
+    value_label: mol%
+    key_options: [Ir, Ru, Cr, Rh, La, Sb, Ta, Sr]
+    unit: mol%
     help: >-
-      PLACEHOLDER — free text for now, e.g. {'Ir' 0.04, 'Sb' 0.16}.
+      Any number of dopants, written as name=value pairs:
+      Ir=0.02; Ru=0.02; Cr=0.03. The names are what is expected, not all that
+      is allowed — a dopant nobody listed is reported and then accepted.
+
+  - name: Temperature steps [°C and h]
+    type: mapping
+    key_label: Temperature [°C]
+    value_label: Hold time [h]
+    help: >-
+      The synthesis profile, as temperature=hours pairs:
+      900=0.5; 1000=2; 1150=10. The two scalars below are computed from it at
+      ingestion, so they can be filtered on with ordinary sliders — a profile
+      is a sequence, and the questions asked of it are aggregates.
+    derived:
+      - name: Peak temperature [°C]
+        of: max_key
+        unit: °C
+      - name: Time at peak temperature [h]
+        of: value_at_max_key
+        unit: h
 
   - name: Active
     type: boolean

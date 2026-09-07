@@ -8,8 +8,17 @@ they are surfaced here instead, where a person can decide.
 
 import streamlit as st
 
-from pyKES.database.index_query import database_statistics, read_uploads
-from pyKES.database.index_references import find_cyclic_entities, read_dangling_references
+from pyKES.database.entity_schema import accepted_types, load_entity_schemas
+from pyKES.database.index_query import (
+    database_statistics,
+    display_entity_type,
+    read_uploads,
+)
+from pyKES.database.index_references import (
+    find_cyclic_entities,
+    read_dangling_references,
+    read_reference_type_mismatches,
+)
 from pyKES.database.index_registry import (
     TYPE_MIXED,
     read_metadata_keys,
@@ -83,14 +92,16 @@ def render_key_registry(connection) -> None:
         st.dataframe(frame, width="stretch", hide_index=True)
 
 
-def render_reference_health(connection) -> None:
+def render_reference_health(connection, config: DatabaseAppConfig) -> None:
     """
-    Show references that point nowhere and chains that loop.
+    Show references that point nowhere, chains that loop, and wrong-kind links.
 
     Parameters
     ----------
     connection : sqlite3.Connection
         Open connection to the index database.
+    config : DatabaseAppConfig
+        Deployment settings, supplying the schemas the accepted kinds come from.
 
     Returns
     -------
@@ -109,6 +120,25 @@ def render_reference_health(connection) -> None:
                      width="stretch", hide_index=True)
     else:
         st.success("Every reference resolves.")
+
+    mismatches = read_reference_type_mismatches(
+        connection, accepted_types(load_entity_schemas(config.schema_directory)))
+    if mismatches:
+        count = len(mismatches)
+        st.warning(
+            f"{count} reference{'s' if count > 1 else ''} "
+            f"point{'' if count > 1 else 's'} at a kind of entry the field does "
+            f"not accept. The metadata still merges — a wrong-kind reference is "
+            f"a labelling mistake, and discarding the values would hide it "
+            f"rather than show it — but the link is probably not what was meant."
+        )
+        st.dataframe(pd.DataFrame([
+            {"Entry": row["source"], "Role": display_entity_type(row["role"]),
+             "Points at": row["target"],
+             "Which is a": display_entity_type(row["target_type"]),
+             "Accepts": ", ".join(display_entity_type(kind)
+                                  for kind in row["accepts"])}
+            for row in mismatches]), width="stretch", hide_index=True)
 
     cycles = find_cyclic_entities(connection)
     if cycles:
@@ -235,7 +265,7 @@ def render_admin(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
     columns[2].metric("Metadata Keys", statistics["metadata_keys"])
     columns[3].metric("Uploads", statistics["uploads"])
 
-    render_reference_health(connection)
+    render_reference_health(connection, config)
     render_result_conflicts(connection)
     st.subheader("Metadata Keys")
     render_key_registry(connection)

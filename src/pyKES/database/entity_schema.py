@@ -21,6 +21,7 @@ absorb fields that did not exist when it was built, and a schema that rejected
 them would defeat it. Only a declared field can be got *wrong*.
 """
 
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,15 +43,32 @@ TYPE_SELECT = "select"
 TYPE_MULTISELECT = "multiselect"
 TYPE_DATE = "date"
 TYPE_REFERENCE = "reference"
+TYPE_MAPPING = "mapping"
 
 FIELD_TYPES = (TYPE_TEXT, TYPE_NUMBER, TYPE_INTEGER, TYPE_BOOLEAN, TYPE_SELECT,
-               TYPE_MULTISELECT, TYPE_DATE, TYPE_REFERENCE)
+               TYPE_MULTISELECT, TYPE_DATE, TYPE_REFERENCE, TYPE_MAPPING)
 
 # Types whose value must appear in the field's `options` list.
 CHOICE_TYPES = (TYPE_SELECT, TYPE_MULTISELECT)
 
 # Types that must parse as a number.
 NUMERIC_TYPES = (TYPE_NUMBER, TYPE_INTEGER)
+
+
+# =============================================================================
+# Mapping fields
+# =============================================================================
+
+# How a mapping is written in one spreadsheet cell: `Ir=0.02; Ru=0.02; Cr=0.03`.
+# Pairs are separated by a semicolon or a newline — not a comma, which would be
+# ambiguous wherever Excel writes a decimal comma. Both `=` and `:` separate a
+# name from its value, because people write both.
+MAPPING_PAIR_SEPARATORS = ";\n"
+MAPPING_VALUE_SEPARATORS = "=:"
+
+# Shown in the template's field guide so the format is visible where it is
+# filled in rather than only in the documentation.
+MAPPING_EXAMPLE = "Ir=0.02; Ru=0.02; Cr=0.03"
 
 # Directory the shipped schemas live in. A deployment editing its own copy
 # points `DatabaseAppConfig.schema_directory` somewhere else.
@@ -66,8 +84,154 @@ MAX_REPORTED_VALUES = 5
 
 
 # =============================================================================
+# Scalars derived from a mapping
+# =============================================================================
+
+def numeric_keys(mapping: Dict[str, Any]) -> List[float]:
+    """
+    Read the keys of a mapping that are numbers.
+
+    Parameters
+    ----------
+    mapping : dict
+        Parsed mapping value.
+
+    Returns
+    -------
+    keys : list of float
+        The numeric keys, ascending. Non-numeric keys are skipped, so a mapping
+        of dopant names simply has none and derives nothing.
+    """
+    values = []
+
+    for key in mapping:
+        try:
+            values.append(float(key))
+        except (TypeError, ValueError):
+            continue
+
+    return sorted(values)
+
+
+def peak_key(mapping: Dict[str, Any]) -> Optional[float]:
+    """
+    The largest numeric key of a mapping — the peak of a profile.
+
+    Parameters
+    ----------
+    mapping : dict
+        Parsed mapping value.
+
+    Returns
+    -------
+    peak : float or None
+        The largest key, or None when none of them is a number.
+    """
+    keys = numeric_keys(mapping)
+
+    return keys[-1] if keys else None
+
+
+def value_at_peak_key(mapping: Dict[str, Any]) -> Optional[Any]:
+    """
+    The value held at a mapping's largest numeric key.
+
+    For a temperature profile that is the time spent at the peak temperature,
+    which is the quantity a synthesis is usually compared on.
+
+    Parameters
+    ----------
+    mapping : dict
+        Parsed mapping value.
+
+    Returns
+    -------
+    value : Any or None
+        The value at the peak, or None when no key is a number.
+    """
+    peak = peak_key(mapping)
+
+    if peak is None:
+        return None
+
+    # The mapping's keys are strings, since that is what JSON holds, so the
+    # numeric peak has to be matched back against them numerically.
+    return next(value for key, value in mapping.items()
+                if _is_number(key) and float(key) == peak)
+
+
+def _is_number(value: Any) -> bool:
+    """
+    Whether a value parses as a number.
+
+    Parameters
+    ----------
+    value : Any
+        Value to test.
+
+    Returns
+    -------
+    numeric : bool
+        True when ``float`` accepts it.
+    """
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return False
+
+    return True
+
+
+# What a mapping field may derive. Each entry turns the whole mapping into one
+# number, which is then stored as ordinary metadata and so gets a filter, a
+# column and inheritance without any further work.
+DERIVED_FUNCTIONS = {
+    "max_key": peak_key,
+    "value_at_max_key": value_at_peak_key,
+}
+
+
+# =============================================================================
 # Schema objects
 # =============================================================================
+
+@dataclass
+class DerivedScalar:
+    """
+    A single number a mapping field derives.
+
+    A temperature profile is a sequence, and the questions asked of it are
+    aggregates — the peak reached, the time held there — which no per-key slider
+    expresses. Deriving them at ingestion turns each into an ordinary metadata
+    field, so it gets a slider, a table column and inheritance for free.
+
+    Parameters
+    ----------
+    name : str
+        Metadata field the derived value is stored under.
+    of : str
+        One of `DERIVED_FUNCTIONS`.
+    unit : str, optional
+        Unit shown beside it; not parsed.
+
+    Raises
+    ------
+    ValueError
+        If the function is unknown — a mistake in a hand-edited file, worth
+        catching when the file is read rather than at ingestion.
+    """
+
+    name: str
+    of: str
+    unit: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.of not in DERIVED_FUNCTIONS:
+            raise ValueError(
+                f"Derived field '{self.name}' asks for unknown function "
+                f"'{self.of}'; expected one of {sorted(DERIVED_FUNCTIONS)}."
+            )
+
 
 @dataclass
 class FieldSchema:
@@ -93,6 +257,25 @@ class FieldSchema:
         Value the form starts on.
     role : str, optional
         For a reference field, the role its edge is recorded under.
+    accepts : list of str, optional
+        For a reference field, the kinds of entry it may point at. Left empty
+        the reference is simply not checked, which is deliberately not the same
+        as deriving it from the role: a role names the *relationship*, so
+        `precursor_chemical_a` is filled by a `precursor_chemical`, and reading
+        the role as a type would flag every correct reference in the group's
+        own chain. It is guidance for the form and a diagnostic for the admin
+        page, never a storage constraint — an edge records no target type, and
+        that is what lets a new kind of entry join an existing chain without a
+        migration.
+    key_label, value_label : str, optional
+        For a mapping field, what its names and its numbers are called —
+        ``Element`` and ``mol%`` for a dopant field. Used to label the filter.
+    key_options : list, optional
+        For a mapping field, the names expected. Like every other option list
+        this says what is *expected*: a name nobody declared is reported and
+        then accepted.
+    derived : list, optional
+        For a mapping field, the scalars computed from it at ingestion.
 
     Raises
     ------
@@ -110,6 +293,11 @@ class FieldSchema:
     help: Optional[str] = None
     default: Any = None
     role: Optional[str] = None
+    accepts: List[str] = field(default_factory=list)
+    key_label: Optional[str] = None
+    value_label: Optional[str] = None
+    key_options: List[Any] = field(default_factory=list)
+    derived: List[Any] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.type not in FIELD_TYPES:
@@ -130,6 +318,32 @@ class FieldSchema:
             raise ValueError(
                 f"Reference field '{self.name}' declares no role."
             )
+
+        if self.accepts and self.type != TYPE_REFERENCE:
+            raise ValueError(
+                f"Field '{self.name}' declares 'accepts' but is a "
+                f"{self.type}, not a reference."
+            )
+
+        if self.derived and self.type != TYPE_MAPPING:
+            raise ValueError(
+                f"Field '{self.name}' declares derived scalars but is a "
+                f"{self.type}, not a mapping."
+            )
+
+        self.derived = [entry if isinstance(entry, DerivedScalar)
+                        else DerivedScalar(**entry) for entry in self.derived]
+
+    def derived_names(self) -> List[str]:
+        """
+        Name the metadata fields this one derives.
+
+        Returns
+        -------
+        names : list of str
+            Field names, empty for anything but a mapping that declares them.
+        """
+        return [entry.name for entry in self.derived]
 
 
 @dataclass
@@ -185,10 +399,62 @@ class EntitySchema:
         Returns
         -------
         instructions : dict
-            ``{column: {'role': role}}`` for every reference field.
+            ``{column: {'role': role, 'accepts': [entity_type, ...]}}`` for
+            every reference field. ``extract_references`` reads only the role;
+            the accepted kinds travel with it so the form and the admin page do
+            not have to reach back into the schema.
         """
-        return {entry.name: {"role": entry.role}
+        return {entry.name: {"role": entry.role, "accepts": list(entry.accepts)}
                 for entry in self.fields if entry.type == TYPE_REFERENCE}
+
+    def mapping_fields(self) -> List[FieldSchema]:
+        """
+        List the fields whose value is a mapping.
+
+        Returns
+        -------
+        fields : list of FieldSchema
+            Mapping fields, in declaration order.
+        """
+        return [entry for entry in self.fields if entry.type == TYPE_MAPPING]
+
+    def declared_names(self) -> set:
+        """
+        Name everything the schema accounts for.
+
+        Returns
+        -------
+        names : set of str
+            Declared fields, the identifier, and the scalars mapping fields
+            derive — which are written by ingestion and so must not be reported
+            back as fields nobody declared.
+        """
+        names = {entry.name for entry in self.fields}
+        names.add(self.identifier_field)
+
+        for entry in self.fields:
+            names.update(entry.derived_names())
+
+        return names
+
+
+def accepted_types(schemas: Dict[str, EntitySchema]) -> Dict[tuple, List[str]]:
+    """
+    Index which kinds of entry each role may point at.
+
+    Parameters
+    ----------
+    schemas : dict
+        Mapping of entity type to its schema.
+
+    Returns
+    -------
+    accepted : dict
+        ``{(source_entity_type, role): [entity_type, ...]}``.
+    """
+    return {(entity_type, entry.role): list(entry.accepts)
+            for entity_type, schema in schemas.items()
+            for entry in schema.fields if entry.type == TYPE_REFERENCE}
 
 
 # =============================================================================
@@ -312,6 +578,145 @@ def coerce_boolean(value: Any) -> Optional[bool]:
     return None
 
 
+def parse_mapping(value: Any) -> tuple:
+    """
+    Read a mapping written in one cell into a dictionary.
+
+    ``Ir=0.02; Ru=0.02; Cr=0.03`` becomes ``{'Ir': 0.02, 'Ru': 0.02,
+    'Cr': 0.03}``. That form was chosen over JSON in a cell because it is
+    typable in Excel without quoting, and over one column per name because the
+    number of names is not known in advance.
+
+    Parameters
+    ----------
+    value : Any
+        Cell contents, or a mapping that has already been parsed — an HDF5
+        upload can carry one directly.
+
+    Returns
+    -------
+    mapping : dict
+        Name to value, values numeric where they parse as numbers.
+    problems : list of str
+        Pairs that could not be read. A pair that does not parse is reported
+        rather than skipped: for a composition, silently dropping one is the
+        difference between "no dopant" and "a dopant we lost".
+    """
+    if is_blank(value):
+        return {}, []
+
+    if isinstance(value, dict):
+        return {str(key): _as_number(item) for key, item in value.items()}, []
+
+    mapping, problems = {}, []
+
+    for pair in re.split(f"[{MAPPING_PAIR_SEPARATORS}]", str(value)):
+        if not pair.strip():
+            continue
+
+        parts = re.split(f"[{MAPPING_VALUE_SEPARATORS}]", pair, maxsplit=1)
+
+        if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+            problems.append(pair.strip())
+            continue
+
+        mapping[parts[0].strip()] = _as_number(parts[1].strip())
+
+    return mapping, problems
+
+
+def is_blank(value: Any) -> bool:
+    """
+    Whether a value is empty.
+
+    An empty Excel cell reaches here as a float NaN rather than as an empty
+    string, so a check for one alone reads it as the text 'nan' and reports a
+    filled-in field nobody filled in.
+
+    Parameters
+    ----------
+    value : Any
+        Value from a sheet, a form or an HDF5 file.
+
+    Returns
+    -------
+    blank : bool
+        True for None, whitespace, and NaN.
+    """
+    if value is None:
+        return True
+
+    if isinstance(value, float) and math.isnan(value):
+        return True
+
+    return isinstance(value, str) and not value.strip()
+
+
+def _as_number(value: Any) -> Any:
+    """
+    Read a value as a number where it is one.
+
+    Parameters
+    ----------
+    value : Any
+        Value from one side of a mapping pair.
+
+    Returns
+    -------
+    parsed : Any
+        A float where the text parses as one, otherwise the value unchanged. A
+        mapping of names to text is unusual but not wrong, and rejecting it
+        here would be the schema deciding what the group may record.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def prepare_metadata(schema: Optional[EntitySchema],
+                     metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Parse the values a schema describes and add the scalars it derives.
+
+    Applied before an entry is validated *and* before it is written, from the
+    same function, so what is checked is exactly what is stored.
+
+    Parameters
+    ----------
+    schema : EntitySchema or None
+        Schema for this kind of entry. None leaves the metadata untouched,
+        which is what an unschema'd kind of entry should do.
+    metadata : dict
+        The entry's raw metadata.
+
+    Returns
+    -------
+    prepared : dict
+        Metadata with every mapping field parsed into a dictionary and every
+        declared derived scalar added beside it.
+    """
+    if schema is None:
+        return dict(metadata)
+
+    prepared = dict(metadata)
+
+    for field_schema in schema.mapping_fields():
+        mapping, _ = parse_mapping(prepared.get(field_schema.name))
+
+        if not mapping:
+            continue
+
+        prepared[field_schema.name] = mapping
+
+        for derived in field_schema.derived:
+            value = DERIVED_FUNCTIONS[derived.of](mapping)
+            if value is not None:
+                prepared[derived.name] = value
+
+    return prepared
+
+
 def check_value(field_schema: FieldSchema, value: Any) -> Optional[str]:
     """
     Check one value against the field that declares it.
@@ -330,7 +735,7 @@ def check_value(field_schema: FieldSchema, value: Any) -> Optional[str]:
         value is acceptable here; whether it may be blank is the required check,
         which is made separately.
     """
-    if value is None or (isinstance(value, str) and not value.strip()):
+    if is_blank(value):
         return None
 
     if field_schema.type in NUMERIC_TYPES:
@@ -360,6 +765,44 @@ def check_value(field_schema: FieldSchema, value: Any) -> Optional[str]:
             return (f"'{field_schema.name}' allows {sorted(allowed)}, "
                     f"found {unexpected}.")
 
+    if field_schema.type == TYPE_MAPPING:
+        return check_mapping(field_schema, value)
+
+    return None
+
+
+def check_mapping(field_schema: FieldSchema, value: Any) -> Optional[str]:
+    """
+    Check one mapping cell.
+
+    Parameters
+    ----------
+    field_schema : FieldSchema
+        Declared mapping field.
+    value : Any
+        Cell contents.
+
+    Returns
+    -------
+    error : str or None
+        What is wrong, or None. A pair that cannot be read is an error, since
+        it means a value was written and not recorded. A name nobody declared
+        is not: `key_options` says what is *expected*, like every other option
+        list here.
+    """
+    mapping, problems = parse_mapping(value)
+
+    if problems:
+        return (f"'{field_schema.name}' expects pairs like "
+                f"'{MAPPING_EXAMPLE}'; could not read "
+                f"{problems[:MAX_REPORTED_VALUES]}.")
+
+    unreadable = [name for name, item in mapping.items()
+                  if not isinstance(item, (int, float))]
+    if unreadable:
+        return (f"'{field_schema.name}' expects a number for each name; "
+                f"{unreadable[:MAX_REPORTED_VALUES]} carry text.")
+
     return None
 
 
@@ -388,7 +831,7 @@ def validate_metadata(schema: EntitySchema,
 
     for field_schema in schema.fields:
         value = metadata.get(field_schema.name)
-        blank = value is None or (isinstance(value, str) and not value.strip())
+        blank = is_blank(value)
 
         if field_schema.required and blank:
             report.errors.append(f"{prefix}'{field_schema.name}' is required.")
@@ -398,9 +841,8 @@ def validate_metadata(schema: EntitySchema,
         if problem:
             report.errors.append(f"{prefix}{problem}")
 
-    declared = {field_schema.name for field_schema in schema.fields}
-    declared.add(schema.identifier_field)
-    report.undeclared = [name for name in metadata if name not in declared]
+    report.undeclared = [name for name in metadata
+                         if name not in schema.declared_names()]
 
     return report
 
@@ -470,11 +912,40 @@ def template_frames(schema: EntitySchema) -> tuple:
         "Type": entry.type,
         "Required": "Yes" if entry.required else "No",
         "Unit": entry.unit or "",
-        "Allowed values": ", ".join(str(option) for option in entry.options),
+        "Allowed values": ", ".join(str(option) for option in
+                                    (entry.options or entry.key_options)),
+        "Example": field_example(entry),
         "Notes": entry.help or "",
     } for entry in schema.fields])
 
     return pd.DataFrame(columns=columns), guide
+
+
+def field_example(field_schema: FieldSchema) -> str:
+    """
+    Show how a field is written, where the format is not obvious.
+
+    A mapping column is the one that cannot be guessed from its name, and the
+    template is where somebody is looking when they need to know.
+
+    Parameters
+    ----------
+    field_schema : FieldSchema
+        Field to describe.
+
+    Returns
+    -------
+    example : str
+        An example cell, empty where the field needs none.
+    """
+    if field_schema.type != TYPE_MAPPING:
+        return ""
+
+    if not field_schema.key_options:
+        return MAPPING_EXAMPLE
+
+    return "; ".join(f"{option}=0.02"
+                     for option in field_schema.key_options[:3])
 
 
 def write_template(schema: EntitySchema, path: Path) -> Path:

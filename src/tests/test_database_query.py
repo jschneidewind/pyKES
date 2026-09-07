@@ -467,3 +467,74 @@ def test_the_type_ahead_can_be_scoped_to_one_kind(connection):
     assert search_entity_ids(connection, "SEMI",
                              entity_type="finished_semiconductor") == \
         ["SEMI-1", "SEMI-2"]
+
+
+# =============================================================================
+# One field reached by several paths
+# =============================================================================
+
+def test_paths_to_one_field_become_one_filter():
+    from pyKES.database.index_query import merge_key_paths
+
+    rows = [{"key": "catalyst_batch/finished_semiconductor/Synthesis route",
+             "leaf_name": "Synthesis route",
+             "role_path": "catalyst_batch/finished_semiconductor",
+             "inferred_type": "text", "distinct_sample": '["Osterloh"]',
+             "sub_keys": None},
+            {"key": "catalyst_batch/catalyst_batch/finished_semiconductor/Synthesis route",
+             "leaf_name": "Synthesis route",
+             "role_path": "catalyst_batch/catalyst_batch/finished_semiconductor",
+             "inferred_type": "text", "distinct_sample": '["Lercher"]',
+             "sub_keys": None}]
+
+    groups = merge_key_paths(rows)
+
+    # A modified batch adds a hop, so the semiconductor sits at two depths. One
+    # filter per depth would answer for half the experiments each, and neither
+    # would say so.
+    assert len(groups) == 1
+    assert len(groups[0]["keys"]) == 2
+    assert groups[0]["keys"][0].count("/") == 2, "the shortest path leads"
+    assert sorted(groups[0]["sample"]) == ["Lercher", "Osterloh"]
+
+
+def test_the_same_name_on_two_entities_stays_two_filters():
+    from pyKES.database.index_query import merge_key_paths
+
+    rows = [{"key": "catalyst_batch/Notes", "leaf_name": "Notes",
+             "role_path": "catalyst_batch", "inferred_type": "text",
+             "distinct_sample": "[]", "sub_keys": None},
+            {"key": "catalyst_batch/finished_semiconductor/Notes",
+             "leaf_name": "Notes",
+             "role_path": "catalyst_batch/finished_semiconductor",
+             "inferred_type": "text", "distinct_sample": "[]", "sub_keys": None}]
+
+    # A batch's notes and a semiconductor's notes are different fields; sharing
+    # a name is not enough to merge them.
+    assert len(merge_key_paths(rows)) == 2
+
+
+def test_a_filter_over_several_paths_reads_whichever_one_exists():
+    from pyKES.database.index_query import build_expression
+
+    expression, paths = build_expression(
+        "catalyst_batch/X", None, ["catalyst_batch/catalyst_batch/X"])
+
+    assert expression.startswith("COALESCE(")
+    assert len(paths) == 2
+
+
+# =============================================================================
+# Mapping-valued metadata
+# =============================================================================
+
+def test_a_dopant_is_addressed_one_level_deeper():
+    assert json_path("Dopants [mol%]", "Ir") == '$."Dopants [mol%]"."Ir"'
+
+
+def test_a_dopant_filter_binds_its_path_rather_than_interpolating_it():
+    predicate, parameters = build_predicate(
+        Filter("Dopants [mol%]", "between", [0.01, 0.03], sub_key='Ir"; DROP--'))
+
+    assert '"; DROP' not in predicate
+    assert any('DROP' in str(parameter) for parameter in parameters)

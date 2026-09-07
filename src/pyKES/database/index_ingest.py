@@ -34,6 +34,7 @@ from pyKES.database.database_experiments import ExperimentalDataset, Experiment
 from pyKES.database.entity_schema import (
     EntitySchema,
     load_entity_schemas,
+    prepare_metadata,
     validate_entries,
 )
 from pyKES.database.index_references import (
@@ -146,6 +147,29 @@ class IngestionReport:
                 f"{len(self.result_conflicts)} result conflicts.")
 
 
+def schema_for(entity_type: str,
+               schemas: Optional[Dict[str, EntitySchema]] = None) -> Optional[EntitySchema]:
+    """
+    Find the schema for one kind of entry.
+
+    Parameters
+    ----------
+    entity_type : str
+        Kind of entry.
+    schemas : dict, optional
+        Loaded schemas. Defaults to the shipped ones.
+
+    Returns
+    -------
+    schema : EntitySchema or None
+        The schema, or None for a kind nobody has declared — which is checked
+        against nothing and stored exactly as it arrives.
+    """
+    schemas = load_entity_schemas() if schemas is None else schemas
+
+    return schemas.get(entity_type)
+
+
 def check_against_schema(entity_type: str,
                          entries: Dict[str, Dict[str, Any]],
                          schemas: Optional[Dict[str, EntitySchema]] = None) -> List[str]:
@@ -162,7 +186,9 @@ def check_against_schema(entity_type: str,
         Kind of entry the upload holds.
     entries : dict
         Mapping of entry name to its raw metadata, before key escaping — schema
-        field names are written the way a person writes them.
+        field names are written the way a person writes them. Values are
+        prepared before they are checked, by the same function the ingestion
+        writes through, so what is validated is exactly what is stored.
     schemas : dict, optional
         Loaded schemas. Defaults to the shipped ones; a kind of entry with no
         schema is not checked at all.
@@ -177,13 +203,14 @@ def check_against_schema(entity_type: str,
     IngestionError
         If any entry violates the schema.
     """
-    schemas = load_entity_schemas() if schemas is None else schemas
-    schema = schemas.get(entity_type)
+    schema = schema_for(entity_type, schemas)
 
     if schema is None:
         return []
 
-    report = validate_entries(schema, entries)
+    report = validate_entries(
+        schema, {name: prepare_metadata(schema, metadata)
+                 for name, metadata in entries.items()})
 
     if report.errors:
         raise IngestionError(
@@ -674,6 +701,8 @@ def ingest_hdf5_upload(connection,
     if not dataset.experiments:
         raise IngestionError(f"{Path(file_path).name} holds no experiments.")
 
+    schema = schema_for(entity_type, schemas)
+
     # Checked before the file is stored, so a rejected upload leaves nothing
     # behind at all.
     undeclared = check_against_schema(
@@ -697,7 +726,8 @@ def ingest_hdf5_upload(connection,
     for name in sorted(dataset.experiments):
         experiment = dataset.experiments[name]
         entity_id, version = allocate_entity_id(connection, name)
-        metadata = coerce_index_mapping(split_identity_metadata(experiment.metadata))
+        metadata = coerce_index_mapping(prepare_metadata(
+            schema, split_identity_metadata(experiment.metadata)))
 
         insert_entity(
             connection,
@@ -797,6 +827,7 @@ def ingest_entity_sheet(connection,
         )
 
     rows = frame.to_dict(orient="records")
+    schema = schema_for(entity_type, schemas)
     undeclared = check_against_schema(
         entity_type,
         {str(row[identifier_column]).strip():
@@ -816,9 +847,10 @@ def ingest_entity_sheet(connection,
     for row in rows:
         base_id = str(row[identifier_column]).strip()
         entity_id, version = allocate_entity_id(connection, base_id)
-        metadata = coerce_index_mapping(
+        metadata = coerce_index_mapping(prepare_metadata(
+            schema,
             {key: value for key, value in row.items() if key != identifier_column}
-        )
+        ))
 
         insert_entity(
             connection,

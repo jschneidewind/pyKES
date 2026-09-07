@@ -10,6 +10,7 @@ fields:
   - name: Commercial Chemical
     type: reference
     role: commercial_chemical
+    accepts: [commercial_chemical]
     help: The purchased chemical this was prepared from, where there is one.
 
   - name: Preparation route

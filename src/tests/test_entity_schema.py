@@ -20,6 +20,8 @@ from pyKES.database.entity_schema import (
     coerce_boolean,
     load_entity_schema,
     load_entity_schemas,
+    parse_mapping,
+    prepare_metadata,
     template_frames,
     validate_entries,
     validate_metadata,
@@ -80,10 +82,16 @@ def test_reference_fields_supply_the_chain(schema):
     # The reference declaration is derived from the schemas rather than written
     # twice, so this is what wires the group's chain together.
     assert schemas["experiment"].reference_instructions() == {
-        "Catalyst Batch [experiment no.]": {"role": "catalyst_batch"}}
+        "Catalyst Batch [experiment no.]": {
+            "role": "catalyst_batch",
+            "accepts": ["catalyst_batch", "modified_catalyst_batch"]}}
+
+    precursors = ["precursor_chemical", "commercial_chemical"]
     assert schemas["finished_semiconductor"].reference_instructions() == {
-        "Precursor Chemical A": {"role": "precursor_chemical_a"},
-        "Precursor Chemical B": {"role": "precursor_chemical_b"}}
+        "Precursor Chemical A": {"role": "precursor_chemical_a",
+                                 "accepts": precursors},
+        "Precursor Chemical B": {"role": "precursor_chemical_b",
+                                 "accepts": precursors}}
 
 
 # =============================================================================
@@ -271,3 +279,142 @@ def test_a_filled_in_template_passes_its_own_schema(schema, tmp_path):
         for row in frame.to_dict(orient="records")})
 
     assert report.errors == []
+
+
+# =============================================================================
+# Mapping fields
+# =============================================================================
+
+@pytest.mark.parametrize("cell, expected", [
+    ("Ir=0.02; Ru=0.02", {"Ir": 0.02, "Ru": 0.02}),
+    ("900:0.5; 1000 = 2", {"900": 0.5, "1000": 2.0}),
+    ("Ir=0.02\nRu=0.02", {"Ir": 0.02, "Ru": 0.02}),
+    ("  Ir = 0.02  ", {"Ir": 0.02}),
+    ("", {}),
+    (None, {}),
+    (float("nan"), {}),
+    ({"Ir": 0.02}, {"Ir": 0.02}),
+])
+def test_a_mapping_cell_is_read_however_it_was_typed(cell, expected):
+    # An empty Excel cell arrives as NaN, not as an empty string: reading it as
+    # the text 'nan' reports a filled-in field nobody filled in.
+    assert parse_mapping(cell)[0] == expected
+
+
+def test_a_pair_that_cannot_be_read_is_reported_not_dropped():
+    mapping, problems = parse_mapping("Ir 0.02; Ru=0.02")
+
+    # For a composition, silently dropping one is the difference between
+    # "no dopant" and "a dopant we lost".
+    assert mapping == {"Ru": 0.02}
+    assert problems == ["Ir 0.02"]
+
+
+def test_an_unreadable_pair_fails_validation():
+    field_schema = FieldSchema(name="Dopants [mol%]", type="mapping")
+    report = validate_metadata(EntitySchema("x", "X", fields=[field_schema]),
+                               {"Dopants [mol%]": "Ir 0.02"})
+
+    assert any("could not read" in error for error in report.errors)
+
+
+def test_a_dopant_nobody_declared_is_accepted():
+    field_schema = FieldSchema(name="Dopants [mol%]", type="mapping",
+                               key_options=["Ir", "Ru"])
+    report = validate_metadata(EntitySchema("x", "X", fields=[field_schema]),
+                               {"Dopants [mol%]": "Ir=0.02; Unobtainium=0.5"})
+
+    # key_options says what is expected, like every other option list here.
+    assert report.errors == []
+
+
+def test_a_profile_derives_the_scalars_its_schema_declares():
+    field_schema = FieldSchema(
+        name="Temperature steps [°C and h]", type="mapping",
+        derived=[{"name": "Peak temperature [°C]", "of": "max_key"},
+                 {"name": "Time at peak temperature [h]", "of": "value_at_max_key"}])
+    schema = EntitySchema("x", "X", fields=[field_schema])
+
+    prepared = prepare_metadata(
+        schema, {"Temperature steps [°C and h]": "900=0.5; 1150=10; 1000=2"})
+
+    # The peak is the largest temperature, not the last one written.
+    assert prepared["Peak temperature [°C]"] == 1150.0
+    assert prepared["Time at peak temperature [h]"] == 10.0
+    assert prepared["Temperature steps [°C and h]"] == {"900": 0.5, "1000": 2.0,
+                                                        "1150": 10.0}
+
+
+def test_a_derived_scalar_is_not_reported_as_undeclared():
+    field_schema = FieldSchema(
+        name="Steps", type="mapping",
+        derived=[{"name": "Peak temperature [°C]", "of": "max_key"}])
+    schema = EntitySchema("x", "X", fields=[field_schema])
+
+    report = validate_metadata(schema, prepare_metadata(
+        schema, {"Steps": "900=1; 1150=4"}))
+
+    assert report.errors == [] and report.undeclared == []
+
+
+def test_dopant_names_derive_nothing():
+    field_schema = FieldSchema(
+        name="Dopants [mol%]", type="mapping",
+        derived=[{"name": "Peak", "of": "max_key"}])
+
+    prepared = prepare_metadata(EntitySchema("x", "X", fields=[field_schema]),
+                                {"Dopants [mol%]": "Ir=0.02; Ru=0.02"})
+
+    # No key is a number, so there is no peak to record — as opposed to a peak
+    # of zero, which would be a measurement nobody made.
+    assert "Peak" not in prepared
+
+
+def test_an_unknown_derived_function_is_refused():
+    with pytest.raises(ValueError, match="unknown function"):
+        FieldSchema(name="Steps", type="mapping",
+                    derived=[{"name": "Peak", "of": "average_of_everything"}])
+
+
+def test_the_template_shows_how_a_mapping_is_written():
+    schema = load_entity_schemas()["finished_semiconductor"]
+    _, guide = template_frames(schema)
+    dopants = guide[guide["Field"] == "Dopants [mol%]"].iloc[0]
+
+    # The one column whose format cannot be guessed from its name, explained
+    # where somebody filling the template is looking.
+    assert "=" in dopants["Example"]
+
+
+# =============================================================================
+# References that accept more than one kind of entry
+# =============================================================================
+
+def test_a_reference_accepts_what_its_schema_says():
+    schemas = load_entity_schemas()
+
+    assert schemas["experiment"].field_named(
+        "Catalyst Batch [experiment no.]").accepts == [
+            "catalyst_batch", "modified_catalyst_batch"]
+
+
+def test_an_undeclared_reference_is_left_unchecked():
+    # Deriving the accepted kind from the role would read 'precursor_chemical_a'
+    # as a type and flag every correct reference in the group's own chain.
+    assert FieldSchema(name="X", type="reference", role="precursor_chemical_a").accepts == []
+
+
+def test_accepts_on_something_that_is_not_a_reference_is_refused():
+    with pytest.raises(ValueError, match="not a reference"):
+        FieldSchema(name="Operator", type="text", accepts=["experiment"])
+
+
+def test_the_accepted_types_index_spans_every_schema():
+    from pyKES.database.entity_schema import accepted_types
+
+    accepted = accepted_types(load_entity_schemas())
+
+    assert accepted[("experiment", "catalyst_batch")] == [
+        "catalyst_batch", "modified_catalyst_batch"]
+    assert accepted[("modified_catalyst_batch", "catalyst_batch")] == [
+        "catalyst_batch"]

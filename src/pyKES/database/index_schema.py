@@ -27,7 +27,7 @@ from typing import Optional
 
 # Bumped when the table layout changes in a way an existing index cannot simply
 # be reopened with. A rebuild from the retained uploads is always the fallback.
-INDEX_SCHEMA_VERSION = "1.0"
+INDEX_SCHEMA_VERSION = "1.1"
 
 
 # =============================================================================
@@ -44,11 +44,19 @@ ENTITY_TYPES = (
     "precursor_chemical",
     "commercial_chemical",
     "stock_solution",
+    "modified_catalyst_batch",
     "other_entity",
 )
 
 # Assigned to entries whose type cannot be determined from the upload.
 DEFAULT_ENTITY_TYPE = "other_entity"
+
+# Columns introduced after the first release, applied to an existing index by
+# `add_missing_columns`. Only ever additive: a column with a default is
+# something an old database can gain, whereas a changed one is a rebuild.
+ADDED_COLUMNS = (
+    ("metadata_keys", "sub_keys", "TEXT"),
+)
 
 
 # =============================================================================
@@ -143,7 +151,8 @@ CREATE TABLE IF NOT EXISTS metadata_keys (
     first_seen      TEXT    NOT NULL,
     last_seen       TEXT    NOT NULL,
     distinct_sample TEXT,
-    entity_types    TEXT
+    entity_types    TEXT,
+    sub_keys        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS result_keys (
@@ -249,11 +258,40 @@ def initialise_index(connection: sqlite3.Connection) -> None:
     None : None
     """
     connection.executescript(SCHEMA_STATEMENTS)
+    add_missing_columns(connection)
     connection.execute(
         "INSERT OR IGNORE INTO index_meta (key, value) VALUES ('schema_version', ?)",
         (INDEX_SCHEMA_VERSION,),
     )
     connection.commit()
+
+
+def add_missing_columns(connection: sqlite3.Connection) -> None:
+    """
+    Add columns a newer version introduced to an index that predates them.
+
+    ``CREATE TABLE IF NOT EXISTS`` leaves an existing table exactly as it was,
+    so a column added to the schema never reaches a database that already
+    exists. Adding them here means an index built before this version keeps
+    working without being rebuilt — the column starts empty and fills as
+    entries are ingested or the registry is rebuilt.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+
+    Returns
+    -------
+    None : None
+    """
+    for table, column, declaration in ADDED_COLUMNS:
+        present = {row["name"] for row in
+                   connection.execute(f"PRAGMA table_info({table})")}
+
+        if column not in present:
+            connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def read_index_schema_version(connection: sqlite3.Connection) -> Optional[str]:

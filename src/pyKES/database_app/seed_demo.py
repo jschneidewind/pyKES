@@ -34,12 +34,30 @@ from pyKES.database_app.config import GROUP_REFERENCE_INSTRUCTIONS
 # property map all have something to do.
 EXPERIMENT_COUNT = 60
 BATCH_COUNT = 12
+MODIFIED_BATCH_COUNT = 4
+
+# Every nth experiment is run on a modified batch rather than an ordinary one.
+MODIFIED_BATCH_INTERVAL = 5
 SEMICONDUCTOR_COUNT = 6
 PRECURSOR_COUNT = 3
 
 # Samples per synthetic trace. Enough for the payload to look like a real
 # measurement and to exercise gzip.
 TRACE_POINTS = 900
+
+# Dopant sets written the way a sheet writes them, so the demo exercises the
+# parsing rather than only the storage. One entry is deliberately undoped: a
+# mapping field that is sometimes absent is the normal case, and the filter has
+# to cope with it.
+DOPANT_SETS = ("Ir=0.02; Ru=0.02", "Cr=0.03", "Ir=0.05; Cr=0.01",
+               "Ru=0.04; La=0.01", "Ir=0.02; Ru=0.02; Cr=0.03", "")
+
+# Synthesis profiles, in the same notation. The peak temperature and the time
+# held there are derived from these at ingestion.
+TEMPERATURE_PROFILES = ("900=0.5; 1000=2; 1150=10",
+                        "900=0.5; 1050=6",
+                        "1000=1; 1100=4; 1200=2",
+                        "950=2; 1150=8")
 
 # Values the synthetic metadata is drawn from, chosen to match the group's own
 # vocabulary so the demo reads like the real thing.
@@ -118,6 +136,9 @@ def build_semiconductor_sheet(directory: Path, generator) -> Path:
             "Synthesis temperature [°C]": int(
                 generator.choice(SYNTHESIS_TEMPERATURES)),
             "Synthesis route": ("Osterloh", "Lercher")[index % 2],
+            "Dopants [mol%]": DOPANT_SETS[index % len(DOPANT_SETS)],
+            "Temperature steps [°C and h]": TEMPERATURE_PROFILES[
+                index % len(TEMPERATURE_PROFILES)],
             "Notes": "",
         })
 
@@ -154,13 +175,82 @@ def build_batch_sheet(directory: Path, generator) -> Path:
             "Photodeposition wavelength [nm]": int(
                 generator.choice(PHOTODEPOSITION_WAVELENGTHS)),
             "Photodeposition time [min]": int(generator.choice((20, 30, 45))),
-            "Co-catalyst A": str(generator.choice(COCATALYSTS)),
-            "Co-catalyst A loading [wt%]": float(
-                generator.choice((0.05, 0.1, 0.2, 0.5))),
+            "Co-catalysts [wt%]": (
+                f"{generator.choice(COCATALYSTS)}="
+                f"{generator.choice((0.05, 0.1, 0.2, 0.5))}; "
+                f"Cr={generator.choice((0.02, 0.05))}"),
             "Notes": "",
         })
 
     path = directory / "catalyst_batches.xlsx"
+    pd.DataFrame(rows).to_excel(path, index=False)
+
+    return path
+
+
+def batch_tested(index: int) -> str:
+    """
+    Name the batch one experiment was run on.
+
+    Every fifth experiment tests a *modified* batch instead of an ordinary one,
+    under the same ``catalyst_batch`` role. That is the case the reference
+    machinery was extended for, and a demo in which it never occurs would not
+    show it working.
+
+    Parameters
+    ----------
+    index : int
+        Position of the experiment in the synthetic batch.
+
+    Returns
+    -------
+    entity_id : str
+        Identifier of the batch, of either kind.
+    """
+    if index % MODIFIED_BATCH_INTERVAL == 0:
+        return f"MOD-{(index // MODIFIED_BATCH_INTERVAL % MODIFIED_BATCH_COUNT) + 1:03d}"
+
+    return f"ABC-{(index % BATCH_COUNT) + 1:03d}"
+
+
+def build_modified_batch_sheet(directory: Path, generator) -> Path:
+    """
+    Write the modified-catalyst-batch sheet.
+
+    These exist so the demo carries the case the reference machinery was
+    extended for: an experiment's ``catalyst_batch`` role pointing at a kind of
+    entry that is not a catalyst batch, inheriting the original batch's whole
+    chain through it.
+
+    Parameters
+    ----------
+    directory : Path
+        Directory the sheet is written to.
+    generator : numpy.random.Generator
+        Source of the drawn values.
+
+    Returns
+    -------
+    path : Path
+        The written file.
+    """
+    rows = []
+    for index in range(MODIFIED_BATCH_COUNT):
+        rows.append({
+            "Experiment": f"MOD-{index + 1:03d}",
+            "group": "Reference",
+            "Original Catalyst Batch": f"ABC-{index + 1:03d}",
+            "Modification [type]": str(generator.choice(
+                ("Recoating", "Re-reduction", "Washing"))),
+            "Coating [coating material]": str(generator.choice(
+                ("Cr2O3", "SiOx", "TiOx"))),
+            "Coating thickness [nm]": float(generator.choice((2.0, 3.5, 5.0))),
+            "Treatment temperature [°C]": int(generator.choice((200, 300, 400))),
+            "Added Co-catalysts [wt%]": f"Cr={generator.choice((0.01, 0.02))}",
+            "Notes": "",
+        })
+
+    path = directory / "modified_catalyst_batches.xlsx"
     pd.DataFrame(rows).to_excel(path, index=False)
 
     return path
@@ -205,7 +295,7 @@ def build_experiment_batch(directory: Path, generator) -> Path:
             group="Reference",
             metadata={
                 "Experiment": f"EXP-{index + 1:04d}",
-                "Catalyst Batch [experiment no.]": f"ABC-{(index % BATCH_COUNT) + 1:03d}",
+                "Catalyst Batch [experiment no.]": batch_tested(index),
                 "Irradiance A [mW/cm2]": irradiance,
                 "Irradiation wavelength A [nm]": int(
                     generator.choice((365, 455, 525))),
@@ -302,6 +392,8 @@ def seed(root: Path, source_files: Path = None) -> dict:
         batch_file = build_experiment_batch(staging, generator)
         sheets = [
             (build_batch_sheet(staging, generator), "catalyst_batch"),
+            (build_modified_batch_sheet(staging, generator),
+             "modified_catalyst_batch"),
             (build_semiconductor_sheet(staging, generator), "finished_semiconductor"),
             (build_precursor_sheet(staging), "precursor_chemical"),
         ]

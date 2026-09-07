@@ -1,0 +1,69 @@
+# Metadata schema for a catalyst batch that was modified after it was made —
+# recoated, re-reduced, washed, milled. It is a distinct kind of entry rather
+# than a flag on the batch, because the modification has its own metadata and
+# its own date, and because the original batch stays a valid entry in its own
+# right and is usually tested too.
+#
+# An experiment names its catalyst batch under the role `catalyst_batch`
+# whichever of the two kinds it is (see experiment.yaml). The role names the
+# relationship, not the kind at the far end, so one filter spans both: what an
+# ordinary batch carries reaches the experiment as
+# `catalyst_batch/Photodeposition wavelength [nm]`, and a modified batch's
+# original reaches it one hop further along the same chain.
+
+entity_type: modified_catalyst_batch
+label: Modified catalyst batch
+identifier_field: Experiment
+description: A catalyst batch after a further treatment, as tested.
+
+fields:
+  - name: Original Catalyst Batch
+    type: reference
+    role: catalyst_batch
+    accepts: [catalyst_batch]
+    required: true
+    help: >-
+      The batch this one was made from. Everything that batch carries — its
+      cocatalysts, its semiconductor, its precursors — is inherited through
+      this reference, so only the modification itself is recorded here.
+
+  - name: Modification [type]
+    type: select
+    options: [Recoating, Re-reduction, Washing, Milling, Calcination, Other]
+    required: true
+
+  - name: Modification date
+    type: date
+
+  - name: Coating [coating material]
+    type: select
+    options: [none, SiOx, TiOx, Al2O3, Cr2O3]
+
+  - name: Coating thickness [nm]
+    type: number
+    unit: nm
+
+  - name: Treatment temperature [°C]
+    type: number
+    unit: °C
+
+  - name: Treatment time [h]
+    type: number
+    unit: h
+
+  - name: Added Co-catalysts [wt%]
+    type: mapping
+    key_label: Element
+    value_label: wt%
+    key_options: [Rh, Cr, Pt, Ru, Ir, Co, Ni, Au]
+    unit: wt%
+    help: >-
+      Anything deposited during the modification, on top of what the original
+      batch already carried. Written as name=value pairs: Cr=0.02; Rh=0.01.
+
+  - name: Active
+    type: boolean
+    default: true
+
+  - name: Notes
+    type: text

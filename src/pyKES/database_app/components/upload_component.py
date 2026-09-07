@@ -21,6 +21,7 @@ from pyKES.database.entity_schema import (
     TYPE_BOOLEAN,
     TYPE_DATE,
     TYPE_INTEGER,
+    TYPE_MAPPING,
     TYPE_MULTISELECT,
     TYPE_NUMBER,
     TYPE_REFERENCE,
@@ -50,6 +51,10 @@ SHEET_EXTENSIONS = ["xlsx", "csv"]
 
 # Kinds of entry that arrive as measured batches rather than as sheets.
 PAYLOAD_ENTITY_TYPES = ("experiment",)
+
+# Entries offered in a reference field's picker. Enough to cover what somebody
+# is likely to be linking to, bounded so the form does not load the database.
+REFERENCE_OPTION_LIMIT = 200
 
 
 def stage_upload(uploaded_file) -> Path:
@@ -288,7 +293,7 @@ def render_upload(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
 # Adding one entry through a form
 # =============================================================================
 
-def render_field(field_schema: FieldSchema):
+def render_field(field_schema: FieldSchema, connection=None):
     """
     Draw the widget one declared field calls for.
 
@@ -296,6 +301,10 @@ def render_field(field_schema: FieldSchema):
     ----------
     field_schema : FieldSchema
         Field to draw, whose type decides the widget and whose options fill it.
+    connection : sqlite3.Connection, optional
+        Open connection, used only to offer the entries a reference may point
+        at. Without one a reference falls back to a typed identifier, which is
+        still valid — an entry may name a target that has not been uploaded yet.
 
     Returns
     -------
@@ -330,11 +339,135 @@ def render_field(field_schema: FieldSchema):
     if field_schema.type == TYPE_DATE:
         return st.date_input(label, value=None, **arguments)
 
+    if field_schema.type == TYPE_MAPPING:
+        return render_mapping_field(field_schema, label, arguments["key"])
+
     if field_schema.type == TYPE_REFERENCE:
+        return render_reference_field(field_schema, label, arguments, connection)
+
+    return st.text_input(label, **arguments)
+
+
+def render_reference_field(field_schema: FieldSchema, label: str,
+                           arguments: dict, connection):
+    """
+    Offer the entries a reference may point at, and accept one that is not there.
+
+    Which kinds are on offer comes from the field's ``accepts``; a field that
+    declares none offers every kind, since inventing a constraint from the role
+    name would exclude the group's own chain — a ``precursor_chemical_a`` role
+    is filled by a ``precursor_chemical``.
+
+    A free-text box sits beside the list because a reference to an entry that
+    has not been uploaded yet is legitimate and routine: it is recorded
+    unresolved and promoted when the target arrives.
+
+    Parameters
+    ----------
+    field_schema : FieldSchema
+        Reference field being drawn.
+    label : str
+        Label for the widget.
+    arguments : dict
+        Shared widget arguments, including its key.
+    connection : sqlite3.Connection or None
+        Open connection to the index database.
+
+    Returns
+    -------
+    value : str
+        The chosen or typed identifier.
+    """
+    if connection is None:
         return st.text_input(label, placeholder="Identifier of the linked entry",
                              **arguments)
 
-    return st.text_input(label, **arguments)
+    chosen = st.selectbox(label, reference_options(connection, field_schema),
+                          index=None, placeholder="Select an entry…", **arguments)
+
+    typed = st.text_input(f"…or type an identifier for {field_schema.name}",
+                          placeholder="For an entry not uploaded yet",
+                          key=f"{arguments['key']}_typed")
+
+    return chosen or typed
+
+
+def reference_options(connection, field_schema: FieldSchema) -> list:
+    """
+    List the entries one reference field may point at.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+    field_schema : FieldSchema
+        Reference field, whose ``accepts`` narrows the list.
+
+    Returns
+    -------
+    entity_ids : list of str
+        Identifiers of entries of an accepted kind, newest first.
+    """
+    if not field_schema.accepts:
+        rows = connection.execute(
+            "SELECT entity_id FROM entities ORDER BY updated_at DESC LIMIT ?",
+            (REFERENCE_OPTION_LIMIT,))
+    else:
+        placeholders = ", ".join("?" for _ in field_schema.accepts)
+        rows = connection.execute(
+            f"""SELECT entity_id FROM entities WHERE entity_type IN ({placeholders})
+                ORDER BY updated_at DESC LIMIT ?""",
+            list(field_schema.accepts) + [REFERENCE_OPTION_LIMIT])
+
+    return [row["entity_id"] for row in rows]
+
+
+def render_mapping_field(field_schema: FieldSchema, label: str, widget_key: str):
+    """
+    Draw a field holding any number of named numbers.
+
+    An editable table is the Streamlit-native way to type a set whose size is
+    not known in advance, and it is written back as the same ``name=value``
+    text a sheet carries — so a form entry and an uploaded row produce
+    identical metadata and neither is a special case afterwards.
+
+    Parameters
+    ----------
+    field_schema : FieldSchema
+        Mapping field being drawn.
+    label : str
+        Label shown above the table.
+    widget_key : str
+        Key for the editor.
+
+    Returns
+    -------
+    value : str
+        The pairs, written the way a sheet writes them.
+    """
+    import pandas as pd
+
+    st.markdown(f"**{label}**")
+    if field_schema.help:
+        st.caption(field_schema.help)
+
+    names = field_schema.key_label or "Name"
+    numbers = field_schema.value_label or "Value"
+
+    edited = st.data_editor(
+        pd.DataFrame({names: pd.Series(dtype="str"),
+                      numbers: pd.Series(dtype="float")}),
+        num_rows="dynamic", width="stretch", hide_index=True,
+        key=widget_key,
+        column_config={names: st.column_config.SelectboxColumn(
+            options=field_schema.key_options)} if field_schema.key_options else None)
+
+    pairs = [f"{row[names]}={row[numbers]}" for row in
+             edited.to_dict(orient="records")
+             if row[names] and row[numbers] is not None
+             and str(row[numbers]).lower() != "nan"]
+
+    return "; ".join(pairs)
 
 
 def form_row(schema: EntitySchema, identifier: str, values: dict) -> dict:
@@ -414,7 +547,7 @@ def render_entry_form(connection, config: DatabaseAppConfig, identity,
         identifier = st.text_input(f"{schema.identifier_field} *",
                                    placeholder="e.g. ABC-014")
 
-        values = {field_schema.name: render_field(field_schema)
+        values = {field_schema.name: render_field(field_schema, connection)
                   for field_schema in schema.fields}
 
         submitted = st.form_submit_button("Add Entry", type="primary")

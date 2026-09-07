@@ -20,6 +20,11 @@ fields:
   - name: Catalyst Batch [experiment no.]
     type: reference
     role: catalyst_batch
+    # Either an ordinary batch or one that was modified afterwards. The role
+    # stays `catalyst_batch` whichever it is, so one filter spans both: an
+    # inherited key is named after the relationship, not after the kind of
+    # entry at the far end of it.
+    accepts: [catalyst_batch, modified_catalyst_batch]
     required: true
     help: The catalyst batch this test was run on.
 

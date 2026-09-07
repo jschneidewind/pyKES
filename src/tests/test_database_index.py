@@ -20,6 +20,7 @@ from pyKES.database.index_ingest import (
     IngestionError,
     allocate_entity_id,
     apply_index_instructions,
+    finalise_entity,
     ingest_entity_sheet,
     ingest_hdf5_upload,
     insert_entity,
@@ -34,6 +35,7 @@ from pyKES.database.index_references import (
     find_cyclic_entities,
     find_dependents,
     read_dangling_references,
+    read_reference_type_mismatches,
     resolve_effective_metadata,
 )
 from pyKES.database.index_registry import (
@@ -41,9 +43,11 @@ from pyKES.database.index_registry import (
     TYPE_NUMBER,
     coerce_index_value,
     read_metadata_keys,
+    register_metadata_keys,
     split_qualified_key,
 )
 from pyKES.database.index_schema import (
+    INDEX_SCHEMA_VERSION,
     IndexPaths,
     MAX_REFERENCE_DEPTH,
     open_index,
@@ -84,8 +88,6 @@ def build_chain(connection, reference_instructions):
 
     Returns the reference instructions used, so a test can re-apply them.
     """
-    from pyKES.database.index_ingest import finalise_entity
-
     add_entity(connection, "BC-2", "finished_semiconductor",
                {"Synthesis temperature [degC]": 1150})
     add_entity(connection, "ABC-12", "catalyst_batch",
@@ -115,7 +117,7 @@ CHAIN_REFERENCES = {
 # =============================================================================
 
 def test_index_initialises_and_records_its_schema_version(connection):
-    assert read_index_schema_version(connection) == "1.0"
+    assert read_index_schema_version(connection) == INDEX_SCHEMA_VERSION
 
     tables = {row["name"] for row in connection.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -210,8 +212,6 @@ def test_the_target_query_finds_the_experiment_two_hops_away(connection):
 
 
 def test_own_metadata_is_never_displaced_by_an_inherited_key(connection):
-    from pyKES.database.index_ingest import finalise_entity
-
     # Both entries carry their own 'Temperature [degC]'. Qualification is what
     # makes the merge incapable of collision.
     add_entity(connection, "PREC-1", "precursor_chemical", {"Temperature [degC]": 1150})
@@ -227,8 +227,6 @@ def test_own_metadata_is_never_displaced_by_an_inherited_key(connection):
 
 
 def test_presentation_fields_are_not_inherited(connection):
-    from pyKES.database.index_ingest import finalise_entity
-
     add_entity(connection, "PREC-2", "precursor_chemical",
                {"color": "blue", "group": "Reference", "Purity [%]": 99.9})
     add_entity(connection, "EXP-2", "experiment", {"Precursor": "PREC-2"})
@@ -278,8 +276,6 @@ def test_blank_reference_fields_are_skipped():
 
 
 def test_a_forward_reference_resolves_when_its_target_arrives(connection):
-    from pyKES.database.index_ingest import finalise_entity
-
     # The experiment names a batch that does not exist yet.
     add_entity(connection, "EXP-3", "experiment", {"Catalyst Batch": "LATE-1"})
     finalise_entity(connection, "EXP-3", {"Catalyst Batch": "LATE-1"}, CHAIN_REFERENCES)
@@ -302,8 +298,6 @@ def test_a_forward_reference_resolves_when_its_target_arrives(connection):
 
 
 def test_a_diamond_reaches_the_shared_ancestor_by_both_paths(connection):
-    from pyKES.database.index_ingest import finalise_entity
-
     add_entity(connection, "SRC-1", "commercial_chemical", {"Supplier": "Acme"})
     for batch in ("BATCH-A", "BATCH-B"):
         add_entity(connection, batch, "catalyst_batch", {"Precursor": "SRC-1"})
@@ -324,8 +318,6 @@ def test_a_diamond_reaches_the_shared_ancestor_by_both_paths(connection):
 
 
 def test_a_cycle_is_detected_rather_than_hung(connection):
-    from pyKES.database.index_ingest import finalise_entity
-
     add_entity(connection, "LOOP-A", "other_entity", {"Next": "LOOP-B", "A": 1})
     add_entity(connection, "LOOP-B", "other_entity", {"Next": "LOOP-A", "B": 2})
     for entity_id, other in (("LOOP-A", "LOOP-B"), ("LOOP-B", "LOOP-A")):
@@ -340,8 +332,6 @@ def test_a_cycle_is_detected_rather_than_hung(connection):
 
 
 def test_resolution_stops_at_the_depth_cap(connection):
-    from pyKES.database.index_ingest import finalise_entity
-
     length = MAX_REFERENCE_DEPTH + 4
     for position in range(length):
         add_entity(connection, f"N-{position}", "other_entity",
@@ -400,8 +390,6 @@ def test_a_non_owner_cannot_edit(connection):
 # =============================================================================
 
 def test_a_key_seen_with_two_types_is_marked_mixed(connection):
-    from pyKES.database.index_ingest import finalise_entity
-
     add_entity(connection, "M-1", "experiment", {"Loading [wt%]": 0.1})
     add_entity(connection, "M-2", "experiment", {"Loading [wt%]": "trace"})
     for entity_id, metadata in (("M-1", {"Loading [wt%]": 0.1}),
@@ -416,8 +404,6 @@ def test_a_key_seen_with_two_types_is_marked_mixed(connection):
 
 
 def test_a_consistent_key_keeps_its_type_and_counts_occurrences(connection):
-    from pyKES.database.index_ingest import finalise_entity
-
     for position in range(3):
         add_entity(connection, f"C-{position}", "experiment", {"Irradiance": 50})
         finalise_entity(connection, f"C-{position}", {"Irradiance": 50}, {})
@@ -651,3 +637,122 @@ def test_the_index_can_be_rebuilt_from_the_retained_uploads(connection, paths, t
         "SELECT entity_id, results FROM entities ORDER BY entity_id").fetchall()
 
     assert [tuple(row) for row in before] == [tuple(row) for row in after]
+
+
+# =============================================================================
+# One role, several kinds of entry
+# =============================================================================
+
+def test_a_role_carries_metadata_from_whatever_kind_it_reaches(connection):
+    add_entity(connection, "SEMI-1", "finished_semiconductor",
+               {"Synthesis temperature [°C]": 1150})
+    add_entity(connection, "ABC-1", "catalyst_batch",
+               {"Finished Semiconductor": "SEMI-1",
+                "Photodeposition wavelength [nm]": 365})
+    finalise_entity(connection, "ABC-1",
+                    {"Finished Semiconductor": "SEMI-1"},
+                    {"Finished Semiconductor": {"role": "finished_semiconductor"}})
+
+    add_entity(connection, "MOD-1", "modified_catalyst_batch",
+               {"Original Catalyst Batch": "ABC-1", "Coating thickness [nm]": 3.5})
+    finalise_entity(connection, "MOD-1", {"Original Catalyst Batch": "ABC-1"},
+                    {"Original Catalyst Batch": {"role": "catalyst_batch"}})
+
+    add_entity(connection, "EXP-1", "experiment",
+               {"Catalyst Batch [experiment no.]": "MOD-1"})
+    recomputed = finalise_entity(
+        connection, "EXP-1", {"Catalyst Batch [experiment no.]": "MOD-1"},
+        {"Catalyst Batch [experiment no.]": {"role": "catalyst_batch"}})
+
+    effective = resolve_effective_metadata(connection, "EXP-1")
+
+    # An edge records no target type, so the same role reaches a different kind
+    # of entry and the chain simply continues through it.
+    assert effective["catalyst_batch/Coating thickness [nm]"] == 3.5
+    assert effective["catalyst_batch/catalyst_batch/"
+                     "finished_semiconductor/Synthesis temperature [°C]"] == 1150
+    assert "EXP-1" in recomputed
+
+
+def test_a_reference_to_the_wrong_kind_is_reported_not_refused(connection):
+    add_entity(connection, "SEMI-1", "finished_semiconductor", {})
+    add_entity(connection, "MOD-1", "modified_catalyst_batch",
+               {"Original Catalyst Batch": "SEMI-1", "Coating thickness [nm]": 3.5})
+    finalise_entity(connection, "MOD-1", {"Original Catalyst Batch": "SEMI-1"},
+                    {"Original Catalyst Batch": {"role": "catalyst_batch"}})
+
+    mismatches = read_reference_type_mismatches(
+        connection, {("modified_catalyst_batch", "catalyst_batch"): ["catalyst_batch"]})
+
+    # The entry is written and its metadata merges: a wrong-kind reference is a
+    # labelling mistake, and discarding it would hide the mistake rather than
+    # show it.
+    assert len(mismatches) == 1
+    assert mismatches[0]["target_type"] == "finished_semiconductor"
+    assert connection.execute(
+        "SELECT 1 FROM entities WHERE entity_id = 'MOD-1'").fetchone() is not None
+
+
+def test_a_role_nobody_declared_is_not_checked(connection):
+    add_entity(connection, "BC-1", "commercial_chemical", {})
+    add_entity(connection, "SEMI-1", "finished_semiconductor",
+               {"Precursor Chemical A": "BC-1"})
+    finalise_entity(connection, "SEMI-1", {"Precursor Chemical A": "BC-1"},
+                    {"Precursor Chemical A": {"role": "precursor_chemical_a"}})
+
+    # An upload may declare references of its own; inventing a constraint for
+    # one would refuse data the group deliberately sent.
+    assert read_reference_type_mismatches(connection, {}) == []
+
+
+# =============================================================================
+# Mapping-valued metadata through the graph
+# =============================================================================
+
+def test_a_mapping_survives_the_inheritance_merge(connection):
+    add_entity(connection, "SEMI-1", "finished_semiconductor",
+               {"Dopants [mol%]": {"Ir": 0.02, "Ru": 0.02}})
+    add_entity(connection, "ABC-1", "catalyst_batch",
+               {"Finished Semiconductor": "SEMI-1"})
+    finalise_entity(connection, "ABC-1", {"Finished Semiconductor": "SEMI-1"},
+                    {"Finished Semiconductor": {"role": "finished_semiconductor"}})
+
+    effective = resolve_effective_metadata(connection, "ABC-1")
+
+    assert effective["finished_semiconductor/Dopants [mol%]"] == {"Ir": 0.02,
+                                                                  "Ru": 0.02}
+
+
+def test_the_registry_records_the_names_a_mapping_carries(connection):
+    add_entity(connection, "SEMI-1", "finished_semiconductor",
+               {"Dopants [mol%]": {"Ir": 0.02}})
+    add_entity(connection, "SEMI-2", "finished_semiconductor",
+               {"Dopants [mol%]": {"Cr": 0.03, "Ir": 0.05}})
+    for entity_id in ("SEMI-1", "SEMI-2"):
+        register_metadata_keys(connection,
+                               resolve_effective_metadata(connection, entity_id),
+                               "finished_semiconductor")
+
+    row = read_metadata_keys(connection, "Dopants [mol%]")[0]
+
+    # Every entry declares its own set, so the filter's dropdown is the union.
+    assert row["inferred_type"] == "mapping"
+    assert json.loads(row["sub_keys"]) == ["Cr", "Ir"]
+
+
+def test_a_column_added_after_the_index_was_built_is_added_to_it(paths):
+    import sqlite3
+
+    connection = open_index(paths)
+    connection.execute("ALTER TABLE metadata_keys DROP COLUMN sub_keys")
+    connection.commit()
+    connection.close()
+
+    # Reopening must repair it: CREATE TABLE IF NOT EXISTS leaves an existing
+    # table alone, so a new column never reaches a database that already exists.
+    reopened = open_index(paths)
+    columns = {row["name"] for row in
+               reopened.execute("PRAGMA table_info(metadata_keys)")}
+    reopened.close()
+
+    assert "sub_keys" in columns

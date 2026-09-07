@@ -10,6 +10,7 @@ fields:
   - name: Commercial Chemical
     type: reference
     role: commercial_chemical
+    accepts: [commercial_chemical]
 
   - name: Solvent
     type: select

@@ -1,8 +1,21 @@
-# Two planned extensions to the database
+# Two extensions to the database
 
-Neither of these is built. Both were asked for, both fit the existing design
-rather than fighting it, and each is described here down to the code change it
-implies so the work can be picked up without re-deriving the reasoning.
+**Both of these are now built.** This document is kept as the record of why they
+are shaped as they are — the reasoning, the measurements, and the alternatives
+that were rejected. What they *do* is described in
+[docs/database_app.md](database_app.md); what follows is why.
+
+Two things changed between the design and the implementation, and both are
+marked below where they arise:
+
+* `accepts` is **not** defaulted to the role's own name. A role names the
+  relationship, so `precursor_chemical_a` is filled by a `precursor_chemical`,
+  and reading the role as a type would have flagged every correct reference in
+  the group's own chain. Left out, a reference is simply not checked.
+* Accepting a second kind of entry under one role puts the same field at **two
+  depths**, which the design did not account for. A filter per depth would have
+  answered for half the experiments each and said nothing about the other half.
+  `build_facets` therefore merges the paths to one field into one filter (§1.7).
 
 Every claim about what already works was checked by running it — against the
 seeded demo archive (60 experiments, four references deep) and, where scale
@@ -63,7 +76,7 @@ Three things, all small, and the first is the only hard error:
 3. **The contribute form has nowhere to look** to decide which entries its
    reference picker should offer.
 
-### 1.4 The proposed declaration
+### 1.4 The declaration
 
 ```yaml
   - name: Catalyst Batch [experiment no.]
@@ -72,8 +85,12 @@ Three things, all small, and the first is the only hard error:
     accepts: [catalyst_batch, modified_catalyst_batch]
 ```
 
-`accepts` defaults to `[role]` when omitted, so every schema shipped today keeps
-its present meaning and nothing needs editing to adopt the field.
+**Changed from the design.** `accepts` was going to default to `[role]`. That is
+wrong: the shipped schemas have roles like `precursor_chemical_a`, filled by a
+`precursor_chemical`, so the default would have flagged every correct reference
+in the group's own chain as a mismatch. Omitting `accepts` now means *not
+checked*, and every shipped reference field declares its accepted kinds
+explicitly instead.
 
 ### 1.5 Where the check belongs — and where it must not
 
@@ -112,6 +129,35 @@ facet, while the text field `catalyst_batch/Modification` produced a multiselect
 That rule is right — a slider with one stop is not a filter — but it means a
 newly introduced kind's numeric fields stay invisible until at least two entries
 differ.
+
+### 1.7 One field, several paths — the part the design missed
+
+A modified batch sits *between* the experiment and the ordinary batch, so it
+adds a hop. The semiconductor is then two references away for experiments run on
+an ordinary batch and three away for the rest, and the registry holds two keys
+for one field:
+
+```
+catalyst_batch/finished_semiconductor/Synthesis temperature [°C]
+catalyst_batch/catalyst_batch/finished_semiconductor/Synthesis temperature [°C]
+```
+
+Left alone that produces two filters, each answering for part of the database
+and neither saying so — a silently wrong answer, which is worse than no filter
+at all. `merge_key_paths` therefore collects the paths to one field into a
+single facet, and `build_expression` reads whichever one an entry has with
+`COALESCE`, so every operator keeps working unchanged.
+
+The grouping is by the **last role and the field name**, not by the field name
+alone. The last role names the entity the field belongs to; the rest of the path
+is only how it was reached. That merges the semiconductor's synthesis
+temperature at both depths while keeping a batch's `Notes` and a semiconductor's
+`Notes` apart, which sharing a name is not enough to justify.
+
+Measured on the seeded demo: the dopant filter matches 19 experiments merged,
+against 16 through the shallow path alone — the three missing ones being exactly
+those tested on a modified batch. The merge also *shrinks* the sidebar, from a
+duplicated list back to 35 filters.
 
 ---
 
@@ -177,27 +223,34 @@ so the sub-keys belong in the registry, refreshed at ingestion — the same
 reasoning that put the metadata keys there rather than computing them per page
 view.
 
-### 2.5 What has to change, precisely
+### 2.5 What changed, precisely
 
-1. **`infer_value_type` returns `text` for a mapping today** (checked), so a
-   dopant field would be offered as a multiselect of stringified dictionaries.
-   It needs a `TYPE_MAPPING`.
-2. **The registry has to record the sub-keys** and their observed ranges. A
-   `sub_keys` JSON column on `metadata_keys` is the smaller change and matches
-   the bounded-sample idea `distinct_sample` already uses; a separate table buys
-   nothing here.
-3. **`Filter` needs a sub-key**, as its own field rather than encoded into the
-   key string. The key string already carries the role path; stacking a second
-   separator into it is precisely how the `__SLASH__` bug happened, and it would
-   happen again the first time an element label contained the separator.
+1. **`infer_value_type` returned `text` for a mapping**, so a dopant field would
+   have been offered as a multiselect of stringified dictionaries. It now
+   returns `TYPE_MAPPING`.
+2. **The registry records the sub-keys** it has seen, in a `sub_keys` JSON
+   column on `metadata_keys` — the same bounded-sample idea `distinct_sample`
+   already used. `add_missing_columns` adds it to an index that predates it, so
+   an existing database keeps working without a rebuild.
+3. **`Filter` gained a `sub_key`**, as its own field rather than something
+   encoded into the key string. The key string already carries the role path;
+   stacking a second separator into it is precisely how the `__SLASH__` bug
+   happened, and it would happen again the first time a name contained the
+   separator.
 4. **`build_facets` emits a mapping facet** carrying the available sub-keys and
    the bounds of each.
 5. **The sidebar draws it in two levels** — a multiselect of sub-keys, then one
-   slider per chosen sub-key. Both are widgets the page already uses, so this
-   stays inside "simple adjustments Streamlit supports natively".
-6. **Tables already cope**: `format_value` renders a mapping as compact JSON, so
-   a dopant field shows as `{"Ir": 0.02, "Ru": 0.02}` rather than breaking the
-   table.
+   slider per chosen sub-key. Both are widgets the page already used, so this
+   stayed inside "simple adjustments Streamlit supports natively".
+6. **Tables already coped**: `format_value` renders a mapping as compact JSON,
+   so a dopant field shows as `{"Ir": 0.02, "Ru": 0.02}` rather than breaking
+   the table.
+
+One thing had to be fixed that neither the design nor the first run of the
+seeding anticipated: an **empty Excel cell arrives as a float NaN**, not as an
+empty string, so the first pass read it as the text `nan` and reported a
+filled-in field nobody had filled in. `is_blank` now covers None, whitespace and
+NaN, and every blank check in the schema layer goes through it.
 
 ### 2.6 Declaring it in the Excel sheet
 
@@ -209,14 +262,16 @@ the downloadable template.
 | --- | --- |
 | One column per entry (`Dopant Ir [mol%]`, `Dopant Ru [mol%]`, …) | Reintroduces fixed slots, and the column set grows without bound. |
 | JSON in the cell (`{"Ir": 0.02}`) | Precise, but quoting is a trap for someone typing into Excel and Excel will not help them get it right. |
-| **`name=value` pairs, semicolon-separated** | **Recommended.** `Ir=0.02; Ru=0.02; Cr=0.03`. Typable, readable, no quoting, and close to how this gets written on a whiteboard. Temperature steps become `900=0.5; 1000=2; 1150=10`. |
+| **`name=value` pairs, semicolon-separated** | **Chosen.** `Ir=0.02; Ru=0.02; Cr=0.03`. Typable, readable, no quoting, and close to how this gets written on a whiteboard. Temperature steps become `900=0.5; 1000=2; 1150=10`. |
 
-Parsing splits on `;`, then on the first `=`, strips both sides, and puts the
-value through the same numeric coercion the rest of the sheet uses. Both `=` and
-`:` are accepted as the separator, because people will type both. A pair that
-does not parse is a validation **error** naming the cell — never a silent skip,
-which for a composition is the difference between "no dopant" and "a dopant we
-lost".
+Parsing splits on `;` or a newline, then on the first `=` or `:`, strips both
+sides, and puts the value through the same numeric coercion the rest of the
+sheet uses. Both separators are accepted because people write both — verified on
+one cell mixing them, `Cr=0.02; Rh:0.01`. A comma is deliberately *not* a pair
+separator: it would be ambiguous wherever Excel writes a decimal comma. A pair
+that does not parse is a validation **error** naming the cell — never a silent
+skip, which for a composition is the difference between "no dopant" and "a
+dopant we lost".
 
 The schema declares the field:
 
@@ -253,12 +308,16 @@ it are aggregates rather than per-key ranges — *held above 1100 °C*, *total t
 above 1000 °C*, *peak temperature*. Those are a maximum over the keys and a
 conditional sum over the pairs, neither of which a per-sub-key slider expresses.
 
-The recommendation is therefore to store the profile as the mapping, for the
-record and for display, and to let the schema declare **derived scalars**
-computed at ingestion — `Peak temperature [°C]`, `Time above 1000 °C [h]` —
-which then get ordinary sliders through the machinery that already exists. Which
-derived quantities are worth computing is a question for the group; guessing
-them would produce filters nobody uses next to the ones they wanted.
+The profile is therefore stored as the mapping, for the record and for display,
+and the schema declares **derived scalars** computed at ingestion, which then
+get ordinary sliders through the machinery that already exists. The group asked
+for two: `Peak temperature [°C]` (`max_key`) and `Time at peak temperature [h]`
+(`value_at_max_key`). `DERIVED_FUNCTIONS` in `entity_schema.py` is where more
+go, and an unknown one is refused when the file is read rather than at
+ingestion.
+
+A mapping whose names are not numbers — a set of dopants — derives nothing
+rather than deriving zero, which would be a measurement nobody made.
 
 ### 2.9 What this does not solve
 
@@ -270,17 +329,18 @@ and run `ANALYZE` afterwards.
 
 ---
 
-## 3. Suggested order
+## 3. What the group settled
 
-| Step | Why first |
-| --- | --- |
-| `accepts` in the reference schema, plus the new entity type | Smallest change, unblocks the group's actual workflow, and nothing else depends on it. |
-| `TYPE_MAPPING` and the sub-key registry | Everything in §2 rests on the registry knowing a mapping is a mapping. |
-| Sheet and form parsing | Lets real data in, which is what makes the filter worth building. |
-| The two-level facet | Last, because it is the only part that needs data to test against. |
+- **`catalyst_batch` accepts `catalyst_batch` and `modified_catalyst_batch`**,
+  and nothing else. `modified_catalyst_batch` is a full kind of entry with its
+  own schema and its own example data in the seeded demo.
+- **Peak temperature and time at peak** are the derived scalars for a profile.
+- **Both `=` and `:`** are accepted between a name and its value.
 
-## 4. Questions for the group
+## 4. Still open
 
-- Which kinds should `catalyst_batch` accept, beyond a modified batch?
-- Which derived scalars matter for a temperature profile?
-- `=` or `:` between name and value in the sheet — or both, as proposed?
+- Whether the shipped `key_options` lists — dopants, cocatalysts — are the
+  group's real vocabulary. They are what is *expected*, so an unlisted name is
+  reported and accepted, but a list nobody recognises makes that report useless.
+- Whether sorting a results table by one dopant's concentration is wanted
+  enough to promote that sub-key to a generated column (§2.9).

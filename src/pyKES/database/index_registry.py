@@ -41,6 +41,7 @@ from pyKES.database.index_schema import ROLE_PATH_SEPARATOR
 TYPE_NUMBER = "number"
 TYPE_TEXT = "text"
 TYPE_BOOLEAN = "boolean"
+TYPE_MAPPING = "mapping"
 TYPE_MIXED = "mixed"
 
 # How many distinct values are kept per key to build facet widgets from. Enough
@@ -135,13 +136,19 @@ def infer_value_type(value: Any) -> str:
     Returns
     -------
     type_name : str
-        One of ``TYPE_NUMBER``, ``TYPE_BOOLEAN`` or ``TYPE_TEXT``.
+        One of ``TYPE_NUMBER``, ``TYPE_BOOLEAN``, ``TYPE_MAPPING`` or
+        ``TYPE_TEXT``.
     """
     if isinstance(value, bool):
         return TYPE_BOOLEAN
 
     if isinstance(value, (int, float)):
         return TYPE_NUMBER
+
+    # Without this a set of dopant concentrations would be classified as text
+    # and offered as a multiselect of stringified dictionaries.
+    if isinstance(value, dict):
+        return TYPE_MAPPING
 
     return TYPE_TEXT
 
@@ -278,7 +285,7 @@ def register_metadata_keys(connection,
         observed_type = infer_value_type(value)
 
         row = connection.execute(
-            """SELECT inferred_type, distinct_sample, entity_types
+            """SELECT inferred_type, distinct_sample, entity_types, sub_keys
                FROM metadata_keys WHERE key = ?""",
             (key,),
         ).fetchone()
@@ -287,11 +294,13 @@ def register_metadata_keys(connection,
             connection.execute(
                 """INSERT INTO metadata_keys
                    (key, leaf_name, role_path, inferred_type, occurrences,
-                    first_seen, last_seen, distinct_sample, entity_types)
-                   VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)""",
+                    first_seen, last_seen, distinct_sample, entity_types,
+                    sub_keys)
+                   VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
                 (key, leaf_name, role_path, observed_type, now, now,
                  json.dumps([value]),
-                 json.dumps([entity_type] if entity_type else [])),
+                 json.dumps([entity_type] if entity_type else []),
+                 json.dumps(sorted(value) if isinstance(value, dict) else [])),
             )
             continue
 
@@ -306,11 +315,41 @@ def register_metadata_keys(connection,
         connection.execute(
             """UPDATE metadata_keys
                SET inferred_type = ?, occurrences = occurrences + 1,
-                   last_seen = ?, distinct_sample = ?, entity_types = ?
+                   last_seen = ?, distinct_sample = ?, entity_types = ?,
+                   sub_keys = ?
                WHERE key = ?""",
             (combine_types(row["inferred_type"], observed_type), now,
-             json.dumps(sample), json.dumps(entity_types), key),
+             json.dumps(sample), json.dumps(entity_types),
+             json.dumps(merge_sub_keys(row["sub_keys"], value)), key),
         )
+
+
+def merge_sub_keys(stored: Optional[str], value: Any) -> list:
+    """
+    Accumulate the names a mapping key has been seen carrying.
+
+    Every entry declares its own set — one sample is doped with iridium, the
+    next with chromium — so the filter's dropdown is the union across the
+    database, maintained here rather than scanned for on every page view.
+
+    Parameters
+    ----------
+    stored : str or None
+        Names recorded so far, as stored JSON.
+    value : Any
+        Value just seen. Anything but a mapping leaves the list alone.
+
+    Returns
+    -------
+    names : list of str
+        The union, sorted.
+    """
+    names = set(json.loads(stored or "[]"))
+
+    if isinstance(value, dict):
+        names.update(str(name) for name in value)
+
+    return sorted(names)
 
 
 def register_result_keys(connection,

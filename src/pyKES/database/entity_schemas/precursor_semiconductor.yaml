@@ -10,6 +10,7 @@ fields:
   - name: Precursor Chemical A
     type: reference
     role: precursor_chemical_a
+    accepts: [precursor_chemical, commercial_chemical]
 
   - name: Preparation route
     type: select

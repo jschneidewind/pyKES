@@ -197,8 +197,116 @@ which column links to what, so `GROUP_REFERENCE_INSTRUCTIONS` is derived from
 the schemas rather than written a second time that could disagree.
 
 Field types: `text`, `number`, `integer`, `boolean`, `select`, `multiselect`,
-`date`, `reference`. A deployment maintaining its own copy points
+`date`, `reference`, `mapping`. A deployment maintaining its own copy points
 `DatabaseAppConfig.schema_directory` at it.
+
+### References that accept more than one kind of entry
+
+A catalyst batch may be an ordinary one or a `modified_catalyst_batch` — one
+that was recoated, re-reduced or washed after it was made. The experiment does
+not have to know which:
+
+```yaml
+  - name: Catalyst Batch [experiment no.]
+    type: reference
+    role: catalyst_batch
+    accepts: [catalyst_batch, modified_catalyst_batch]
+```
+
+Most of this needed nothing new. An edge is `(source, role, target)` with no
+target-type column, and **inherited keys are qualified by the role, not by the
+kind of entry the role reached**. `catalyst_batch/Photodeposition wavelength
+[nm]` means "of whatever this experiment used as its catalyst batch", so one
+filter spans both kinds with no union logic.
+
+`accepts` is guidance and diagnosis, never a storage constraint. It decides
+which entries the contribution form's picker offers, and a link to a kind it
+does not name is **reported on the admin page, not refused**: the metadata still
+merges, because a wrong-kind reference is a labelling mistake and discarding the
+values would hide it rather than show it. The check runs over resolved edges
+rather than at upload, since an entry may legitimately name a target that has
+not been uploaded yet — refusing an upload for a fact not yet knowable would
+break the forward references the ingestion order depends on.
+
+Leaving `accepts` out means the reference is not checked. That is deliberately
+not the same as defaulting it to the role: a role names the *relationship*, so
+`precursor_chemical_a` is filled by a `precursor_chemical`, and reading the role
+as a type would flag every correct reference in the group's own chain.
+
+**One field, several paths.** A modified batch adds a hop, so the semiconductor
+sits two references away for experiments run on an ordinary batch and three away
+for the rest. Those are the same field of the same entity, so `build_facets`
+merges them into one filter that matches whichever path an entry has
+(`COALESCE` over both, in `build_expression`). Without that, a filter on
+synthesis temperature would answer for half the experiments and say nothing
+about the other half — a silently wrong answer, which is worse than no filter.
+The grouping is by the *last* role and the field name, not by the name alone, so
+a batch's `Notes` and a semiconductor's `Notes` stay apart.
+
+### Metadata that is a set of named numbers
+
+Dopants, cocatalysts and synthesis profiles are not one number:
+
+```yaml
+  - name: Dopants [mol%]
+    type: mapping
+    key_label: Dopant
+    value_label: mol%
+    key_options: [Ir, Ru, Cr, Rh, La, Sb, Ta, Sr]
+```
+
+This replaces the lettered `Co-catalyst A` / `Co-catalyst B` slots, which fixed
+the count in advance and made *"everything with at least 0.02 wt% Cr"* depend on
+which slot somebody happened to fill.
+
+**In a sheet** a mapping is one cell of `name=value` pairs — `Ir=0.02; Ru=0.02;
+Cr=0.03`. Both `=` and `:` separate a name from its value, because people write
+both; pairs are separated by a semicolon or a newline, not a comma, which would
+be ambiguous wherever Excel writes a decimal comma. That form was chosen over
+JSON in a cell, which is precise but a quoting trap for someone typing into
+Excel. A pair that cannot be read is an **error**, never a silent skip: for a
+composition, dropping one is the difference between "no dopant" and "a dopant we
+lost". The downloaded template's field guide carries an example, since this is
+the one column whose format cannot be guessed from its name.
+
+**In the form** it is an editable table with dynamic rows, written back as the
+same `name=value` text — so a form entry and an uploaded row produce identical
+metadata and neither is a special case afterwards.
+
+**In the filter** it is two levels: a picker of the names actually present, and
+then a slider per chosen name over the range that name spans. Choosing a name
+and leaving its slider alone is already a filter — it asks for entries carrying
+that dopant at all — which is what picking it from the list means. Any number of
+names can be chosen; each adds a predicate.
+
+Storage needed no change. `coerce_index_value` already recursed into
+dictionaries, so a mapping round-trips through the `effective` column and is
+inherited like any other value. What did need adding: `infer_value_type`
+classified a dictionary as text, which would have offered stringified
+dictionaries as a multiselect; the registry now records the union of the names
+seen (`metadata_keys.sub_keys`), which is what fills the dropdown; and `Filter`
+gained a `sub_key`, as its own field rather than a second separator stacked into
+the key string — that is how the `__SLASH__` bug happened once already.
+
+### Derived scalars
+
+A temperature profile is a *sequence*, and the questions asked of it are
+aggregates — the peak reached, the time held there — which no per-name slider
+expresses. So a mapping field can declare scalars computed from it at ingestion:
+
+```yaml
+    derived:
+      - name: Peak temperature [°C]
+        of: max_key
+      - name: Time at peak temperature [h]
+        of: value_at_max_key
+```
+
+They are stored as ordinary metadata, so each gets a slider, a table column and
+inheritance without any further work. `DERIVED_FUNCTIONS` in `entity_schema.py`
+is where more go. A mapping whose names are not numbers — a set of dopants —
+derives nothing rather than deriving zero, which would be a measurement nobody
+made.
 
 ### What validation does and does not do
 
@@ -227,6 +335,9 @@ resolving them automatically would mean guessing:
 
 * **Dangling references** — an edge whose target never arrived is
   indistinguishable from a typo.
+* **Wrong-kind references** — a link to a kind of entry its field does not
+  accept. Recomputed from the schemas on each view rather than stored, so
+  editing `accepts` in a YAML file is reflected immediately.
 * **Cycles** — reported rather than hung on.
 * **Key drift** — field names that differ only in punctuation or case, which is
   what two people typing two spreadsheet headers produces.
@@ -300,7 +411,7 @@ checked against a fixed set rather than interpolated.
   shared plotting component has always done. A batch whose entries all carry the
   same colour plots as one indistinguishable band; colouring a comparison by a
   chosen metadata field instead would be a better default.
-* Two larger extensions are planned and designed but not built — references that
-  accept more than one kind of entry, and metadata values that are mappings
-  rather than single numbers (dopants, co-catalysts, temperature profiles). See
-  [docs/database_extensions.md](database_extensions.md).
+* Promoting a mapping's sub-key to a generated column, which is what sorting the
+  results table by one dopant's concentration would need. The measurement in
+  [docs/database_extensions.md](database_extensions.md) §2.9 applies unchanged:
+  promote the two or three that matter, then run `ANALYZE`.
