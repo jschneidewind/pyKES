@@ -26,7 +26,7 @@ from pyKES.database.index_query import (
     rows_to_frame,
     search_entities,
 )
-from pyKES.database.index_registry import register_result_keys
+from pyKES.database.index_registry import read_metadata_keys, register_result_keys
 from pyKES.database.index_schema import IndexPaths, open_index
 
 
@@ -306,9 +306,10 @@ def test_the_results_table_carries_the_requested_columns(connection):
     frame = rows_to_frame(rows, [stored, f"{RESULT_PREFIX}Max. rate (umol/s)"])
 
     # Looked up by the stored key, but headed by the name a person wrote: the
-    # escaping is storage detail and never reaches the screen.
-    assert list(frame.columns) == ["Entity ID", "Kind", "Group", "Owner",
-                                   "Irradiance A [mW/cm2]", "Max. rate (umol/s)"]
+    # escaping is storage detail and never reaches the screen. The chosen
+    # columns come before the fixed ones, or a wide table hides them.
+    assert list(frame.columns) == ["Entity ID", "Irradiance A [mW/cm2]",
+                                   "Max. rate (umol/s)", "Kind", "Group", "Owner"]
     assert frame["Max. rate (umol/s)"].notna().all()
 
 
@@ -334,6 +335,110 @@ def test_facets_are_ordered_by_reference_depth(connection):
     # narrowing a search thinks in.
     assert depths == sorted(depths)
     assert depths[0] == 0 and max(depths) == 2
+
+
+def test_the_fields_of_one_referenced_entity_stay_together(connection):
+    paths = [facet.role_path or "" for facet in build_facets(connection, "experiment")]
+
+    # The sidebar puts each group under the name of the entity it describes, so
+    # a path may not reappear once another has started.
+    seen = []
+    for role_path in paths:
+        if not seen or seen[-1] != role_path:
+            assert role_path not in seen
+            seen.append(role_path)
+
+
+def test_a_filter_group_is_named_after_its_entity(connection):
+    from pyKES.database.index_query import facet_group_label
+
+    facets = build_facets(connection, "experiment")
+    labels = {facet_group_label(facet, "experiment") for facet in facets}
+
+    # 'Finished semiconductor' says what the fields describe; 'two references
+    # away' only says how far off it is.
+    assert "Experiment" in labels
+    assert "Finished semiconductor" in labels
+
+
+# =============================================================================
+# Column headers
+# =============================================================================
+
+def test_a_column_header_is_the_field_name_and_the_chain_is_the_tooltip():
+    from pyKES.database.index_query import column_labels
+
+    labels = column_labels(["Operator",
+                            "catalyst_batch/finished_semiconductor/Synthesis route",
+                            f"{RESULT_PREFIX}Max. rate (umol/s)"])
+
+    assert labels["Operator"] == ("Operator", "This entry")
+    assert labels["catalyst_batch/finished_semiconductor/Synthesis route"] == (
+        "Synthesis route", "Catalyst batch › Finished semiconductor")
+    assert labels[f"{RESULT_PREFIX}Max. rate (umol/s)"] == (
+        "Max. rate (umol/s)", "Result")
+
+
+def test_columns_sharing_a_field_name_are_told_apart():
+    from pyKES.database.index_query import column_labels
+
+    headers = [header for header, _ in column_labels(
+        ["finished_semiconductor/precursor_chemical_a/Supplier",
+         "finished_semiconductor/precursor_chemical_b/Supplier"]).values()]
+
+    # A duplicate header would silently drop one of the two columns, which is
+    # exactly the failure the user sees as 'my column did not appear'.
+    assert len(set(headers)) == 2
+    assert all("Supplier" in header for header in headers)
+
+
+def test_a_chosen_column_never_overwrites_another(connection):
+    rows, _ = search_entities(connection, "experiment", limit=2)
+    chosen = ["Operator", "catalyst_batch/Photodeposition wavelength [nm]",
+              f"{RESULT_PREFIX}Max. rate (umol/s)"]
+
+    frame = rows_to_frame(rows, chosen)
+
+    assert len(frame.columns) == len(chosen) + 4
+
+
+def test_the_results_table_survives_arrow_serialisation(connection):
+    import pyarrow
+
+    rows, _ = search_entities(connection, "experiment", limit=5)
+    keys = [row["key"] for row in
+            read_metadata_keys(connection, entity_type="experiment")]
+
+    # Streamlit hands every table to Arrow. A column mixing text and numbers
+    # made that fail loudly on the console and then silently repair itself.
+    pyarrow.Table.from_pandas(rows_to_frame(rows, keys))
+
+
+def test_a_value_of_any_shape_renders_as_text():
+    from pyKES.database.index_query import MISSING_PLACEHOLDER, format_value
+
+    assert format_value(None) == MISSING_PLACEHOLDER
+    assert format_value(True) == "Yes"
+    assert format_value(44.25) == "44.25"
+    assert format_value({"Ir": 0.02}) == '{"Ir": 0.02}'
+
+
+def test_a_numeric_column_keeps_its_type_and_a_mixed_one_does_not():
+    from pyKES.database.index_query import arrow_safe_frame
+
+    frame = arrow_safe_frame([{"Result": "Max. rate", "Value": 0.031884829},
+                              {"Result": "Yield", "Value": 3.98560370}])
+
+    # Rendering these as text would print every digit pandas holds instead of
+    # letting Streamlit format the column.
+    assert frame["Value"].dtype == float
+
+    mixed = arrow_safe_frame([{"Field": "Analyte", "Value": "H2"},
+                              {"Field": "Irradiance", "Value": 80.0},
+                              {"Field": "Active", "Value": True},
+                              {"Field": "Notes", "Value": None}])
+
+    assert list(mixed["Value"]) == ["H2", "80.0", "Yes", "—"]
 
 
 # =============================================================================

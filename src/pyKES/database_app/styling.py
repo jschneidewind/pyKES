@@ -66,6 +66,13 @@ div[data-testid="stExpander"] {{
 }}
 div[data-testid="stMetricValue"] {{ font-weight: 600; letter-spacing: -0.02em; }}
 
+/* The filter groups in the sidebar are named after the entity they describe, so
+   their labels are headings and are sized like them rather than like body text. */
+[data-testid="stSidebar"] div[data-testid="stExpander"] summary p {{
+    font-size: 0.95rem;
+    font-weight: 600;
+}}
+
 /* The active page in the sidebar is the one thing worth an accent. */
 div[data-testid="stSidebarNav"] a[aria-current="page"] {{
     background: {ACCENT_SOFT};

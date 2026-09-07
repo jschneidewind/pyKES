@@ -12,6 +12,7 @@ import streamlit as st
 
 from pyKES.database.index_ingest import may_edit, update_entity_metadata
 from pyKES.database.index_query import (
+    arrow_safe_frame,
     display_entity_type,
     display_role_path,
     read_entity,
@@ -33,9 +34,6 @@ SELECTED_ENTITY_KEY = "selected_entity_id"
 
 # Query parameter carrying the entity, so a detail page is a shareable link.
 ENTITY_PARAMETER = "entity"
-
-# Shown where a metadata value is absent.
-MISSING_PLACEHOLDER = "—"
 
 
 # =============================================================================
@@ -62,13 +60,12 @@ def split_metadata(effective: dict, own: dict) -> tuple:
     own_rows, inherited_rows = [], []
 
     for key, value in sorted(effective.items()):
-        display = MISSING_PLACEHOLDER if value is None else value
         role_path, leaf = split_qualified_key(key)
 
         if key in own:
-            own_rows.append({"Field": leaf, "Value": display})
+            own_rows.append({"Field": leaf, "Value": value})
         else:
-            inherited_rows.append({"Field": leaf, "Value": display,
+            inherited_rows.append({"Field": leaf, "Value": value,
                                    "Via": display_role_path(role_path)})
 
     return own_rows, inherited_rows
@@ -87,20 +84,20 @@ def render_metadata(row) -> None:
     -------
     None : None
     """
-    import pandas as pd
-
     own = json.loads(row["metadata"])
     effective = json.loads(row["effective"])
     own_rows, inherited_rows = split_metadata(effective, own)
 
+    # One column holding every field's value mixes numbers, text and booleans,
+    # which is the mixture Arrow refuses to serialise.
     with st.expander(f"Metadata ({len(own_rows)})", expanded=False):
-        st.dataframe(pd.DataFrame(own_rows), width="stretch", hide_index=True)
+        st.dataframe(arrow_safe_frame(own_rows), width="stretch", hide_index=True)
 
     if inherited_rows:
         with st.expander(f"Inherited Through References ({len(inherited_rows)})",
                          expanded=False):
             st.caption("Each value carries the reference path it came through.")
-            st.dataframe(pd.DataFrame(inherited_rows), width="stretch",
+            st.dataframe(arrow_safe_frame(inherited_rows), width="stretch",
                          hide_index=True)
 
 
@@ -117,15 +114,13 @@ def render_results(row) -> None:
     -------
     None : None
     """
-    import pandas as pd
-
     results = json.loads(row["results"])
     if not results:
         return
 
     with st.expander(f"Results ({len(results)})", expanded=False):
-        st.dataframe(pd.DataFrame([{"Result": key, "Value": value}
-                                   for key, value in sorted(results.items())]),
+        st.dataframe(arrow_safe_frame([{"Result": key, "Value": value}
+                                       for key, value in sorted(results.items())]),
                      width="stretch", hide_index=True)
 
 
@@ -333,12 +328,19 @@ def render_entity_picker(connection, entity_id: str) -> str:
     Typing ``NB-6`` should present every entry that starts that way rather than
     requiring the whole id to be remembered and spelled correctly.
 
+    The widget keys carry the entry currently open, which is what makes the
+    reference buttons work at all: with a fixed key the box kept whatever was
+    last searched for, so every click navigated to the new entry and was then
+    sent straight back by the stale search term. Naming the key after the open
+    entry retires the old widget, and Streamlit refuses a direct assignment to a
+    widget's state once it has been drawn.
+
     Parameters
     ----------
     connection : sqlite3.Connection
         Open connection to the index database.
     entity_id : str
-        Entry currently open, shown as the field's initial content.
+        Entry currently open.
 
     Returns
     -------
@@ -346,9 +348,9 @@ def render_entity_picker(connection, entity_id: str) -> str:
         The entry the user picked, or an empty string if they have not picked
         one yet.
     """
-    typed = st.text_input("Find an Entry", value=entity_id or "",
+    typed = st.text_input("Find an Entry",
                           placeholder="Start typing an ID, e.g. NB-6",
-                          key="entity_search")
+                          key=f"entity_search_{entity_id}")
 
     if not typed or typed == entity_id:
         return ""
@@ -365,7 +367,7 @@ def render_entity_picker(connection, entity_id: str) -> str:
 
     return st.selectbox(f"{len(matches)} matching entries", matches,
                         index=None, placeholder="Select an entry…",
-                        key="entity_matches") or ""
+                        key=f"entity_matches_{entity_id}") or ""
 
 
 # =============================================================================

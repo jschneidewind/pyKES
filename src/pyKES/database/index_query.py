@@ -49,6 +49,14 @@ DEFAULT_PAGE_SIZE = 50
 # rather than a multiselect.
 MULTISELECT_MAXIMUM_OPTIONS = 30
 
+# Shown between the roles of a reference chain, and where a value is absent.
+ROLE_DISPLAY_SEPARATOR = " \u203a "
+MISSING_PLACEHOLDER = "\u2014"
+
+# What a column's tooltip says when its values are not inherited.
+OWN_QUALIFIER = "This entry"
+RESULT_QUALIFIER = "Result"
+
 
 @dataclass
 class Filter:
@@ -135,8 +143,8 @@ def display_role_path(role_path: Optional[str]) -> str:
     if not role_path:
         return ""
 
-    return " › ".join(display_entity_type(role)
-                      for role in role_path.split(ROLE_PATH_SEPARATOR))
+    return ROLE_DISPLAY_SEPARATOR.join(display_entity_type(role)
+                                       for role in role_path.split(ROLE_PATH_SEPARATOR))
 
 
 def display_key(key: str) -> str:
@@ -163,6 +171,156 @@ def display_key(key: str) -> str:
     role_path, leaf = split_qualified_key(key)
 
     return f"{leaf}  ·  via {display_role_path(role_path)}" if role_path else leaf
+
+
+def column_leaf(key: str) -> str:
+    """
+    Name a column the way its own entity wrote it, without provenance.
+
+    Parameters
+    ----------
+    key : str
+        Stored metadata key, possibly qualified, or ``'result:<label>'``.
+
+    Returns
+    -------
+    leaf : str
+        Bare field name.
+    """
+    if key.startswith(RESULT_PREFIX):
+        return key[len(RESULT_PREFIX):]
+
+    return split_qualified_key(key)[1]
+
+
+def column_qualifier(key: str) -> str:
+    """
+    Say where a column's values come from.
+
+    Parameters
+    ----------
+    key : str
+        Stored metadata key, possibly qualified, or ``'result:<label>'``.
+
+    Returns
+    -------
+    qualifier : str
+        Reference chain the field was inherited through, ``'Result'`` for a
+        mapped result, or ``'This entry'`` for the entity's own field.
+    """
+    if key.startswith(RESULT_PREFIX):
+        return RESULT_QUALIFIER
+
+    role_path, _ = split_qualified_key(key)
+
+    return display_role_path(role_path) or OWN_QUALIFIER
+
+
+def column_labels(columns: List[str]) -> Dict[str, Tuple[str, str]]:
+    """
+    Choose short, unique table headers for a set of chosen columns.
+
+    A header carrying its whole reference chain — ``Synthesis temperature [°C]
+    · via Catalyst batch › Finished semiconductor`` — is wider than the table,
+    so the next chosen column lands off-screen and the user concludes their
+    selection did nothing. The chain moves to the column's tooltip and only the
+    field name is shown, lengthened just enough to stay unambiguous when two
+    chosen columns share a name.
+
+    Parameters
+    ----------
+    columns : list of str
+        Stored keys, results prefixed with ``result:``.
+
+    Returns
+    -------
+    labels : dict
+        ``{key: (header, qualifier)}``, in the order the columns were given.
+        Headers are unique, so no column can silently overwrite another.
+    """
+    leaves = [column_leaf(column) for column in columns]
+    repeated = {leaf for leaf in leaves if leaves.count(leaf) > 1}
+
+    labels, taken = {}, set()
+
+    for column, leaf in zip(columns, leaves):
+        qualifier = column_qualifier(column)
+        header = f"{leaf} ({qualifier.split(ROLE_DISPLAY_SEPARATOR)[-1]})" \
+            if leaf in repeated else leaf
+
+        # Two chains can end in the same role at different depths. Falling back
+        # to the whole chain separates them; two columns cannot get past that,
+        # since equal leaf and equal chain means the same key.
+        if header in taken:
+            header = f"{leaf} ({qualifier})"
+
+        taken.add(header)
+        labels[column] = (header, qualifier)
+
+    return labels
+
+
+def format_value(value: Any) -> str:
+    """
+    Render one metadata or result value as display text.
+
+    Metadata columns hold whatever the spreadsheets carried, so a single column
+    can mix numbers, text and booleans. Handing pandas that mixture produces an
+    object column Arrow cannot serialise, which Streamlit reports as a
+    traceback and then silently repairs. Rendering to text first is what keeps
+    that off the console — and it is also what will let a value that is itself a
+    mapping, such as a set of dopant concentrations, appear in a table at all.
+
+    Parameters
+    ----------
+    value : Any
+        Value taken from stored metadata or results.
+
+    Returns
+    -------
+    text : str
+        Display text; a missing value becomes the placeholder.
+    """
+    if value is None:
+        return MISSING_PLACEHOLDER
+
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+
+    return str(value)
+
+
+def arrow_safe_frame(records: List[Dict[str, Any]]):
+    """
+    Build a display table every column of which Arrow can serialise.
+
+    Streamlit hands each table to Arrow, which needs one type per column. A
+    column pandas could type — a column of numbers, or of booleans — is left
+    alone, so it keeps its alignment, its sort and Streamlit's own number
+    formatting; only a column pandas fell back to ``object`` for, which is
+    exactly the mixture Arrow rejects, is rendered as text.
+
+    Parameters
+    ----------
+    records : list of dict
+        Table rows.
+
+    Returns
+    -------
+    frame : pandas.DataFrame
+        The table, with its untyped columns rendered as text.
+    """
+    import pandas as pd
+
+    frame = pd.DataFrame(records)
+
+    for name in frame.columns[frame.dtypes == object]:
+        frame[name] = frame[name].map(format_value)
+
+    return frame
 
 
 def json_path(key: str) -> str:
@@ -385,28 +543,29 @@ def rows_to_frame(rows: List, columns: Optional[List[str]] = None):
     -------
     frame : pandas.DataFrame
         One row per entity, indexed by nothing so Streamlit can select rows.
+        The chosen columns come directly after the identifier and the fixed
+        context columns follow them, so a column somebody just asked for is
+        visible without scrolling a wide table sideways.
     """
-    import pandas as pd
-
+    labels = column_labels(list(columns or []))
     records = []
+
     for row in rows:
         effective = json.loads(row["effective"])
         results = json.loads(row["results"])
 
-        record = {"Entity ID": row["entity_id"],
-                  "Kind": display_entity_type(row["entity_type"]),
-                  "Group": row["display_group"], "Owner": row["owner"]}
+        record = {"Entity ID": row["entity_id"]}
 
-        for column in columns or []:
-            if column.startswith(RESULT_PREFIX):
-                record[display_key(column)] = results.get(
-                    column[len(RESULT_PREFIX):])
-            else:
-                record[display_key(column)] = effective.get(column)
+        for column, (header, _) in labels.items():
+            record[header] = (results.get(column[len(RESULT_PREFIX):])
+                              if column.startswith(RESULT_PREFIX)
+                              else effective.get(column))
 
+        record.update({"Kind": display_entity_type(row["entity_type"]),
+                       "Group": row["display_group"], "Owner": row["owner"]})
         records.append(record)
 
-    return pd.DataFrame(records)
+    return arrow_safe_frame(records)
 
 
 # =============================================================================
@@ -505,9 +664,10 @@ def build_facets(connection,
     -------
     facets : list of Facet
         Ordered by reference depth — the entry's own fields first, then fields
-        one reference away, and so on — and by frequency within each depth.
-        That is the order somebody narrowing a search thinks in: what was done
-        in this experiment, then what it was made from.
+        one reference away, and so on — and grouped by the entity each field
+        was inherited from within a depth. That is the order somebody narrowing
+        a search thinks in: what was done in this experiment, then what it was
+        made from.
     """
     from pyKES.database.index_registry import read_metadata_keys
 
@@ -539,7 +699,10 @@ def build_facets(connection,
             facets.append(Facet(row["key"], row["leaf_name"], "contains",
                                 role_path=row["role_path"]))
 
-    return sorted(facets, key=reference_depth)
+    # Sorting by the path as well as the depth is what keeps the fields of one
+    # referenced entity together, so the page can put them under its name.
+    return sorted(facets, key=lambda facet: (reference_depth(facet),
+                                             facet.role_path or ""))
 
 
 def reference_depth(facet: Facet) -> int:
@@ -560,6 +723,32 @@ def reference_depth(facet: Facet) -> int:
         return 0
 
     return facet.role_path.count(ROLE_PATH_SEPARATOR) + 1
+
+
+def facet_group_label(facet: Facet, entity_type: Optional[str]) -> str:
+    """
+    Name the entity a facet's field belongs to.
+
+    A filter group is easier to recognise by the thing it describes — *Finished
+    semiconductor* — than by how far away it sits, so the heading names the
+    entity rather than counting hops. The depth still decides the order.
+
+    Parameters
+    ----------
+    facet : Facet
+        Facet to place.
+    entity_type : str or None
+        Kind of entry being searched, used to name the group of its own fields.
+
+    Returns
+    -------
+    label : str
+        Entity name for the group heading.
+    """
+    if not facet.role_path:
+        return display_entity_type(entity_type) if entity_type else OWN_QUALIFIER
+
+    return display_entity_type(facet.role_path.split(ROLE_PATH_SEPARATOR)[-1])
 
 
 # =============================================================================

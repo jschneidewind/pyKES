@@ -9,6 +9,7 @@ chat.
 """
 
 import json
+from itertools import groupby
 
 import streamlit as st
 
@@ -17,14 +18,15 @@ from pyKES.database.index_query import (
     Filter,
     RESULT_PREFIX,
     build_facets,
+    column_labels,
     display_entity_type,
     display_key,
     display_role_path,
-    reference_depth,
+    facet_group_label,
     rows_to_frame,
     search_entities,
 )
-from pyKES.database.index_schema import ENTITY_TYPES
+from pyKES.database.index_schema import ENTITY_TYPES, ROLE_PATH_SEPARATOR
 from pyKES.database_app.components.time_series_panel import (
     MAX_COMPARISON_ENTRIES,
     payload_files_for,
@@ -46,10 +48,14 @@ TEXT_PARAMETER = "q"
 TYPE_PARAMETER = "type"
 FILTER_PARAMETER = "f"
 
-# Headings the facets are grouped under, by how many references away the field
-# lives. Anything deeper than this falls back to the reference path itself.
-DEPTH_HEADINGS = ("This experiment", "One reference away", "Two references away",
-                  "Three references away")
+# Session-state keys for the widgets whose state has to outlive a rerun.
+# Streamlit derives an unkeyed widget's identity from its arguments, so a text
+# box seeded with `value=` from the query string is a *different* widget once
+# the search has been written into the URL, and it comes back holding the
+# previous term. A key pins the identity; the URL only seeds it once.
+TEXT_KEY = "search_text"
+TYPE_KEY = "search_entity_type"
+FACET_KEY_PREFIX = "facet:"
 
 
 # =============================================================================
@@ -113,7 +119,28 @@ def write_filters_to_url(filters: list, text: str, entity_type: str) -> None:
 # Facet widgets
 # =============================================================================
 
-def render_facet(facet: Facet, position: int):
+def facet_widget_key(facet: Facet) -> str:
+    """
+    Name the session-state entry backing one filter widget.
+
+    Keyed by the metadata key rather than by position, so switching the kind of
+    entry cannot hand a slider the state of the multiselect that happened to sit
+    in the same place.
+
+    Parameters
+    ----------
+    facet : Facet
+        Facet the widget filters on.
+
+    Returns
+    -------
+    key : str
+        Widget key.
+    """
+    return f"{FACET_KEY_PREFIX}{facet.key}"
+
+
+def render_facet(facet: Facet):
     """
     Draw one filter widget and return the filter it produces.
 
@@ -121,8 +148,6 @@ def render_facet(facet: Facet, position: int):
     ----------
     facet : Facet
         Facet definition from the registry.
-    position : int
-        Index used to build a unique widget key.
 
     Returns
     -------
@@ -130,26 +155,51 @@ def render_facet(facet: Facet, position: int):
         The filter, or None when the widget is at its neutral setting.
     """
     caption = facet.label
+    widget_key = facet_widget_key(facet)
 
     if facet.kind == "range":
         low, high = facet.bounds
         chosen = st.slider(caption, float(low), float(high),
-                           (float(low), float(high)), key=f"facet_{position}")
+                           (float(low), float(high)), key=widget_key)
         if chosen != (float(low), float(high)):
             return Filter(facet.key, "between", list(chosen))
         return None
 
     if facet.kind == "select":
-        chosen = st.multiselect(caption, facet.options, key=f"facet_{position}")
+        chosen = st.multiselect(caption, facet.options, key=widget_key)
         if chosen:
             return Filter(facet.key, "in", chosen)
         return None
 
-    typed = st.text_input(caption, key=f"facet_{position}")
+    typed = st.text_input(caption, key=widget_key)
     if typed:
         return Filter(facet.key, "contains", typed)
 
     return None
+
+
+def reset_filters() -> None:
+    """
+    Clear every filter and the free-text term.
+
+    Runs as a button callback, before the rerun, because Streamlit refuses to
+    have a widget's state assigned once that widget has been drawn. The query
+    string is cleared with it: the seeding below reads it, so a reset that left
+    it in place would immediately restore what it had just cleared.
+
+    Returns
+    -------
+    None : None
+    """
+    for name in [key for key in st.session_state
+                 if key.startswith(FACET_KEY_PREFIX)]:
+        del st.session_state[name]
+
+    st.session_state[TEXT_KEY] = ""
+
+    for parameter in (FILTER_PARAMETER, TEXT_PARAMETER):
+        if parameter in st.query_params:
+            del st.query_params[parameter]
 
 
 def seed_facet_widgets(facets: list, url_filters: list) -> None:
@@ -175,8 +225,8 @@ def seed_facet_widgets(facets: list, url_filters: list) -> None:
     """
     by_key = {search_filter.key: search_filter for search_filter in url_filters}
 
-    for position, facet in enumerate(facets):
-        widget_key = f"facet_{position}"
+    for facet in facets:
+        widget_key = facet_widget_key(facet)
         search_filter = by_key.get(facet.key)
 
         if search_filter is None or widget_key in st.session_state:
@@ -189,9 +239,34 @@ def seed_facet_widgets(facets: list, url_filters: list) -> None:
             st.session_state[widget_key] = search_filter.value
 
 
+def render_facet_group(facets: list) -> list:
+    """
+    Draw one group of filter widgets.
+
+    Parameters
+    ----------
+    facets : list of Facet
+        Facets of a single entity, in the order they should appear.
+
+    Returns
+    -------
+    filters : list of Filter
+        The filters those widgets are currently set to.
+    """
+    return [chosen for chosen in (render_facet(facet) for facet in facets)
+            if chosen]
+
+
 def render_facet_panel(connection, entity_type: str) -> list:
     """
     Draw the whole filter sidebar.
+
+    Filters are grouped by the entity they describe and each group is named
+    after it — *Finished semiconductor* rather than *two references away* — with
+    the groups themselves ordered by how far away that entity sits. The entry's
+    own fields are always open, since that is where a search starts; the
+    inherited groups collapse, so a chain four entities deep does not bury the
+    fields somebody came to filter on.
 
     Parameters
     ----------
@@ -214,47 +289,43 @@ def render_facet_panel(connection, entity_type: str) -> list:
     seed_facet_widgets(facets, read_filters_from_url())
 
     filters = []
-    current_depth = None
 
-    # `build_facets` already orders by reference depth, so a single pass emits
-    # the entry's own fields first and then each level of the chain. Every
-    # filter is shown: hiding two thirds of them behind an expander hid exactly
-    # the inherited ones the comparison is usually built from.
-    for position, facet in enumerate(facets):
-        depth = reference_depth(facet)
+    # `build_facets` orders by depth and then by reference path, so consecutive
+    # facets sharing a path are exactly the fields of one referenced entity.
+    for role_path, group in groupby(facets, key=facet_role_path):
+        group = list(group)
+        heading = facet_group_label(group[0], entity_type)
 
-        if depth != current_depth:
-            current_depth = depth
-            st.markdown(f"**{depth_heading(depth, facet)}**")
+        if not role_path:
+            st.markdown(f"### {heading}")
+            filters.extend(render_facet_group(group))
+            continue
 
-        chosen = render_facet(facet, position)
-        if chosen:
-            filters.append(chosen)
+        with st.expander(f"**{heading}**", expanded=False):
+            # Two chains can arrive at the same kind of entity by different
+            # routes, so anything beyond one hop says which route this is.
+            if ROLE_PATH_SEPARATOR in role_path:
+                st.caption(display_role_path(role_path))
+            filters.extend(render_facet_group(group))
 
     return filters
 
 
-def depth_heading(depth: int, facet: Facet) -> str:
+def facet_role_path(facet: Facet) -> str:
     """
-    Name the group a facet belongs to.
+    Read the reference path a facet was inherited through.
 
     Parameters
     ----------
-    depth : int
-        How many references away the field lives.
     facet : Facet
-        A facet at that depth, used for its reference path when the depth is
-        beyond the named headings.
+        Facet to group.
 
     Returns
     -------
-    heading : str
-        Group heading.
+    role_path : str
+        The path, or an empty string for the entry's own fields.
     """
-    if depth < len(DEPTH_HEADINGS):
-        return DEPTH_HEADINGS[depth]
-
-    return display_role_path(facet.role_path)
+    return facet.role_path or ""
 
 
 # =============================================================================
@@ -293,6 +364,28 @@ def choose_columns(connection, entity_type: str, config: DatabaseAppConfig) -> l
                           format_func=display_key)
 
 
+def provenance_tooltips(columns: list) -> dict:
+    """
+    Describe each chosen column for the table's own header tooltips.
+
+    The reference chain a field was inherited through is what makes it
+    unambiguous and also what makes its header too wide to fit, so it lives in
+    the tooltip and the header carries the field name alone.
+
+    Parameters
+    ----------
+    columns : list of str
+        Chosen keys, results prefixed with ``result:``.
+
+    Returns
+    -------
+    column_config : dict
+        Streamlit column configuration keyed by header.
+    """
+    return {header: st.column_config.Column(help=qualifier)
+            for header, qualifier in column_labels(columns).values()}
+
+
 def render_results(connection, rows, total: int, columns: list,
                    offset: int, page_size: int) -> None:
     """
@@ -324,6 +417,7 @@ def render_results(connection, rows, total: int, columns: list,
     st.caption(f"Showing {offset + 1}–{offset + len(rows)} of {total}")
 
     selection = st.dataframe(frame, width="stretch", hide_index=True,
+                             column_config=provenance_tooltips(columns),
                              on_select="rerun", selection_mode="single-row",
                              key="search_results")
 
@@ -391,6 +485,32 @@ def render_comparison(connection, config: DatabaseAppConfig,
 # Entry point
 # =============================================================================
 
+def seed_search_widgets(config: DatabaseAppConfig) -> None:
+    """
+    Fill the kind and free-text widgets from a shared link, once.
+
+    Only while they have no state of their own: after that the user's own typing
+    wins, which is the whole reason these two carry keys rather than a ``value``
+    recomputed from the query string on every rerun.
+
+    Parameters
+    ----------
+    config : DatabaseAppConfig
+        Deployment settings supplying the default kind of entry.
+
+    Returns
+    -------
+    None : None
+    """
+    if TYPE_KEY not in st.session_state:
+        url_type = st.query_params.get(TYPE_PARAMETER, config.default_entity_type)
+        st.session_state[TYPE_KEY] = (url_type if url_type in ENTITY_TYPES
+                                      else ENTITY_TYPES[0])
+
+    if TEXT_KEY not in st.session_state:
+        st.session_state[TEXT_KEY] = st.query_params.get(TEXT_PARAMETER, "")
+
+
 def render_search(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
     """
     Render the Browse & Search page.
@@ -408,21 +528,20 @@ def render_search(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
 
     st.title("Browse & Search")
 
-    url_type = st.query_params.get(TYPE_PARAMETER, config.default_entity_type)
-    entity_type = st.selectbox(
-        "Kind of entry", ENTITY_TYPES,
-        index=ENTITY_TYPES.index(url_type) if url_type in ENTITY_TYPES else 0,
-        format_func=display_entity_type)
+    seed_search_widgets(config)
+
+    entity_type = st.selectbox("Kind of entry", ENTITY_TYPES, key=TYPE_KEY,
+                               format_func=display_entity_type)
 
     text = st.text_input("Search names, groups and all metadata",
-                         value=st.query_params.get(TEXT_PARAMETER, ""),
-                         placeholder="Catalyst, operator, note…")
+                         placeholder="Catalyst, operator, note…", key=TEXT_KEY)
 
     with st.sidebar:
         st.header("Filters")
         st.caption("Generated from the metadata actually present, grouped by "
-                   "how far away the field lives.")
+                   "the entity each field describes.")
         latest_only = st.toggle("Latest version of each name only", value=True)
+        st.button("Reset All Filters", on_click=reset_filters, width="stretch")
         filters = render_facet_panel(connection, entity_type)
 
     with st.expander("Table columns"):

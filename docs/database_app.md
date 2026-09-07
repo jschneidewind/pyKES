@@ -49,12 +49,24 @@ been ingested, and the widget follows from the type the registry observed —
 a slider for numbers, a multiselect for low-cardinality text, a contains box for
 free text.
 
-**Filters are grouped by how far away the field lives**, in that order: the
-entry's own metadata first, then one reference away, then two. That is the order
-somebody narrowing a search thinks in — what was done in this experiment, then
-what it was made from. Every filter is shown; there is no "more filters" fold,
-because the inherited ones are exactly what a comparison is usually built from
-and hiding them hid the point of the page.
+**Filters are grouped by the entity they describe**, ordered by how far away
+that entity sits: the entry's own metadata first, then one reference away, then
+two. That is the order somebody narrowing a search thinks in — what was done in
+this experiment, then what it was made from — and naming each group after the
+thing it describes (*Finished semiconductor*) says more than counting hops
+(*two references away*) ever did.
+
+The entry's own fields are always open, since that is where a search starts.
+Each referenced entity is a collapsed group, so a chain four entities deep does
+not bury the fields somebody came to filter on. Nothing is hidden behind a
+"more filters" fold: every group is there, one click from open, because the
+inherited fields are exactly what a comparison is usually built from.
+
+**Reset All Filters** clears every filter and the free-text term at once. It
+runs as a widget callback rather than inline, because Streamlit refuses to have
+a widget's state assigned after that widget has been drawn, and it clears the
+query string with them — the seeding reads the URL, so a reset that left it in
+place would restore what it had just cleared.
 
 **Once the filtered set is small enough, its traces are plotted.** Below
 `MAX_COMPARISON_ENTRIES` (50) matches the *whole* matching set — not just the
@@ -68,16 +80,45 @@ The filter state is written into the query string **and read back from it**, so
 a search is a link that reproduces the same subset and the same comparison. So
 is an entry: `/Entity?entity=EXP-0001` opens it directly.
 
+Every widget whose state has to outlive that round trip carries an explicit
+key. Streamlit derives an unkeyed widget's identity from its arguments, so a
+search box seeded with `value=` from the query string becomes a *different*
+widget as soon as the search has been written into the URL — and comes back
+holding the previous term instead of what was just typed. The key pins the
+identity; the URL seeds it once, and after that the user's own typing wins.
+
+**Table columns** are chosen from the same registry. A column's header is the
+field name alone and its reference chain is the header's tooltip: a header
+carrying the whole chain — `Synthesis temperature [°C] · via Catalyst batch ›
+Finished semiconductor` — is wider than the table, so the next chosen column
+lands off-screen and the selection looks like it did nothing. Two chosen columns
+sharing a field name are told apart by the entity they came from, which is also
+what stops one silently overwriting the other. Chosen columns sit directly after
+the identifier, ahead of kind, group and owner, so a column somebody just asked
+for is visible without scrolling sideways.
+
 ### Entity
 
 A type-ahead finds an entry without the whole identifier having to be
 remembered: typing `NB-6` offers every entry that starts that way, prefix
 matches first.
 
+The type-ahead's widgets are keyed by the entry currently open. That is what
+makes the reference buttons work at all: under a fixed key the box kept whatever
+was last searched for, so every click navigated to the new entry and was then
+sent straight back by the stale search term, and the reference links looked
+dead.
+
 Own metadata, inherited metadata and results are each a collapsed expander, so
 the page opens on what an entry *is* and its references rather than on a wall of
 fields. The inherited table carries the path each value arrived through, so the
 provenance of every number is visible without leaving the page.
+
+A metadata table holds one column of values spanning every field, so it mixes
+numbers, text and booleans — the mixture Arrow refuses to serialise, which
+Streamlit reports as a console traceback and then silently repairs. Only a
+column pandas could not type is rendered as text (`arrow_safe_frame`), so a
+column of numbers keeps its alignment, its sort and Streamlit's own formatting.
 
 The references panel works both ways. Downwards it is what the entry was made
 from; upwards it answers the question the group could not previously ask at all
