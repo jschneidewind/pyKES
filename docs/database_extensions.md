@@ -337,7 +337,22 @@ and run `ANALYZE` afterwards.
 - **Peak temperature and time at peak** are the derived scalars for a profile.
 - **Both `=` and `:`** are accepted between a name and its value.
 
-## 4. Still open
+## 4. Where this leads
+
+§1.7 above merges the paths to one field so that a role accepting two kinds of
+entry does not halve the answer. It works, but it is a fold applied after the
+fact to a naming scheme that keeps generating the duplicates, and it cannot
+express several references of one kind in one field —
+`Precursor chemicals: EA-1; EA-2; EA-3`.
+
+[docs/referencing_redesign.md](referencing_redesign.md) plans the change that
+removes the need for it: naming inherited metadata by the **type** of the entry
+that owns it rather than by the route that reached it, and holding a set of
+contributions per key rather than a value. It measures the three ways of storing
+that set and finds the current design already spends 1130 ms per page load at ten
+thousand entries.
+
+## 5. Still open
 
 - Whether the shipped `key_options` lists — dopants, cocatalysts — are the
   group's real vocabulary. They are what is *expected*, so an unlisted name is

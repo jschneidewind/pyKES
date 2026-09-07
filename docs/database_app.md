@@ -411,6 +411,14 @@ checked against a fixed set rather than interpolated.
   shared plotting component has always done. A batch whose entries all carry the
   same colour plots as one indistinguishable band; colouring a comparison by a
   chosen metadata field instead would be a better default.
+* **Inherited metadata is still named by the route that reached it**, so a
+  modified catalyst batch puts the semiconductor's fields at a second depth and
+  `merge_key_paths` folds them back together for display. That fold is a patch
+  over the naming scheme rather than a fix, and it cannot express several
+  references of one kind in one field.
+  [docs/referencing_redesign.md](referencing_redesign.md) plans naming them by
+  contributor type instead — and records that facet bounds already cost 1130 ms
+  per page load at ten thousand entries, which is a live problem either way.
 * Promoting a mapping's sub-key to a generated column, which is what sorting the
   results table by one dopant's concentration would need. The measurement in
   [docs/database_extensions.md](database_extensions.md) §2.9 applies unchanged:
