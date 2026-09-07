@@ -487,6 +487,19 @@ above 100 mW/cm²"*. An entity page showing what an entry references and what
 references it — one hop each way, expandable — is a small amount of UI on top of
 a table that already exists.
 
+### 5.9 One role, several kinds of entry
+
+Nothing here constrains what a reference points at: an edge is
+`(source, role, target)` with no target-type column, and the merge qualifies
+inherited keys by the **role**, never by the kind of thing the role reached. So
+`catalyst_batch/Photodeposition wavelength [nm]` means "of whatever this
+experiment used as its catalyst batch", and one filter spans every kind of batch
+without any union logic.
+
+That makes accepting several kinds under one role a matter of declaration rather
+than of storage. It is designed but not built; see
+[docs/database_extensions.md](database_extensions.md) §1.
+
 ---
 
 ## 6. Does it hold at 10 000 experiments?

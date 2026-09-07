@@ -300,3 +300,7 @@ checked against a fixed set rather than interpolated.
   shared plotting component has always done. A batch whose entries all carry the
   same colour plots as one indistinguishable band; colouring a comparison by a
   chosen metadata field instead would be a better default.
+* Two larger extensions are planned and designed but not built — references that
+  accept more than one kind of entry, and metadata values that are mappings
+  rather than single numbers (dopants, co-catalysts, temperature profiles). See
+  [docs/database_extensions.md](database_extensions.md).
