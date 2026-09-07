@@ -36,7 +36,13 @@ from pyKES.database.index_references import (
     find_dependents,
     read_dangling_references,
     read_reference_type_mismatches,
-    resolve_effective_metadata,
+    reachable_contributors,
+    split_reference_cell,
+)
+from pyKES.database.index_query import (
+    Filter,
+    read_contributions,
+    search_entities,
 )
 from pyKES.database.index_registry import (
     TYPE_MIXED,
@@ -80,6 +86,22 @@ def add_entity(connection, entity_id, entity_type, metadata, owner="tester"):
     insert_entity(connection, entity_id=entity_id, base_id=entity_id, version=1,
                   entity_type=entity_type, metadata=metadata, results={},
                   owner=owner, upload_id=None)
+
+
+def inherited(connection, entity_id, key):
+    """
+    Read what one entity inherits under one type-qualified key.
+
+    A field is named by the kind of entry that owns it and may have several
+    contributors, so this is a list — which is the whole point of the change
+    these tests cover.
+    """
+    contributor_type, _, field_name = key.partition("/")
+
+    return [row["number"] if row["number"] is not None else row["value"]
+            for row in read_contributions(connection, entity_id)
+            if row["contributor_type"] == contributor_type
+            and row["key"] == field_name]
 
 
 def build_chain(connection, reference_instructions):
@@ -183,32 +205,39 @@ def test_an_inherited_key_that_itself_contains_a_slash_round_trips():
                                               "Irradiance A [mW/cm2]")
 
 
-def test_inherited_keys_carry_the_path_that_reached_them(connection):
+def test_inherited_keys_are_named_after_the_entry_that_owns_them(connection):
     build_chain(connection, CHAIN_REFERENCES)
 
-    effective = resolve_effective_metadata(connection, "ABC-67")
+    # Named by the kind of entry the value belongs to, not by the route that
+    # reached it -- so the semiconductor's field has one name whether it was
+    # reached in one hop or three.
+    assert inherited(connection, "ABC-67",
+                     "finished_semiconductor/Synthesis temperature [degC]") == [1150]
+    assert inherited(connection, "ABC-67",
+                     "catalyst_batch/Photodeposition wavelength [nm]") == [360]
 
-    # Stored form: the key's own slash is escaped so it cannot be mistaken for
-    # a reference separator.
-    assert effective["Irradiance [mW__SLASH__cm2]"] == 50
-    assert effective["catalyst_batch/Photodeposition wavelength [nm]"] == 360
-    assert effective[
-        "catalyst_batch/finished_semiconductor/Synthesis temperature [degC]"] == 1150
+
+def test_the_routes_that_reached_a_value_are_kept_for_display(connection):
+    build_chain(connection, CHAIN_REFERENCES)
+
+    routes = {row["contributor"]: json.loads(row["role_paths"])
+              for row in read_contributions(connection, "ABC-67")}
+
+    # Nothing filters on these any more, but which chain led to a value is
+    # still worth being able to see on the entry page.
+    assert routes["BC-2"] == ["catalyst_batch/finished_semiconductor"]
 
 
 def test_the_target_query_finds_the_experiment_two_hops_away(connection):
     build_chain(connection, CHAIN_REFERENCES)
 
-    found = connection.execute(
-        """SELECT entity_id FROM entities WHERE entity_type = 'experiment'
-             AND CAST(json_extract(effective,
-                 '$."catalyst_batch/finished_semiconductor/Synthesis temperature [degC]"')
-                 AS REAL) = 1150
-             AND CAST(json_extract(effective,
-                 '$."catalyst_batch/Photodeposition wavelength [nm]"') AS REAL) = 360"""
-    ).fetchall()
+    rows, total = search_entities(connection, "experiment", filters=[
+        Filter("finished_semiconductor/Synthesis temperature [degC]",
+               "between", [1150, 1150]),
+        Filter("catalyst_batch/Photodeposition wavelength [nm]",
+               "between", [360, 360])], limit=None)
 
-    assert [row["entity_id"] for row in found] == ["ABC-67"]
+    assert [row["entity_id"] for row in rows] == ["ABC-67"]
 
 
 def test_own_metadata_is_never_displaced_by_an_inherited_key(connection):
@@ -220,10 +249,12 @@ def test_own_metadata_is_never_displaced_by_an_inherited_key(connection):
     finalise_entity(connection, "EXP-1", {"Temperature [degC]": 25, "Precursor": "PREC-1"},
                     {"Precursor": {"role": "precursor"}})
 
-    effective = resolve_effective_metadata(connection, "EXP-1")
+    own = json.loads(connection.execute(
+        "SELECT metadata FROM entities WHERE entity_id = 'EXP-1'").fetchone()["metadata"])
 
-    assert effective["Temperature [degC]"] == 25
-    assert effective["precursor/Temperature [degC]"] == 1150
+    assert own["Temperature [degC]"] == 25
+    assert inherited(connection, "EXP-1",
+                     "precursor_chemical/Temperature [degC]") == [1150]
 
 
 def test_presentation_fields_are_not_inherited(connection):
@@ -233,36 +264,51 @@ def test_presentation_fields_are_not_inherited(connection):
     finalise_entity(connection, "EXP-2", {"Precursor": "PREC-2"},
                     {"Precursor": {"role": "precursor"}})
 
-    effective = resolve_effective_metadata(connection, "EXP-2")
-
-    assert "precursor/color" not in effective
-    assert "precursor/group" not in effective
-    assert effective["precursor/Purity [%]"] == 99.9
+    assert inherited(connection, "EXP-2", "precursor_chemical/color") == []
+    assert inherited(connection, "EXP-2", "precursor_chemical/group") == []
+    assert inherited(connection, "EXP-2", "precursor_chemical/Purity [%]") == [99.9]
 
 
 # =============================================================================
 # Reference edge cases the design identified as able to fail silently
 # =============================================================================
 
-def test_a_repeated_role_is_refused(connection):
-    # Two references under one role would produce identical qualified keys and
-    # the second would overwrite the first, invisibly.
-    with pytest.raises(ReferenceError, match="more than one metadata field"):
-        extract_references(
-            {"Precursor A": "BC-1", "Precursor B": "BC-2"},
-            {"Precursor A": {"role": "precursor"}, "Precursor B": {"role": "precursor"}},
-        )
-
-
-def test_distinct_roles_for_two_references_of_one_kind_are_fine(connection):
+def test_two_fields_may_now_share_a_role(connection):
+    # This used to be refused: two targets under one role produced identical
+    # qualified keys and the second overwrote the first. Inherited metadata is
+    # a set of contributions now, so nothing overwrites anything.
     references = extract_references(
-        {"Precursor Chemical A": "EA-211", "Precursor Chemical B": "EA-112"},
-        {"Precursor Chemical A": {"role": "precursor_chemical_a"},
-         "Precursor Chemical B": {"role": "precursor_chemical_b"}},
+        {"Precursor A": "BC-1", "Precursor B": "BC-2"},
+        {"Precursor A": {"role": "precursor"}, "Precursor B": {"role": "precursor"}},
     )
 
-    assert references == {"precursor_chemical_a": "EA-211",
-                          "precursor_chemical_b": "EA-112"}
+    assert references == [("precursor", "BC-1", 0), ("precursor", "BC-2", 0)]
+
+
+@pytest.mark.parametrize("cell, expected", [
+    ("EA-1; EA-2; EA-3", ["EA-1", "EA-2", "EA-3"]),
+    ("EA-1;EA-2", ["EA-1", "EA-2"]),
+    ("EA-1\nEA-2", ["EA-1", "EA-2"]),
+    ("  EA-1  ", ["EA-1"]),
+    ("EA-1; EA-1", ["EA-1"]),
+])
+def test_one_field_may_name_several_entries(cell, expected):
+    # Naming an entry twice in one cell is a typo; recording it twice would say
+    # the entry was used twice.
+    assert split_reference_cell(cell) == expected
+
+
+def test_several_entries_of_one_kind_all_contribute(connection):
+    for entity_id, supplier in (("EA-1", "Merck"), ("EA-2", "Alfa"), ("EA-3", "Acme")):
+        add_entity(connection, entity_id, "precursor_chemical", {"Supplier": supplier})
+
+    add_entity(connection, "SEMI-1", "finished_semiconductor",
+               {"Precursor Chemicals": "EA-1; EA-2; EA-3"})
+    finalise_entity(connection, "SEMI-1", {"Precursor Chemicals": "EA-1; EA-2; EA-3"},
+                    {"Precursor Chemicals": {"role": "precursor_chemical"}})
+
+    assert sorted(inherited(connection, "SEMI-1",
+                            "precursor_chemical/Supplier")) == ["Acme", "Alfa", "Merck"]
 
 
 def test_blank_reference_fields_are_skipped():
@@ -272,7 +318,7 @@ def test_blank_reference_fields_are_skipped():
          "Dopant": {"role": "dopant"}},
     )
 
-    assert references == {"precursor": "BC-1"}
+    assert references == [("precursor", "BC-1", 0)]
 
 
 def test_a_forward_reference_resolves_when_its_target_arrives(connection):
@@ -281,8 +327,8 @@ def test_a_forward_reference_resolves_when_its_target_arrives(connection):
     finalise_entity(connection, "EXP-3", {"Catalyst Batch": "LATE-1"}, CHAIN_REFERENCES)
 
     assert len(read_dangling_references(connection)) == 1
-    assert "catalyst_batch/Photodeposition wavelength [nm]" not in \
-        resolve_effective_metadata(connection, "EXP-3")
+    assert inherited(connection, "EXP-3",
+                     "catalyst_batch/Photodeposition wavelength [nm]") == []
 
     # The batch arrives later and the experiment picks its metadata up.
     add_entity(connection, "LATE-1", "catalyst_batch",
@@ -291,10 +337,8 @@ def test_a_forward_reference_resolves_when_its_target_arrives(connection):
                     CHAIN_REFERENCES)
 
     assert read_dangling_references(connection) == []
-    effective = json.loads(connection.execute(
-        "SELECT effective FROM entities WHERE entity_id = 'EXP-3'"
-    ).fetchone()["effective"])
-    assert effective["catalyst_batch/Photodeposition wavelength [nm]"] == 405
+    assert inherited(connection, "EXP-3",
+                     "catalyst_batch/Photodeposition wavelength [nm]") == [405]
 
 
 def test_a_diamond_reaches_the_shared_ancestor_by_both_paths(connection):
@@ -310,11 +354,17 @@ def test_a_diamond_reaches_the_shared_ancestor_by_both_paths(connection):
                     {"Batch One": "BATCH-A", "Batch Two": "BATCH-B"},
                     {"Batch One": {"role": "batch_one"}, "Batch Two": {"role": "batch_two"}})
 
-    effective = resolve_effective_metadata(connection, "EXP-D")
+    # One contributor, reached twice: the primary key of `contributions` is
+    # what stops a diamond in the graph from counting the same entry twice.
+    assert inherited(connection, "EXP-D",
+                     "commercial_chemical/Supplier") == ["Acme"]
 
-    # Both paths survive, because each carries its own role prefix.
-    assert effective["batch_one/precursor/Supplier"] == "Acme"
-    assert effective["batch_two/precursor/Supplier"] == "Acme"
+    routes = [json.loads(row["role_paths"]) for row in
+              read_contributions(connection, "EXP-D")
+              if row["contributor"] == "SRC-1"]
+
+    # Both routes are still recorded, for the entry page to show.
+    assert sorted(routes[0]) == ["batch_one/precursor", "batch_two/precursor"]
 
 
 def test_a_cycle_is_detected_rather_than_hung(connection):
@@ -324,10 +374,7 @@ def test_a_cycle_is_detected_rather_than_hung(connection):
         finalise_entity(connection, entity_id, {"Next": other},
                         {"Next": {"role": "next"}})
 
-    effective = resolve_effective_metadata(connection, "LOOP-A")
-
-    assert effective["A"] == 1
-    assert effective["next/B"] == 2
+    assert inherited(connection, "LOOP-A", "other_entity/B") == [2]
     assert set(find_cyclic_entities(connection)) == {"LOOP-A", "LOOP-B"}
 
 
@@ -341,8 +388,7 @@ def test_resolution_stops_at_the_depth_cap(connection):
                         {"Depth": position, "Next": f"N-{position + 1}"},
                         {"Next": {"role": "next"}})
 
-    effective = resolve_effective_metadata(connection, "N-0")
-    deepest = max(key.count("next/") for key in effective if "next/" in key)
+    deepest = max(row["depth"] for row in read_contributions(connection, "N-0"))
 
     assert deepest <= MAX_REFERENCE_DEPTH
 
@@ -357,12 +403,8 @@ def test_editing_an_ancestor_recomputes_every_descendant(connection):
                            {"Synthesis temperature [degC]": 1200},
                            user="tester", reference_instructions=CHAIN_REFERENCES)
 
-    effective = json.loads(connection.execute(
-        "SELECT effective FROM entities WHERE entity_id = 'ABC-67'"
-    ).fetchone()["effective"])
-
-    assert effective[
-        "catalyst_batch/finished_semiconductor/Synthesis temperature [degC]"] == 1200
+    assert inherited(connection, "ABC-67",
+                     "finished_semiconductor/Synthesis temperature [degC]") == [1200]
 
 
 # =============================================================================
@@ -416,26 +458,22 @@ def test_a_consistent_key_keeps_its_type_and_counts_occurrences(connection):
     assert row["occurrences"] == 3
 
 
-def test_one_leaf_appears_at_one_path_per_entity_type(connection):
+def test_one_leaf_is_one_key_however_deep_it_was_reached(connection):
     build_chain(connection, CHAIN_REFERENCES)
 
-    # In a chain the same leaf necessarily occurs at as many paths as there are
-    # descendants: bare on the semiconductor, one hop away on the batch, two on
-    # the experiment. Unscoped, the lookup sees all three.
-    unscoped = read_metadata_keys(connection, leaf_name="Synthesis temperature [degC]")
-    assert len(unscoped) == 3
+    keys = read_metadata_keys(connection, leaf_name="Synthesis temperature [degC]")
 
-    # Scoped to a kind of entry it collapses to the single path a facet needs.
-    for entity_type, expected_path in [
-        ("finished_semiconductor", None),
-        ("catalyst_batch", "finished_semiconductor"),
-        ("experiment", "catalyst_batch/finished_semiconductor"),
-    ]:
-        scoped = read_metadata_keys(connection,
-                                    leaf_name="Synthesis temperature [degC]",
-                                    entity_type=entity_type)
-        assert len(scoped) == 1
-        assert scoped[0]["role_path"] == expected_path
+    # Two keys, not one per depth: bare on the semiconductor that owns it, and
+    # `finished_semiconductor/...` on everything that inherits it -- whether
+    # that is one hop away or three. Naming the field after the entry that owns
+    # it is what collapses the rest.
+    assert sorted(row["key"] for row in keys) == [
+        "Synthesis temperature [degC]",
+        "finished_semiconductor/Synthesis temperature [degC]"]
+
+    inheritors = next(row for row in keys if row["role_path"])
+    assert sorted(json.loads(inheritors["entity_types"])) == ["catalyst_batch",
+                                                              "experiment"]
 
 
 # =============================================================================
@@ -571,10 +609,8 @@ def test_entity_sheet_ingestion_links_the_chain(connection, paths, tmp_path):
     ingest_entity_sheet(connection, paths, sheet, "catalyst_batch", "bob",
                         schemas={})
 
-    effective = json.loads(connection.execute(
-        "SELECT effective FROM entities WHERE entity_id = 'EXP-A'").fetchone()["effective"])
-
-    assert effective["catalyst_batch/Photodeposition wavelength [nm]"] == 365
+    assert inherited(connection, "EXP-A",
+                     "catalyst_batch/Photodeposition wavelength [nm]") == [365]
 
 
 def test_a_sheet_without_the_identifier_column_is_refused(connection, paths, tmp_path):
@@ -612,7 +648,7 @@ def test_new_metadata_columns_are_absorbed_without_migration(connection, paths, 
 
     found = connection.execute(
         """SELECT entity_id FROM entities
-           WHERE json_extract(effective, '$."Sacrificial agent"') = 'methanol'"""
+           WHERE json_extract(metadata, '$."Sacrificial agent"') = 'methanol'"""
     ).fetchall()
     assert [row["entity_id"] for row in found] == ["NEW-1"]
 
@@ -664,13 +700,13 @@ def test_a_role_carries_metadata_from_whatever_kind_it_reaches(connection):
         connection, "EXP-1", {"Catalyst Batch [experiment no.]": "MOD-1"},
         {"Catalyst Batch [experiment no.]": {"role": "catalyst_batch"}})
 
-    effective = resolve_effective_metadata(connection, "EXP-1")
-
     # An edge records no target type, so the same role reaches a different kind
-    # of entry and the chain simply continues through it.
-    assert effective["catalyst_batch/Coating thickness [nm]"] == 3.5
-    assert effective["catalyst_batch/catalyst_batch/"
-                     "finished_semiconductor/Synthesis temperature [°C]"] == 1150
+    # of entry and the chain simply continues through it -- and the
+    # semiconductor's field is named the same whichever route reached it.
+    assert inherited(connection, "EXP-1",
+                     "modified_catalyst_batch/Coating thickness [nm]") == [3.5]
+    assert inherited(connection, "EXP-1",
+                     "finished_semiconductor/Synthesis temperature [°C]") == [1150]
     assert "EXP-1" in recomputed
 
 
@@ -717,10 +753,13 @@ def test_a_mapping_survives_the_inheritance_merge(connection):
     finalise_entity(connection, "ABC-1", {"Finished Semiconductor": "SEMI-1"},
                     {"Finished Semiconductor": {"role": "finished_semiconductor"}})
 
-    effective = resolve_effective_metadata(connection, "ABC-1")
+    dopants = {row["sub_key"]: row["number"] for row in
+               read_contributions(connection, "ABC-1")
+               if row["key"] == "Dopants [mol%]"}
 
-    assert effective["finished_semiconductor/Dopants [mol%]"] == {"Ir": 0.02,
-                                                                  "Ru": 0.02}
+    # Expanded to one row per name, which is what lets a filter on one dopant
+    # use an index instead of reading every mapping.
+    assert dopants == {"Ir": 0.02, "Ru": 0.02}
 
 
 def test_the_registry_records_the_names_a_mapping_carries(connection):
@@ -729,9 +768,11 @@ def test_the_registry_records_the_names_a_mapping_carries(connection):
     add_entity(connection, "SEMI-2", "finished_semiconductor",
                {"Dopants [mol%]": {"Cr": 0.03, "Ir": 0.05}})
     for entity_id in ("SEMI-1", "SEMI-2"):
-        register_metadata_keys(connection,
-                               resolve_effective_metadata(connection, entity_id),
-                               "finished_semiconductor")
+        add_entity(connection, f"ABC-{entity_id[-1]}", "catalyst_batch",
+                   {"Finished Semiconductor": entity_id})
+        finalise_entity(connection, f"ABC-{entity_id[-1]}",
+                        {"Finished Semiconductor": entity_id},
+                        {"Finished Semiconductor": {"role": "finished_semiconductor"}})
 
     row = read_metadata_keys(connection, "Dopants [mol%]")[0]
 

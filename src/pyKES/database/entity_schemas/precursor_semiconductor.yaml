@@ -7,10 +7,11 @@ identifier_field: Experiment
 description: An intermediate semiconductor, processed further before use.
 
 fields:
-  - name: Precursor Chemical A
+  - name: Precursor Chemicals
     type: reference
-    role: precursor_chemical_a
+    role: precursor_chemical
     accepts: [precursor_chemical, commercial_chemical]
+    multiple: true
 
   - name: Preparation route
     type: select

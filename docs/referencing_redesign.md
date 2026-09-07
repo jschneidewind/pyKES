@@ -1,12 +1,15 @@
 # Identifying inherited metadata by entity type, not by path
 
-**Nothing here is built.** This is a plan for changing how inherited metadata is
-named, so that a flexible graph — an experiment referencing either a catalyst
-batch or a modified one, a semiconductor referencing any number of precursor
-chemicals — produces one filter per field instead of one per route.
+**This is built.** The document is kept as the record of why the design is
+shaped as it is — the reasoning, the measurements, and the alternatives that
+were rejected. What it *does* is described in
+[docs/database_app.md](database_app.md).
 
 Every number below was measured, on the seeded demo where the question was about
 correctness and on a synthetic 10 000-experiment index where it was about cost.
+The numbers taken again from the finished implementation are in §8; two of them
+moved enough to change decisions, and both are recorded there rather than
+quietly updated above.
 
 ---
 
@@ -297,12 +300,54 @@ Each step leaves the application working.
 
 Steps 1–2 are the redesign; 3–5 are what it was for.
 
-## 7. Decisions needed before starting
+## 7. What the group settled
 
-1. **Independent or same-entity conjunction** as the default (§2.2, §5.1)?
-2. **Should one type at two depths merge** (§5.2)? Merging is simpler and is what
-   "any precursor chemical" suggests, but it is a widening.
-3. **Property map axes over multi-valued keys** (§5.4) — average them, or offer
-   only single-contributor keys?
-4. Is there a query that **filtering by route** currently answers and
-   §5.3's substitute does not?
+1. **Independent existential matching is the default**, with an opt-in "same
+   entry" mode — a checkbox per filter group, *Match one precursor chemical*.
+2. **One type at two depths merges.** A precursor chemical reached through a
+   `precursor_semiconductor` and one reached through a `finished_semiconductor`
+   are one filter.
+3. **Only single-contributor keys are offered as property-map axes.** Nothing is
+   averaged.
+4. **Filtering by route is not needed.** Paths are shown on the entry page and
+   filter nothing.
+
+## 8. What the finished implementation measures
+
+Taken again at 10 000 experiments, 2 000 batches, 300 semiconductors and 40
+chemicals, with each semiconductor naming three precursors — so the fan-out the
+old design could not express is present throughout.
+
+| | old design | as planned | shipped |
+| --- | --- | --- | --- |
+| Index size | 20.7 MB | 68.8 MB predicted | **118.3 MB** |
+| Contribution rows | — | — | 347 600 |
+| Facet bounds, per page load | 1130 ms | 37 ms | **114 ms** |
+| Three-predicate target query | 43.8 ms per filter | 15.5 ms | **119 ms** (count and page) |
+| One dopant's concentration range | — | — | 40 ms |
+| Any precursor from Merck | not expressible | — | 69 ms |
+| One precursor both from Merck and pure | not expressible | — | 63 ms |
+| Provenance for one entry | a graph walk | 0.04 ms | **0.1 ms** |
+| Ingestion | 30 ms per experiment | — | 2.7 ms per experiment |
+
+**Two things the plan got wrong, both found by measuring the finished code
+rather than by reasoning about it.**
+
+*The index is 118 MB, not the 69 MB predicted.* The benchmark modelled 19
+inherited fields; the real chain contributes about 30 per experiment, and three
+indexes over 348 000 rows is most of the difference. It is still small beside
+the payload store, which holds 140 KB per experiment.
+
+*A first working version was 2102 ms per page load — worse than the 1130 ms it
+replaced.* The cause was the query planner, not the design: scoping a facet's
+bounds to one kind of entry with a subquery over `entities` made SQLite drive
+from the per-entity index and probe once per experiment, 97.8 ms per facet
+against 1.7 ms for a covering read. The fix is why `contributions` carries an
+`entity_type` column it does not logically need: with the kind of entry leading
+both value indexes, a lookup narrows to one field of one kind before it looks at
+a value. The same mistake in reverse cost the `match_same` predicate 237 ms —
+anchoring it on a row that already satisfies the first condition, rather than on
+any row of the right kind, brought it to 28 ms.
+
+Neither would have shown up on the seeded demo. Both are the reason the plan
+called for measuring the implementation and not only the design.

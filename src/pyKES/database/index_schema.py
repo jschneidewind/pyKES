@@ -27,7 +27,7 @@ from typing import Optional
 
 # Bumped when the table layout changes in a way an existing index cannot simply
 # be reopened with. A rebuild from the retained uploads is always the fallback.
-INDEX_SCHEMA_VERSION = "1.1"
+INDEX_SCHEMA_VERSION = "2.0"
 
 
 # =============================================================================
@@ -56,7 +56,15 @@ DEFAULT_ENTITY_TYPE = "other_entity"
 # something an old database can gain, whereas a changed one is a rebuild.
 ADDED_COLUMNS = (
     ("metadata_keys", "sub_keys", "TEXT"),
+    ("entities", "search_text", "TEXT NOT NULL DEFAULT ''"),
+    ("edges", "ordinal", "INTEGER NOT NULL DEFAULT 0"),
 )
+
+# Index versions this code can open. A database written before inherited
+# metadata moved out of the `effective` column into its own table cannot be
+# read correctly by it -- the searches would silently return nothing rather
+# than fail -- so it is refused with the repair to run rather than opened.
+SUPPORTED_SCHEMA_VERSIONS = ("2.0",)
 
 
 # =============================================================================
@@ -72,6 +80,12 @@ ADDED_COLUMNS = (
 # splittable. A slash in a stored key is therefore always a separator, and no
 # key has to be refused for containing one.
 ROLE_PATH_SEPARATOR = "/"
+
+# Separator between the kind of entry a metadata field belongs to and the field
+# itself, in a stored key: `finished_semiconductor/Dopants [mol%]`. The same
+# character the role path used, and the same `__SLASH__` escaping applies to the
+# field name, so a field called `Purity [%/g]` is still splittable.
+TYPE_KEY_SEPARATOR = ROLE_PATH_SEPARATOR
 
 # How far inherited metadata is followed. Chains in practice are three or four
 # hops; the cap exists so a malformed graph fails loudly instead of hanging.
@@ -126,18 +140,58 @@ CREATE TABLE IF NOT EXISTS entities (
     last_processed   TEXT,
     metadata         TEXT    NOT NULL,
     results          TEXT    NOT NULL,
-    effective        TEXT    NOT NULL
+    search_text      TEXT    NOT NULL DEFAULT ''
 );
 
--- One target per (source, role): a repeated role would produce two identical
--- qualified metadata keys and the second would silently overwrite the first,
--- so the primary key makes that impossible rather than merely unlikely.
+-- Several targets per role: a semiconductor names every precursor chemical it
+-- was made from in one field. What used to make that impossible -- two targets
+-- producing identical qualified keys, the second overwriting the first -- is
+-- gone now that inherited metadata is a set of contributions rather than a
+-- value. `ordinal` keeps the order they were written in, which is the order
+-- they should be read in.
 CREATE TABLE IF NOT EXISTS edges (
     source   TEXT    NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
     role     TEXT    NOT NULL,
     target   TEXT    NOT NULL,
+    ordinal  INTEGER NOT NULL DEFAULT 0,
     resolved INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (source, role)
+    PRIMARY KEY (source, role, target)
+);
+
+-- Every metadata value an entity inherits, one row per contributing entry per
+-- field. This replaces the `effective` JSON column, and the change is not a
+-- storage detail: a metadata field is now named by the *kind of entry that owns
+-- it* rather than by the route that reached it, so `Dopants [finished
+-- semiconductor]` is one filter however the graph is routed. Because one entry
+-- can reach several entries of a kind -- three precursor chemicals, or a
+-- semiconductor reached both directly and through a modified batch -- such a
+-- field holds a *set*, and a filter on it asks whether *some* contributor
+-- satisfies it.
+--
+-- The primary key is the deduplication rule: an entry reached by two different
+-- routes contributes once, which is what stops a diamond in the graph from
+-- counting twice. How a contributor was reached belongs to the pair rather than
+-- to each of its fields, so it lives in `contribution_sources` and is not
+-- repeated on all thirty rows an entry contributes.
+CREATE TABLE IF NOT EXISTS contribution_sources (
+    entity_id        TEXT    NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+    contributor      TEXT    NOT NULL,
+    contributor_type TEXT    NOT NULL,
+    role_paths       TEXT,
+    depth            INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (entity_id, contributor)
+);
+
+CREATE TABLE IF NOT EXISTS contributions (
+    entity_id        TEXT    NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+    entity_type      TEXT    NOT NULL,
+    contributor      TEXT    NOT NULL,
+    contributor_type TEXT    NOT NULL,
+    key              TEXT    NOT NULL,
+    sub_key          TEXT    NOT NULL DEFAULT '',
+    value            TEXT,
+    number           REAL,
+    PRIMARY KEY (entity_id, contributor, key, sub_key)
 );
 
 CREATE TABLE IF NOT EXISTS metadata_keys (
@@ -176,6 +230,20 @@ CREATE INDEX IF NOT EXISTS idx_entities_owner   ON entities(owner);
 CREATE INDEX IF NOT EXISTS idx_entities_group   ON entities(display_group);
 CREATE INDEX IF NOT EXISTS idx_edges_target     ON edges(target);
 CREATE INDEX IF NOT EXISTS idx_metadata_leaf    ON metadata_keys(leaf_name);
+
+-- Numbers and text are indexed separately because a range filter and an
+-- equality filter want different orders. Both lead with the kind of entry being
+-- searched and the pair that names a column, so a lookup narrows to one field
+-- of one kind before it looks at a value. `entity_type` is on the row for that
+-- reason alone: without it the planner drives from `idx_contrib_entity` and
+-- probes once per entity, which measured 97.8 ms against 1.7 ms for a facet's
+-- bounds -- paid once per numeric facet on every page load.
+CREATE INDEX IF NOT EXISTS idx_contrib_number
+    ON contributions(entity_type, contributor_type, key, sub_key, number);
+CREATE INDEX IF NOT EXISTS idx_contrib_value
+    ON contributions(entity_type, contributor_type, key, sub_key, value);
+CREATE INDEX IF NOT EXISTS idx_contrib_entity   ON contributions(entity_id);
+CREATE INDEX IF NOT EXISTS idx_sources_entity   ON contribution_sources(entity_id);
 """
 
 
@@ -240,8 +308,48 @@ def open_index(paths: IndexPaths) -> sqlite3.Connection:
     connection.execute("PRAGMA foreign_keys=ON")
 
     initialise_index(connection)
+    check_schema_version(connection)
 
     return connection
+
+
+def check_schema_version(connection: sqlite3.Connection) -> None:
+    """
+    Refuse an index this code cannot read correctly.
+
+    A database written before inherited metadata moved into the contributions
+    table still opens, and its searches still run — they just return nothing,
+    because the values they look for are in a column that is no longer read.
+    Silently answering "no matches" to a question with matches is the worst
+    failure this database has, so the version is checked rather than trusted.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+
+    Returns
+    -------
+    None : None
+
+    Raises
+    ------
+    RuntimeError
+        If the index was written by an incompatible version.
+    """
+    version = read_index_schema_version(connection)
+
+    if version in SUPPORTED_SCHEMA_VERSIONS or version is None:
+        return
+
+    raise RuntimeError(
+        f"This index was built at schema version {version}; this pyKES reads "
+        f"{', '.join(SUPPORTED_SCHEMA_VERSIONS)}. Inherited metadata moved out "
+        f"of the 'effective' column into its own table, so the stored values "
+        f"cannot be read as they are. Rebuild it from the retained uploads "
+        f"with `rebuild_index`, which is what keeping every upload verbatim "
+        f"is for."
+    )
 
 
 def initialise_index(connection: sqlite3.Connection) -> None:

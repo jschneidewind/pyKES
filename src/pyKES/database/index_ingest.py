@@ -42,7 +42,7 @@ from pyKES.database.index_references import (
     recompute_entity_and_dependents,
     record_references,
     resolve_pending_references,
-    store_effective_metadata,
+    store_contributions,
 )
 from pyKES.database.index_registry import (
     coerce_index_mapping,
@@ -574,14 +574,16 @@ def insert_entity(connection,
            (entity_id, base_id, version, entity_type, display_group, color, active,
             owner, created_at, updated_at, upload_id, payload_path, payload_bytes,
             payload_sha256, pykes_version, external_app, external_version,
-            last_processed, metadata, results, effective)
+            last_processed, metadata, results, search_text)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (entity_id, base_id, version, entity_type, display_group, color,
          _as_active_flag(metadata.get("Active")), owner, now, now, upload_id,
          payload_path, payload_bytes, payload_digest,
          provenance.get("pykes_version"), external.get("app"),
          external.get("version"), provenance.get("last_processed"),
-         json.dumps(metadata), json.dumps(results), json.dumps(metadata)),
+         json.dumps(metadata), json.dumps(results),
+         "\n".join(f"{key} {value}" for key, value in metadata.items()
+                   if value is not None)),
     )
 
 
@@ -638,7 +640,7 @@ def finalise_entity(connection,
     Returns
     -------
     recomputed : list of str
-        Entities whose effective metadata was rewritten.
+        Entities whose inherited metadata was rewritten.
     """
     record_references(connection, entity_id, extract_references(metadata,
                                                                 reference_instructions))
@@ -649,11 +651,7 @@ def finalise_entity(connection,
         recomputed.extend(recompute_entity_and_dependents(connection, waiting))
 
     for affected in set(recomputed):
-        row = connection.execute(
-            "SELECT effective, entity_type FROM entities WHERE entity_id = ?",
-            (affected,)).fetchone()
-        register_metadata_keys(connection, json.loads(row["effective"]),
-                               row["entity_type"])
+        register_metadata_keys(connection, affected)
 
     return sorted(set(recomputed))
 
@@ -1023,6 +1021,8 @@ def rebuild_index(connection,
     ).fetchall()
     entity_type_by_upload = entity_type_by_upload or {}
 
+    connection.execute("DELETE FROM contributions")
+    connection.execute("DELETE FROM contribution_sources")
     connection.execute("DELETE FROM edges")
     connection.execute("DELETE FROM entities")
     connection.execute("DELETE FROM metadata_keys")

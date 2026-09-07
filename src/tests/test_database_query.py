@@ -37,6 +37,7 @@ from pyKES.database.index_schema import IndexPaths, open_index
 CHAIN_REFERENCES = {
     "Catalyst Batch": {"role": "catalyst_batch"},
     "Finished Semiconductor": {"role": "finished_semiconductor"},
+    "Precursor Chemicals": {"role": "precursor_chemical"},
 }
 
 
@@ -96,15 +97,25 @@ def test_metadata_keys_are_bound_never_interpolated():
     assert parameters[0] == json_path("Notes'; DROP TABLE entities; --")
 
 
+def test_an_inherited_key_is_bound_too():
+    predicate, parameters = build_predicate(
+        Filter("finished_semiconductor/Notes'; DROP TABLE entities; --",
+               "equals", "x"))
+
+    # An inherited key reaches SQLite as bound column values rather than as a
+    # JSON path, and is no more interpolated for it.
+    assert "DROP TABLE" not in predicate
+    assert "Notes'; DROP TABLE entities; --" in parameters
+
+
 def test_a_key_containing_a_quote_is_escaped_into_the_path():
     assert json_path('Odd "key"') == '$."Odd \\"key\\""'
 
 
 def test_an_empty_multiselect_means_no_constraint():
-    predicate, parameters = build_predicate(Filter("Cocatalyst", "in", []))
+    predicate, _ = build_predicate(Filter("Cocatalyst", "in", []))
 
-    assert predicate == "1 = 1"
-    assert parameters == []
+    assert predicate.endswith("1 = 1")
 
 
 def test_an_unknown_operator_is_refused():
@@ -150,8 +161,8 @@ def test_filtering_two_references_away(connection):
     # The question the whole design exists to answer.
     rows, _ = search_entities(
         connection, "experiment",
-        filters=[Filter("catalyst_batch/finished_semiconductor/"
-                        "Synthesis temperature [degC]", "between", [1100, 1200])])
+        filters=[Filter("finished_semiconductor/Synthesis temperature [degC]",
+                        "between", [1100, 1200])])
 
     assert {row["entity_id"] for row in rows} == {"EXP-1", "EXP-2", "EXP-3"}
 
@@ -160,8 +171,8 @@ def test_combining_an_inherited_filter_with_an_own_one(connection):
     rows, _ = search_entities(
         connection, "experiment",
         filters=[
-            Filter("catalyst_batch/finished_semiconductor/"
-                   "Synthesis temperature [degC]", "between", [1100, 1200]),
+            Filter("finished_semiconductor/Synthesis temperature [degC]",
+                   "between", [1100, 1200]),
             Filter("Measured Analyte [O2 or H2]", "in", ["O2"]),
         ])
 
@@ -228,12 +239,15 @@ def test_facets_are_generated_from_the_metadata_present(connection):
     assert set(by_label["Measured Analyte [O2 or H2]"].options) == {"O2", "H2"}
 
 
-def test_inherited_facets_carry_the_path_they_came_through(connection):
+def test_inherited_facets_name_the_entry_that_owns_the_field(connection):
     facets = {facet.label: facet for facet in build_facets(connection, "experiment")}
 
+    # The kind of entry the field belongs to, not the route to it — so the
+    # semiconductor's field is one filter whether it was reached in two hops or
+    # in three through a modified batch.
     assert facets["Photodeposition wavelength [nm]"].role_path == "catalyst_batch"
     assert (facets["Synthesis temperature [degC]"].role_path
-            == "catalyst_batch/finished_semiconductor")
+            == "finished_semiconductor")
 
 
 def test_a_constant_numeric_key_gets_no_slider(connection):
@@ -251,7 +265,7 @@ def test_a_constant_numeric_key_gets_no_slider(connection):
 def test_the_property_map_pairs_an_inherited_axis_with_a_result(connection):
     frame = property_map_data(
         connection,
-        x_key="catalyst_batch/finished_semiconductor/Synthesis temperature [degC]",
+        x_key="finished_semiconductor/Synthesis temperature [degC]",
         y_key=f"{RESULT_PREFIX}Max. rate (umol/s)",
         entity_type="experiment")
 
@@ -327,14 +341,17 @@ def test_entity_types_read_as_names_not_identifiers():
 
 
 def test_facets_are_ordered_by_reference_depth(connection):
-    from pyKES.database.index_query import reference_depth
+    from pyKES.database.index_query import contributor_depths, reference_depth
 
-    depths = [reference_depth(facet) for facet in build_facets(connection, "experiment")]
+    depths = contributor_depths(connection, "experiment")
+    ordered = [reference_depth(facet, depths)
+               for facet in build_facets(connection, "experiment")]
 
-    # Own fields first, then one reference away, then two: the order somebody
-    # narrowing a search thinks in.
-    assert depths == sorted(depths)
-    assert depths[0] == 0 and max(depths) == 2
+    # Own fields first, then the batch, then the semiconductor behind it: the
+    # order somebody narrowing a search thinks in. A key no longer carries its
+    # route, so the depth comes from the shortest one the data actually has.
+    assert ordered == sorted(ordered)
+    assert ordered[0] == 0 and max(ordered) == 2
 
 
 def test_the_fields_of_one_referenced_entity_stay_together(connection):
@@ -473,55 +490,28 @@ def test_the_type_ahead_can_be_scoped_to_one_kind(connection):
 # One field reached by several paths
 # =============================================================================
 
-def test_paths_to_one_field_become_one_filter():
-    from pyKES.database.index_query import merge_key_paths
+def test_one_field_is_one_filter_however_it_was_reached(connection):
+    # A modified batch used to put the semiconductor's fields at a second depth
+    # and needed folding back together. Naming a field after the entry that
+    # owns it means the duplicates never arise.
+    keys = [facet.key for facet in build_facets(connection, "experiment")]
 
-    rows = [{"key": "catalyst_batch/finished_semiconductor/Synthesis route",
-             "leaf_name": "Synthesis route",
-             "role_path": "catalyst_batch/finished_semiconductor",
-             "inferred_type": "text", "distinct_sample": '["Osterloh"]',
-             "sub_keys": None},
-            {"key": "catalyst_batch/catalyst_batch/finished_semiconductor/Synthesis route",
-             "leaf_name": "Synthesis route",
-             "role_path": "catalyst_batch/catalyst_batch/finished_semiconductor",
-             "inferred_type": "text", "distinct_sample": '["Lercher"]',
-             "sub_keys": None}]
-
-    groups = merge_key_paths(rows)
-
-    # A modified batch adds a hop, so the semiconductor sits at two depths. One
-    # filter per depth would answer for half the experiments each, and neither
-    # would say so.
-    assert len(groups) == 1
-    assert len(groups[0]["keys"]) == 2
-    assert groups[0]["keys"][0].count("/") == 2, "the shortest path leads"
-    assert sorted(groups[0]["sample"]) == ["Lercher", "Osterloh"]
+    assert keys.count("finished_semiconductor/Synthesis temperature [degC]") == 1
+    assert not any(key.count("/") > 1 for key in keys)
 
 
-def test_the_same_name_on_two_entities_stays_two_filters():
-    from pyKES.database.index_query import merge_key_paths
+def test_the_same_name_on_two_entities_stays_two_filters(connection):
+    add(connection, "SEMI-3", "finished_semiconductor", {"Notes": "from the boat"})
+    add(connection, "BATCH-3", "catalyst_batch",
+        {"Notes": "recoated", "Finished Semiconductor": "SEMI-3"})
+    add(connection, "EXP-7", "experiment", {"Catalyst Batch": "BATCH-3"})
 
-    rows = [{"key": "catalyst_batch/Notes", "leaf_name": "Notes",
-             "role_path": "catalyst_batch", "inferred_type": "text",
-             "distinct_sample": "[]", "sub_keys": None},
-            {"key": "catalyst_batch/finished_semiconductor/Notes",
-             "leaf_name": "Notes",
-             "role_path": "catalyst_batch/finished_semiconductor",
-             "inferred_type": "text", "distinct_sample": "[]", "sub_keys": None}]
+    keys = {facet.key for facet in build_facets(connection, "experiment")}
 
-    # A batch's notes and a semiconductor's notes are different fields; sharing
-    # a name is not enough to merge them.
-    assert len(merge_key_paths(rows)) == 2
-
-
-def test_a_filter_over_several_paths_reads_whichever_one_exists():
-    from pyKES.database.index_query import build_expression
-
-    expression, paths = build_expression(
-        "catalyst_batch/X", None, ["catalyst_batch/catalyst_batch/X"])
-
-    assert expression.startswith("COALESCE(")
-    assert len(paths) == 2
+    # A batch's notes and a semiconductor's notes are different fields; both
+    # being called Notes is not enough to merge them.
+    assert "catalyst_batch/Notes" in keys
+    assert "finished_semiconductor/Notes" in keys
 
 
 # =============================================================================
@@ -538,3 +528,91 @@ def test_a_dopant_filter_binds_its_path_rather_than_interpolating_it():
 
     assert '"; DROP' not in predicate
     assert any('DROP' in str(parameter) for parameter in parameters)
+
+
+# =============================================================================
+# Several contributors of one kind
+# =============================================================================
+
+@pytest.fixture
+def split_precursors(connection):
+    """A semiconductor with one Merck-but-impure and one pure-but-Alfa precursor."""
+    add(connection, "EA-1", "precursor_chemical",
+        {"Supplier": "Merck", "Purity [%]": 95.0})
+    add(connection, "EA-2", "precursor_chemical",
+        {"Supplier": "Alfa", "Purity [%]": 99.99})
+    add(connection, "SEMI-9", "finished_semiconductor",
+        {"Precursor Chemicals": "EA-1; EA-2"})
+    add(connection, "BATCH-9", "catalyst_batch", {"Finished Semiconductor": "SEMI-9"})
+    add(connection, "EXP-9", "experiment", {"Catalyst Batch": "BATCH-9"})
+
+    return connection
+
+
+def test_every_named_entry_contributes(split_precursors):
+    from pyKES.database.index_query import read_inherited_values
+
+    values = read_inherited_values(split_precursors, ["EXP-9"],
+                                   ["precursor_chemical/Supplier"])
+
+    assert sorted(values[("EXP-9", "precursor_chemical/Supplier")]) == ["Alfa", "Merck"]
+
+
+def test_a_filter_asks_whether_some_contributor_matches(split_precursors):
+    rows, _ = search_entities(split_precursors, "experiment", limit=None,
+                              filters=[Filter("precursor_chemical/Supplier",
+                                              "in", ["Merck"])])
+
+    assert "EXP-9" in {row["entity_id"] for row in rows}
+
+
+def test_two_filters_may_be_satisfied_by_two_different_contributors(split_precursors):
+    rows, _ = search_entities(split_precursors, "experiment", limit=None, filters=[
+        Filter("precursor_chemical/Supplier", "in", ["Merck"]),
+        Filter("precursor_chemical/Purity [%]", "between", [99.9, 100.0])])
+
+    # One precursor is from Merck and a *different* one is 99.99% pure. That is
+    # usually the question — "a sample involving something from Merck and
+    # something very pure" — and it is what the default answers.
+    assert "EXP-9" in {row["entity_id"] for row in rows}
+
+
+def test_match_same_requires_one_contributor_to_satisfy_all(split_precursors):
+    rows, _ = search_entities(split_precursors, "experiment", limit=None, filters=[
+        Filter("precursor_chemical/Supplier", "in", ["Merck"], match_same=True),
+        Filter("precursor_chemical/Purity [%]", "between", [99.9, 100.0],
+               match_same=True)])
+
+    # No single precursor is both, so the entry drops out — which is the whole
+    # difference between the two modes.
+    assert "EXP-9" not in {row["entity_id"] for row in rows}
+
+
+def test_match_same_still_matches_when_one_contributor_does(split_precursors):
+    rows, _ = search_entities(split_precursors, "experiment", limit=None, filters=[
+        Filter("precursor_chemical/Supplier", "in", ["Merck"], match_same=True),
+        Filter("precursor_chemical/Purity [%]", "between", [90.0, 96.0],
+               match_same=True)])
+
+    assert "EXP-9" in {row["entity_id"] for row in rows}
+
+
+def test_a_multi_contributor_key_is_not_offered_as_an_axis(split_precursors):
+    from pyKES.database.index_query import list_axis_options
+
+    options = list_axis_options(split_precursors, "experiment")
+
+    # A point whose x averaged two precursors would sit at a number no
+    # experiment has, and nothing on the chart would say so.
+    assert "precursor_chemical/Purity [%]" not in options
+    assert "finished_semiconductor/Synthesis temperature [degC]" in options
+
+
+def test_a_table_cell_shows_every_contributor(split_precursors):
+    rows, _ = search_entities(split_precursors, "experiment", limit=None,
+                              filters=[Filter("entity_type", "equals", "experiment")])
+    frame = rows_to_frame([row for row in rows if row["entity_id"] == "EXP-9"],
+                          ["precursor_chemical/Supplier"], split_precursors)
+
+    # Joined the way a reference cell is written, not as JSON.
+    assert sorted(frame["Supplier"].iloc[0].split("; ")) == ["Alfa", "Merck"]

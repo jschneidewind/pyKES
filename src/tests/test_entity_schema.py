@@ -83,15 +83,15 @@ def test_reference_fields_supply_the_chain(schema):
     # twice, so this is what wires the group's chain together.
     assert schemas["experiment"].reference_instructions() == {
         "Catalyst Batch [experiment no.]": {
-            "role": "catalyst_batch",
+            "role": "catalyst_batch", "multiple": False,
             "accepts": ["catalyst_batch", "modified_catalyst_batch"]}}
 
-    precursors = ["precursor_chemical", "commercial_chemical"]
+    # One field naming any number of precursors, where two lettered ones used
+    # to be needed to keep them from overwriting each other.
     assert schemas["finished_semiconductor"].reference_instructions() == {
-        "Precursor Chemical A": {"role": "precursor_chemical_a",
-                                 "accepts": precursors},
-        "Precursor Chemical B": {"role": "precursor_chemical_b",
-                                 "accepts": precursors}}
+        "Precursor Chemicals": {
+            "role": "precursor_chemical", "multiple": True,
+            "accepts": ["precursor_chemical", "commercial_chemical"]}}
 
 
 # =============================================================================

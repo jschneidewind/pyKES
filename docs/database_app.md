@@ -233,15 +233,46 @@ not the same as defaulting it to the role: a role names the *relationship*, so
 `precursor_chemical_a` is filled by a `precursor_chemical`, and reading the role
 as a type would flag every correct reference in the group's own chain.
 
-**One field, several paths.** A modified batch adds a hop, so the semiconductor
-sits two references away for experiments run on an ordinary batch and three away
-for the rest. Those are the same field of the same entity, so `build_facets`
-merges them into one filter that matches whichever path an entry has
-(`COALESCE` over both, in `build_expression`). Without that, a filter on
-synthesis temperature would answer for half the experiments and say nothing
-about the other half — a silently wrong answer, which is worse than no filter.
-The grouping is by the *last* role and the field name, not by the name alone, so
-a batch's `Notes` and a semiconductor's `Notes` stay apart.
+**A field is named after the entry that owns it.** A modified batch adds a hop,
+so the semiconductor sits two references away for experiments run on an ordinary
+batch and three away for the rest — but `Dopants [finished semiconductor]` is
+one filter either way, because the name comes from the kind of entry the field
+belongs to rather than from the route that reached it. Two entities of different
+kinds carrying a field of the same name stay two filters, since the kind is part
+of the name.
+
+That is the whole reason the reference graph can be flexible. See
+[docs/referencing_redesign.md](referencing_redesign.md) for why it is shaped
+this way.
+
+### Inherited metadata is a set, and a filter is existential
+
+An entry can reach several entries of one kind — three precursor chemicals named
+in one field, or a semiconductor reached both directly and through a modified
+batch — so an inherited field holds **every** contributor's value. A filter on it
+therefore asks whether *some* contributor satisfies it.
+
+Two filters over one kind may then be satisfied by two different entries: one
+precursor from Merck and a *different* one 99.99% pure. That is usually the
+question — "a sample involving something from Merck and something very pure" —
+and it is what the default answers. Each filter group carries a **Match one
+&lt;kind&gt;** checkbox for when it is not: with it on, one entry has to satisfy
+all of them.
+
+The distinction is on screen rather than in this document because a wrong answer
+here is indistinguishable from a right one.
+
+**Where each value came from** is on the entry page: the entry that owns it, its
+kind, and the routes that reached it. Routes no longer name anything, but which
+chain led to a value is still worth seeing.
+
+**Multiple references in one cell**: a reference field declared `multiple: true`
+names any number of entries, `EA-1; EA-2; EA-3`, using the same separators a
+mapping field uses. The `edges` primary key is `(source, role, target)` and an
+`ordinal` keeps the order written. This replaced the lettered
+`Precursor Chemical A`/`B` fields, which only ever existed because two targets
+under one role used to produce identical keys and the second silently overwrote
+the first.
 
 ### Metadata that is a set of named numbers
 
@@ -274,7 +305,8 @@ same `name=value` text — so a form entry and an uploaded row produce identical
 metadata and neither is a special case afterwards.
 
 **In the filter** it is two levels: a picker of the names actually present, and
-then a slider per chosen name over the range that name spans. Choosing a name
+then a slider per chosen name over the range that name spans. Mappings are
+stored one row per name, which is what lets a dopant filter use an index. Choosing a name
 and leaving its slider alone is already a filter — it asks for entries carrying
 that dopant at all — which is what picking it from the list means. Any number of
 names can be chosen; each adds a predicate.

@@ -41,6 +41,9 @@ MODIFIED_BATCH_INTERVAL = 5
 SEMICONDUCTOR_COUNT = 6
 PRECURSOR_COUNT = 3
 
+# Precursor chemicals named in one cell of each semiconductor's sheet.
+PRECURSORS_PER_SEMICONDUCTOR = 2
+
 # Samples per synthetic trace. Enough for the payload to look like a real
 # measurement and to exercise gzip.
 TRACE_POINTS = 900
@@ -107,10 +110,10 @@ def build_precursor_sheet(directory: Path) -> Path:
 
 def build_semiconductor_sheet(directory: Path, generator) -> Path:
     """
-    Write the finished-semiconductor sheet, referencing two precursors each.
+    Write the finished-semiconductor sheet, naming several precursors each.
 
-    Two references of the same kind under *distinct* roles is exactly the case
-    that would silently lose data under a single shared role, so the demo
+    Several entries of one kind in one field is exactly the case that could not
+    be expressed at all before inherited metadata became a set, so the demo
     exercises it.
 
     Parameters
@@ -130,8 +133,11 @@ def build_semiconductor_sheet(directory: Path, generator) -> Path:
         rows.append({
             "Experiment": f"SEMI-{index + 1:03d}",
             "group": "Reference",
-            "Precursor Chemical A": f"BC-{(index % PRECURSOR_COUNT) + 1}",
-            "Precursor Chemical B": f"BC-{((index + 1) % PRECURSOR_COUNT) + 1}",
+            # Several precursors in one cell, which is what the reference
+            # machinery was extended for.
+            "Precursor Chemicals": "; ".join(
+                f"BC-{((index + offset) % PRECURSOR_COUNT) + 1}"
+                for offset in range(PRECURSORS_PER_SEMICONDUCTOR)),
             "Catalyst material": "Al:SrTiO3",
             "Synthesis temperature [°C]": int(
                 generator.choice(SYNTHESIS_TEMPERATURES)),

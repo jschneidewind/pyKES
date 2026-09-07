@@ -7,18 +7,21 @@ identifier_field: Experiment
 description: A synthesised semiconductor, before cocatalyst loading.
 
 fields:
-  - name: Precursor Chemical A
+  # One field rather than the lettered A/B slots it replaces. Those existed
+  # only because two targets under one role used to produce identical metadata
+  # keys, the second silently overwriting the first. A field now contributes a
+  # *set* of values named after the kind of entry that owns them, so any number
+  # of precursors can be named in one cell and a filter on their supplier asks
+  # whether any of them matches.
+  - name: Precursor Chemicals
     type: reference
-    role: precursor_chemical_a
+    role: precursor_chemical
     accepts: [precursor_chemical, commercial_chemical]
+    multiple: true
     required: true
-    help: Two precursors take two distinct roles; one shared role would
-          silently keep only the second.
-
-  - name: Precursor Chemical B
-    type: reference
-    role: precursor_chemical_b
-    accepts: [precursor_chemical, commercial_chemical]
+    help: >-
+      Every chemical this semiconductor was made from, separated by semicolons:
+      EA-1; EA-2; EA-3.
 
   - name: Catalyst material
     type: text

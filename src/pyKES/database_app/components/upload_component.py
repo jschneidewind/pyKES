@@ -56,6 +56,10 @@ PAYLOAD_ENTITY_TYPES = ("experiment",)
 # is likely to be linking to, bounded so the form does not load the database.
 REFERENCE_OPTION_LIMIT = 200
 
+# How several identifiers are written into one cell, matching what the sheet
+# uploader reads back out of one.
+REFERENCE_JOIN = "; "
+
 
 def stage_upload(uploaded_file) -> Path:
     """
@@ -358,6 +362,10 @@ def render_reference_field(field_schema: FieldSchema, label: str,
     name would exclude the group's own chain — a ``precursor_chemical_a`` role
     is filled by a ``precursor_chemical``.
 
+    A field declared ``multiple`` offers several at once and writes them into
+    one cell the way a sheet does, so a form entry and an uploaded row are
+    indistinguishable afterwards.
+
     A free-text box sits beside the list because a reference to an entry that
     has not been uploaded yet is legitimate and routine: it is recorded
     unresolved and promoted when the target arrives.
@@ -382,12 +390,23 @@ def render_reference_field(field_schema: FieldSchema, label: str,
         return st.text_input(label, placeholder="Identifier of the linked entry",
                              **arguments)
 
-    chosen = st.selectbox(label, reference_options(connection, field_schema),
-                          index=None, placeholder="Select an entry…", **arguments)
+    options = reference_options(connection, field_schema)
 
-    typed = st.text_input(f"…or type an identifier for {field_schema.name}",
-                          placeholder="For an entry not uploaded yet",
+    if field_schema.multiple:
+        chosen = REFERENCE_JOIN.join(
+            st.multiselect(label, options, **arguments))
+    else:
+        chosen = st.selectbox(label, options, index=None,
+                              placeholder="Select an entry…", **arguments)
+
+    typed = st.text_input(f"…or type identifiers for {field_schema.name}",
+                          placeholder="For entries not uploaded yet"
+                          if field_schema.multiple
+                          else "For an entry not uploaded yet",
                           key=f"{arguments['key']}_typed")
+
+    if chosen and typed:
+        return f"{chosen}{REFERENCE_JOIN}{typed}"
 
     return chosen or typed
 

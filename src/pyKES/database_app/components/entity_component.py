@@ -11,16 +11,17 @@ import json
 import streamlit as st
 
 from pyKES.database.index_ingest import may_edit, update_entity_metadata
+from pyKES.database.database_experiments import restore_key
 from pyKES.database.index_query import (
     arrow_safe_frame,
     display_entity_type,
     display_role_path,
+    read_contributions,
     read_entity,
     read_neighbours,
     read_versions,
     search_entity_ids,
 )
-from pyKES.database.index_registry import split_qualified_key
 from pyKES.database_app.components.time_series_panel import render_time_series_panel
 from pyKES.database_app.config import DEFAULT_CONFIG, DatabaseAppConfig
 from pyKES.database_app.session import index_paths, open_shared_index, read_identity
@@ -40,43 +41,60 @@ ENTITY_PARAMETER = "entity"
 # Metadata display
 # =============================================================================
 
-def split_metadata(effective: dict, own: dict) -> tuple:
+def contribution_rows(connection, entity_id: str) -> list:
     """
-    Separate an entry's own metadata from what it inherited.
+    Lay out what an entry inherits, one row per value.
+
+    Each row names the entry the value came from and that entry's kind, which
+    is what the field is called everywhere else — `Dopants [finished
+    semiconductor]`. The routes are kept beside it: they no longer name
+    anything, since a field is identified by its owner rather than by how it
+    was reached, but which chain led to a value is still worth being able to
+    see.
 
     Parameters
     ----------
-    effective : dict
-        Own metadata plus everything inherited, qualified.
-    own : dict
-        The entry's own metadata.
+    connection : sqlite3.Connection
+        Open connection to the index database.
+    entity_id : str
+        Entry in question.
 
     Returns
     -------
-    own_rows, inherited_rows : list of dict
-        Table rows, the inherited ones carrying the reference path they came
-        through so the provenance of every value is visible.
+    rows : list of dict
+        Table rows, nearest contributor first.
     """
-    own_rows, inherited_rows = [], []
+    rows = []
 
-    for key, value in sorted(effective.items()):
-        role_path, leaf = split_qualified_key(key)
+    for contribution in read_contributions(connection, entity_id):
+        field = restore_key(contribution["key"])
+        if contribution["sub_key"]:
+            field = f"{field} · {contribution['sub_key']}"
 
-        if key in own:
-            own_rows.append({"Field": leaf, "Value": value})
-        else:
-            inherited_rows.append({"Field": leaf, "Value": value,
-                                   "Via": display_role_path(role_path)})
+        held = (contribution["number"] if contribution["number"] is not None
+                else contribution["value"])
 
-    return own_rows, inherited_rows
+        rows.append({
+            "Field": field,
+            "Value": held,
+            "From": f"{display_entity_type(contribution['contributor_type'])}"
+                    f" · {contribution['contributor']}",
+            "Reached by": "  |  ".join(
+                display_role_path(route)
+                for route in json.loads(contribution["role_paths"] or "[]")),
+        })
+
+    return rows
 
 
-def render_metadata(row) -> None:
+def render_metadata(connection, row) -> None:
     """
-    Draw the entry's own and inherited metadata as two tables.
+    Draw the entry's own metadata and everything it inherits.
 
     Parameters
     ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
     row : sqlite3.Row
         Entity row.
 
@@ -85,8 +103,9 @@ def render_metadata(row) -> None:
     None : None
     """
     own = json.loads(row["metadata"])
-    effective = json.loads(row["effective"])
-    own_rows, inherited_rows = split_metadata(effective, own)
+    own_rows = [{"Field": restore_key(key), "Value": value}
+                for key, value in sorted(own.items())]
+    inherited_rows = contribution_rows(connection, row["entity_id"])
 
     # One column holding every field's value mixes numbers, text and booleans,
     # which is the mixture Arrow refuses to serialise.
@@ -94,9 +113,12 @@ def render_metadata(row) -> None:
         st.dataframe(arrow_safe_frame(own_rows), width="stretch", hide_index=True)
 
     if inherited_rows:
-        with st.expander(f"Inherited Through References ({len(inherited_rows)})",
-                         expanded=False):
-            st.caption("Each value carries the reference path it came through.")
+        contributors = len({row["From"] for row in inherited_rows})
+        with st.expander(f"Inherited From {contributors} Entries "
+                         f"({len(inherited_rows)} values)", expanded=False):
+            st.caption("Each value names the entry that owns it. A field is "
+                       "filtered by that entry's kind, so it is one filter "
+                       "however the reference chain reached it.")
             st.dataframe(arrow_safe_frame(inherited_rows), width="stretch",
                          hide_index=True)
 
@@ -419,6 +441,6 @@ def render_entity(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
 
     render_results(row)
     render_neighbours(connection, row["entity_id"])
-    render_metadata(row)
+    render_metadata(connection, row)
     render_payload(row, config)
     render_editor(connection, row, identity, config)

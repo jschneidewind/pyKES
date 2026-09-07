@@ -29,7 +29,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from pyKES.database.database_experiments import restore_key, sanitize_key
-from pyKES.database.index_schema import ROLE_PATH_SEPARATOR
+from pyKES.database.index_schema import ROLE_PATH_SEPARATOR, TYPE_KEY_SEPARATOR
 
 
 # =============================================================================
@@ -242,114 +242,145 @@ def qualify_key(role: str, key: str) -> str:
 # Registry maintenance
 # =============================================================================
 
-def register_metadata_keys(connection,
-                           effective_metadata: Dict[str, Any],
-                           entity_type: Optional[str] = None) -> None:
+def register_metadata_keys(connection, entity_id: str) -> None:
     """
-    Record every key of one entity's effective metadata in the registry.
+    Record the keys one entity carries, own and inherited, in the registry.
 
-    Called once per entity per ingestion. Occurrence counts accumulate, observed
-    types are merged, and a bounded sample of distinct values is kept so the
-    search page can decide between a slider, a multiselect and a text box
-    without querying the entities table.
-
-    The entity types a key occurs on are recorded too, because in a reference
-    chain one leaf name necessarily appears at several paths: a synthesis
-    temperature is ``Synthesis temperature`` on the semiconductor,
-    ``finished_semiconductor/Synthesis temperature`` on the batch made from it,
-    and ``catalyst_batch/finished_semiconductor/Synthesis temperature`` on the
-    experiment. Scoping by entity type is what reduces that back to one path per
-    kind of entry, so a facet on the experiment search offers a single filter.
+    Called once per entity per ingestion. An own key is registered bare; an
+    inherited one is registered under the *kind of entry that owns it* —
+    `finished_semiconductor/Dopants [mol%]` — which is what makes it one filter
+    however the graph reached that semiconductor.
 
     Parameters
     ----------
     connection : sqlite3.Connection
         Open connection to the index database.
-    effective_metadata : dict
-        The entity's own metadata plus everything inherited, already qualified.
-    entity_type : str, optional
-        Type of the entity these keys were read from.
+    entity_id : str
+        Entity whose keys are registered.
 
     Returns
     -------
     None : None
         ``metadata_keys`` is updated in place.
     """
-    now = datetime.now(timezone.utc).isoformat()
+    row = connection.execute(
+        "SELECT entity_type, metadata FROM entities WHERE entity_id = ?",
+        (entity_id,),
+    ).fetchone()
 
-    for key, value in effective_metadata.items():
-        if value is None:
-            continue
+    if row is None:
+        return
 
-        role_path, leaf_name = split_qualified_key(key)
-        observed_type = infer_value_type(value)
+    for key, value in json.loads(row["metadata"]).items():
+        if value is not None:
+            register_key(connection, key, value, row["entity_type"])
 
-        row = connection.execute(
-            """SELECT inferred_type, distinct_sample, entity_types, sub_keys
-               FROM metadata_keys WHERE key = ?""",
-            (key,),
-        ).fetchone()
+    contributions = connection.execute(
+        """SELECT contributor_type, key, sub_key, value, number
+           FROM contributions WHERE entity_id = ?""",
+        (entity_id,),
+    ).fetchall()
 
-        if row is None:
-            connection.execute(
-                """INSERT INTO metadata_keys
-                   (key, leaf_name, role_path, inferred_type, occurrences,
-                    first_seen, last_seen, distinct_sample, entity_types,
-                    sub_keys)
-                   VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
-                (key, leaf_name, role_path, observed_type, now, now,
-                 json.dumps([value]),
-                 json.dumps([entity_type] if entity_type else []),
-                 json.dumps(sorted(value) if isinstance(value, dict) else [])),
-            )
-            continue
-
-        sample = json.loads(row["distinct_sample"] or "[]")
-        if value not in sample and len(sample) < DISTINCT_SAMPLE_LIMIT:
-            sample.append(value)
-
-        entity_types = json.loads(row["entity_types"] or "[]")
-        if entity_type and entity_type not in entity_types:
-            entity_types.append(entity_type)
-
-        connection.execute(
-            """UPDATE metadata_keys
-               SET inferred_type = ?, occurrences = occurrences + 1,
-                   last_seen = ?, distinct_sample = ?, entity_types = ?,
-                   sub_keys = ?
-               WHERE key = ?""",
-            (combine_types(row["inferred_type"], observed_type), now,
-             json.dumps(sample), json.dumps(entity_types),
-             json.dumps(merge_sub_keys(row["sub_keys"], value)), key),
-        )
+    for contribution in contributions:
+        register_key(connection,
+                     f"{contribution['contributor_type']}{ROLE_PATH_SEPARATOR}{contribution['key']}",
+                     registered_value(contribution), row["entity_type"],
+                     sub_key=contribution["sub_key"])
 
 
-def merge_sub_keys(stored: Optional[str], value: Any) -> list:
+def registered_value(contribution) -> Any:
     """
-    Accumulate the names a mapping key has been seen carrying.
-
-    Every entry declares its own set — one sample is doped with iridium, the
-    next with chromium — so the filter's dropdown is the union across the
-    database, maintained here rather than scanned for on every page view.
+    Read a contribution row back as the value the registry should record.
 
     Parameters
     ----------
-    stored : str or None
-        Names recorded so far, as stored JSON.
-    value : Any
-        Value just seen. Anything but a mapping leaves the list alone.
+    contribution : sqlite3.Row
+        One row of the contributions table.
 
     Returns
     -------
-    names : list of str
-        The union, sorted.
+    value : Any
+        The number where the row holds one, otherwise its text.
     """
-    names = set(json.loads(stored or "[]"))
+    return contribution["number"] if contribution["number"] is not None \
+        else contribution["value"]
 
-    if isinstance(value, dict):
-        names.update(str(name) for name in value)
 
-    return sorted(names)
+def register_key(connection, key: str, value: Any, entity_type: Optional[str],
+                 sub_key: str = "") -> None:
+    """
+    Record one key of one entity.
+
+    Occurrence counts accumulate, observed types are merged, and a bounded
+    sample of distinct values is kept so the search page can decide between a
+    slider, a multiselect and a text box without querying the entities table.
+
+    The entity types a key occurs on are recorded too: a key inherited by an
+    experiment and a key of the same name on the batch itself are the same
+    registry row, and the search page needs to know which kinds of entry offer
+    it as a filter.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+    key : str
+        Stored key, bare for an entity's own field and type-qualified for an
+        inherited one.
+    value : Any
+        The value observed.
+    entity_type : str or None
+        Kind of entry the key was observed on.
+    sub_key : str, optional
+        Name inside a mapping-valued field, recorded so the filter can offer it.
+
+    Returns
+    -------
+    None : None
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    role_path, leaf_name = split_qualified_key(key)
+    observed_type = TYPE_MAPPING if sub_key else infer_value_type(value)
+
+    row = connection.execute(
+        """SELECT inferred_type, distinct_sample, entity_types, sub_keys
+           FROM metadata_keys WHERE key = ?""",
+        (key,),
+    ).fetchone()
+
+    if row is None:
+        connection.execute(
+            """INSERT INTO metadata_keys
+               (key, leaf_name, role_path, inferred_type, occurrences,
+                first_seen, last_seen, distinct_sample, entity_types, sub_keys)
+               VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
+            (key, leaf_name, role_path, observed_type, now, now,
+             json.dumps([] if sub_key else [value]),
+             json.dumps([entity_type] if entity_type else []),
+             json.dumps([sub_key] if sub_key else [])),
+        )
+        return
+
+    sample = json.loads(row["distinct_sample"] or "[]")
+    if not sub_key and value not in sample and len(sample) < DISTINCT_SAMPLE_LIMIT:
+        sample.append(value)
+
+    entity_types = json.loads(row["entity_types"] or "[]")
+    if entity_type and entity_type not in entity_types:
+        entity_types.append(entity_type)
+
+    sub_keys = json.loads(row["sub_keys"] or "[]")
+    if sub_key and sub_key not in sub_keys:
+        sub_keys = sorted(sub_keys + [sub_key])
+
+    connection.execute(
+        """UPDATE metadata_keys
+           SET inferred_type = ?, occurrences = occurrences + 1,
+               last_seen = ?, distinct_sample = ?, entity_types = ?, sub_keys = ?
+           WHERE key = ?""",
+        (combine_types(row["inferred_type"], observed_type), now,
+         json.dumps(sample), json.dumps(entity_types), json.dumps(sub_keys), key),
+    )
 
 
 def register_result_keys(connection,
@@ -428,9 +459,8 @@ def rebuild_metadata_key_registry(connection) -> int:
     """
     connection.execute("DELETE FROM metadata_keys")
 
-    for row in connection.execute("SELECT effective, entity_type FROM entities"):
-        register_metadata_keys(connection, json.loads(row["effective"]),
-                               row["entity_type"])
+    for row in connection.execute("SELECT entity_id FROM entities").fetchall():
+        register_metadata_keys(connection, row["entity_id"])
 
     connection.commit()
 

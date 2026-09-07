@@ -21,13 +21,12 @@ from pyKES.database.index_query import (
     column_labels,
     display_entity_type,
     display_key,
-    display_role_path,
     facet_group_label,
     rows_to_frame,
     search_entities,
 )
 from pyKES.database.entity_schema import load_entity_schemas
-from pyKES.database.index_schema import ENTITY_TYPES, ROLE_PATH_SEPARATOR
+from pyKES.database.index_schema import ENTITY_TYPES
 from pyKES.database_app.components.time_series_panel import (
     MAX_COMPARISON_ENTRIES,
     payload_files_for,
@@ -57,6 +56,7 @@ FILTER_PARAMETER = "f"
 TEXT_KEY = "search_text"
 TYPE_KEY = "search_entity_type"
 FACET_KEY_PREFIX = "facet:"
+MATCH_SAME_PREFIX = "same:"
 
 
 # =============================================================================
@@ -111,8 +111,7 @@ def write_filters_to_url(filters: list, text: str, entity_type: str) -> None:
     if filters:
         st.query_params[FILTER_PARAMETER] = json.dumps(
             [{"key": item.key, "operator": item.operator, "value": item.value,
-              "sub_key": item.sub_key,
-              "alternative_keys": item.alternative_keys}
+              "sub_key": item.sub_key, "match_same": item.match_same}
              for item in filters])
     elif FILTER_PARAMETER in st.query_params:
         del st.query_params[FILTER_PARAMETER]
@@ -233,7 +232,7 @@ def render_mapping_facet(facet: Facet, widget_key: str) -> list:
 
 def build_filter(facet: Facet, operator: str, value, sub_key: str = None) -> Filter:
     """
-    Make a filter that reaches every path this facet covers.
+    Make a filter from one facet's current setting.
 
     Parameters
     ----------
@@ -249,12 +248,28 @@ def build_filter(facet: Facet, operator: str, value, sub_key: str = None) -> Fil
     Returns
     -------
     search_filter : Filter
-        Filter carrying the facet's alternative paths, so a field reachable
-        through more than one kind of entry is not answered for half the
-        entries.
+        The filter, carrying whether it must agree with the other filters over
+        its kind of entry on *which* entry satisfies them.
     """
     return Filter(facet.key, operator, value, sub_key=sub_key,
-                  alternative_keys=facet.alternative_keys)
+                  match_same=st.session_state.get(match_same_key(facet), False))
+
+
+def match_same_key(facet: Facet) -> str:
+    """
+    Name the session-state entry holding one group's "same entry" setting.
+
+    Parameters
+    ----------
+    facet : Facet
+        Any facet of the group.
+
+    Returns
+    -------
+    key : str
+        Widget key.
+    """
+    return f"{MATCH_SAME_PREFIX}{facet.role_path or ''}"
 
 
 def reset_filters() -> None:
@@ -271,7 +286,7 @@ def reset_filters() -> None:
     None : None
     """
     for name in [key for key in st.session_state
-                 if key.startswith(FACET_KEY_PREFIX)]:
+                 if key.startswith((FACET_KEY_PREFIX, MATCH_SAME_PREFIX))]:
         del st.session_state[name]
 
     st.session_state[TEXT_KEY] = ""
@@ -392,13 +407,37 @@ def render_facet_panel(connection, entity_type: str,
             continue
 
         with st.expander(f"**{heading}**", expanded=False):
-            # Two chains can arrive at the same kind of entity by different
-            # routes, so anything beyond one hop says which route this is.
-            if ROLE_PATH_SEPARATOR in role_path:
-                st.caption(display_role_path(role_path))
+            render_match_same_toggle(group[0], heading)
             filters.extend(render_facet_group(group))
 
     return filters
+
+
+def render_match_same_toggle(facet: Facet, heading: str) -> None:
+    """
+    Offer to require that one entry satisfy every filter in a group.
+
+    An entry can reach several entries of one kind — three precursor chemicals,
+    or a semiconductor reached both directly and through a modified batch — so a
+    filter on such a field asks whether *some* of them satisfies it. Two filters
+    are then satisfiable by two different entries, which is usually the question
+    ("something from Merck and something very pure") and sometimes not.
+
+    Parameters
+    ----------
+    facet : Facet
+        Any facet of the group, used for its kind.
+    heading : str
+        Name of the kind, for the label.
+
+    Returns
+    -------
+    None : None
+    """
+    st.checkbox(f"Match one {heading.lower()}", key=match_same_key(facet),
+                help=f"Off: each filter may be satisfied by a different "
+                     f"{heading.lower()}. On: one of them must satisfy all of "
+                     f"them.")
 
 
 def facet_role_path(facet: Facet) -> str:
@@ -502,7 +541,7 @@ def render_results(connection, rows, total: int, columns: list,
         st.warning("No entries match these filters.")
         return
 
-    frame = rows_to_frame(rows, columns)
+    frame = rows_to_frame(rows, columns, connection)
 
     st.caption(f"Showing {offset + 1}–{offset + len(rows)} of {total}")
 

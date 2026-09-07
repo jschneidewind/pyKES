@@ -270,6 +270,11 @@ class FieldSchema:
     key_label, value_label : str, optional
         For a mapping field, what its names and its numbers are called —
         ``Element`` and ``mol%`` for a dopant field. Used to label the filter.
+    multiple : bool, optional
+        For a reference field, whether it may name several entries in one cell —
+        the precursor chemicals a semiconductor was made from, written
+        ``EA-1; EA-2; EA-3``. Their metadata is then contributed by all of them,
+        and a filter on it asks whether any one satisfies it.
     key_options : list, optional
         For a mapping field, the names expected. Like every other option list
         this says what is *expected*: a name nobody declared is reported and
@@ -294,6 +299,7 @@ class FieldSchema:
     default: Any = None
     role: Optional[str] = None
     accepts: List[str] = field(default_factory=list)
+    multiple: bool = False
     key_label: Optional[str] = None
     value_label: Optional[str] = None
     key_options: List[Any] = field(default_factory=list)
@@ -322,6 +328,12 @@ class FieldSchema:
         if self.accepts and self.type != TYPE_REFERENCE:
             raise ValueError(
                 f"Field '{self.name}' declares 'accepts' but is a "
+                f"{self.type}, not a reference."
+            )
+
+        if self.multiple and self.type != TYPE_REFERENCE:
+            raise ValueError(
+                f"Field '{self.name}' declares 'multiple' but is a "
                 f"{self.type}, not a reference."
             )
 
@@ -404,7 +416,8 @@ class EntitySchema:
             the accepted kinds travel with it so the form and the admin page do
             not have to reach back into the schema.
         """
-        return {entry.name: {"role": entry.role, "accepts": list(entry.accepts)}
+        return {entry.name: {"role": entry.role, "accepts": list(entry.accepts),
+                             "multiple": entry.multiple}
                 for entry in self.fields if entry.type == TYPE_REFERENCE}
 
     def mapping_fields(self) -> List[FieldSchema]:
@@ -938,6 +951,9 @@ def field_example(field_schema: FieldSchema) -> str:
     example : str
         An example cell, empty where the field needs none.
     """
+    if field_schema.multiple:
+        return "EA-1; EA-2; EA-3"
+
     if field_schema.type != TYPE_MAPPING:
         return ""
 
