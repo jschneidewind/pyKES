@@ -121,6 +121,33 @@ def write_filters_to_url(filters: list, text: str, entity_type: str) -> None:
 # Facet widgets
 # =============================================================================
 
+def slider_default(widget_key: str, bounds: tuple) -> dict:
+    """
+    Supply a slider's starting range, unless its state has already been set.
+
+    Streamlit refuses to be told a widget's value twice: passing ``value=`` for
+    a key that `seed_facet_widgets` has already written warns, and the default
+    is ignored anyway. Which happens on exactly the run that opens a shared
+    link, since that is when the seeding writes.
+
+    Parameters
+    ----------
+    widget_key : str
+        Key the slider will be drawn under.
+    bounds : tuple
+        ``(minimum, maximum)`` the slider spans.
+
+    Returns
+    -------
+    arguments : dict
+        ``{'value': bounds}``, or nothing when the state already holds a range.
+    """
+    if widget_key in st.session_state:
+        return {}
+
+    return {"value": (float(bounds[0]), float(bounds[1]))}
+
+
 def facet_widget_key(facet: Facet) -> str:
     """
     Name the session-state entry backing one filter widget.
@@ -165,8 +192,9 @@ def render_facet(facet: Facet) -> list:
 
     if facet.kind == "range":
         low, high = facet.bounds
-        chosen = st.slider(caption, float(low), float(high),
-                           (float(low), float(high)), key=widget_key)
+        chosen = st.slider(caption, min_value=float(low), max_value=float(high),
+                           key=widget_key,
+                           **slider_default(widget_key, facet.bounds))
         if chosen != (float(low), float(high)):
             return [build_filter(facet, "between", list(chosen))]
         return []
@@ -222,9 +250,10 @@ def render_mapping_facet(facet: Facet, widget_key: str) -> list:
             filters.append(build_filter(facet, "between", [low, high], name))
             continue
 
-        selected = st.slider(label, float(low), float(high),
-                             (float(low), float(high)),
-                             key=f"{widget_key}#{name}")
+        slider_key = f"{widget_key}#{name}"
+        selected = st.slider(label, min_value=float(low), max_value=float(high),
+                             key=slider_key,
+                             **slider_default(slider_key, (low, high)))
         filters.append(build_filter(facet, "between", list(selected), name))
 
     return filters

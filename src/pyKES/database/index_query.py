@@ -1445,20 +1445,23 @@ def read_neighbours(connection, entity_id: str) -> Dict[str, list]:
     -------
     neighbours : dict
         ``{'references': [...], 'referenced_by': [...]}``, each a list of rows
-        carrying the role and the other entity.
+        carrying the role and the other entity. A role may appear more than
+        once, since one field may name several entries, so a row is identified
+        by role *and* entity rather than by role alone.
     """
     references = connection.execute(
         """SELECT edges.role, edges.target AS entity_id, edges.resolved,
                   entities.entity_type
              FROM edges LEFT JOIN entities ON entities.entity_id = edges.target
-            WHERE edges.source = ? ORDER BY edges.role""",
+            WHERE edges.source = ?
+            ORDER BY edges.role, edges.ordinal, edges.target""",
         (entity_id,),
     ).fetchall()
 
     referenced_by = connection.execute(
         """SELECT edges.role, edges.source AS entity_id, entities.entity_type
              FROM edges JOIN entities ON entities.entity_id = edges.source
-            WHERE edges.target = ? ORDER BY edges.source""",
+            WHERE edges.target = ? ORDER BY edges.source, edges.role""",
         (entity_id,),
     ).fetchall()
 

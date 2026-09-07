@@ -616,3 +616,46 @@ def test_a_table_cell_shows_every_contributor(split_precursors):
 
     # Joined the way a reference cell is written, not as JSON.
     assert sorted(frame["Supplier"].iloc[0].split("; ")) == ["Alfa", "Merck"]
+
+
+def test_one_role_with_several_targets_is_several_edges(split_precursors):
+    from pyKES.database.index_query import read_neighbours
+
+    references = read_neighbours(split_precursors, "SEMI-9")["references"]
+
+    # The entry page draws one button per row and keys it by role and target.
+    # Keyed by role alone these two collide, which Streamlit raises on rather
+    # than merely rendering oddly.
+    assert [(row["role"], row["entity_id"]) for row in references] == [
+        ("precursor_chemical", "EA-1"), ("precursor_chemical", "EA-2")]
+
+    keys = {f"ref_{row['role']}_{row['entity_id']}" for row in references}
+    assert len(keys) == len(references)
+
+
+def test_referenced_by_is_identified_by_role_and_entry(split_precursors):
+    from pyKES.database.index_query import read_neighbours
+
+    referenced_by = read_neighbours(split_precursors, "EA-1")["referenced_by"]
+
+    keys = {f"back_{row['role']}_{row['entity_id']}" for row in referenced_by}
+    assert len(keys) == len(referenced_by)
+
+
+# =============================================================================
+# Widget defaults
+# =============================================================================
+
+def test_a_slider_default_is_withheld_once_its_state_is_set(monkeypatch):
+    import streamlit as st
+    from pyKES.database_app.components.search_component import slider_default
+
+    monkeypatch.setattr(st, "session_state", {}, raising=False)
+    assert slider_default("facet:X", (1.0, 9.0)) == {"value": (1.0, 9.0)}
+
+    # Streamlit refuses to be told a widget's value twice, and ignores the
+    # default when it is. Which happens on exactly the run that opens a shared
+    # link, since that is when the seeding writes.
+    monkeypatch.setattr(st, "session_state", {"facet:X": (2.0, 5.0)},
+                        raising=False)
+    assert slider_default("facet:X", (1.0, 9.0)) == {}

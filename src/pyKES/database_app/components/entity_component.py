@@ -168,6 +168,9 @@ def render_neighbours(connection, entity_id: str) -> None:
     neighbours = read_neighbours(connection, entity_id)
     left, right = st.columns(2)
 
+    # Keyed by role *and* target. One field may name several entries, so a role
+    # no longer identifies one edge, and two buttons sharing a key is a crash
+    # rather than a glitch.
     with left:
         st.subheader("References")
         if not neighbours["references"]:
@@ -176,7 +179,8 @@ def render_neighbours(connection, entity_id: str) -> None:
             state = "" if edge["resolved"] else "  ·  not uploaded yet"
             if st.button(f"{display_entity_type(edge['role'])} → "
                          f"{edge['entity_id']}{state}",
-                         key=f"ref_{edge['role']}", width="stretch"):
+                         key=f"ref_{edge['role']}_{edge['entity_id']}",
+                         width="stretch"):
                 open_entity(edge["entity_id"])
 
     with right:
@@ -186,7 +190,8 @@ def render_neighbours(connection, entity_id: str) -> None:
         for edge in neighbours["referenced_by"][:25]:
             if st.button(f"{edge['entity_id']}  "
                          f"({display_entity_type(edge['entity_type'])})",
-                         key=f"back_{edge['entity_id']}", width="stretch"):
+                         key=f"back_{edge['role']}_{edge['entity_id']}",
+                         width="stretch"):
                 open_entity(edge["entity_id"])
 
         if len(neighbours["referenced_by"]) > 25:
