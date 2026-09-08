@@ -26,6 +26,10 @@ from pyKES.database.index_registry import (
 )
 from pyKES.database.index_schema import analyse_index
 from pyKES.database_app.config import DEFAULT_CONFIG, DatabaseAppConfig
+from pyKES.database_app.deployment import (
+    render_environment_banner,
+    render_version_caption,
+)
 from pyKES.database_app.session import open_shared_index, read_identity
 
 
@@ -258,6 +262,9 @@ def render_admin(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
     identity = read_identity(config)
 
     st.title("Admin")
+    render_environment_banner()
+    render_version_caption(connection, config)
+
     statistics = database_statistics(connection)
     columns = st.columns(4)
     columns[0].metric("Entries", statistics["entities"])

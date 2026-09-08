@@ -101,15 +101,13 @@ DEVELOPMENT_USER = "developer"
 # Deployment identity, for the version caption
 # =============================================================================
 
-# Set by the container image and the systemd unit so the running application
-# can say which build it is. Unset in a source checkout.
-ENVIRONMENT_NAME = setting_from_environment("ENV", "development")
-IMAGE_TAG = setting_from_environment("IMAGE_TAG", "")
-GIT_SHA = setting_from_environment("GIT_SHA", "")
-
 # The value of PHOTOCAT_ENV that means "this is the real thing"; anything else
-# makes the application say so on every page.
+# makes the application say so on every page. PHOTOCAT_ENV, PHOTOCAT_IMAGE_TAG
+# and PHOTOCAT_GIT_SHA are set by the container image and the systemd unit and
+# read where they are used, not bound here: a value captured at import is a
+# value no deployment and no test can correct afterwards.
 PRODUCTION_ENVIRONMENT = "production"
+DEVELOPMENT_ENVIRONMENT = "development"
 
 
 @dataclass
