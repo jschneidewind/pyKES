@@ -14,13 +14,7 @@ from typing import List
 import streamlit as st
 
 from pyKES.database.index_schema import IndexPaths, open_index
-from pyKES.database_app.config import (
-    ADMIN_GROUP,
-    DEVELOPMENT_USER,
-    DatabaseAppConfig,
-    GROUPS_HEADER,
-    USER_HEADER,
-)
+from pyKES.database_app.config import DEVELOPMENT_USER, DatabaseAppConfig
 
 
 @dataclass
@@ -74,20 +68,22 @@ def read_identity(config: DatabaseAppConfig) -> Identity:
         development fallback.
     """
     headers = st.context.headers or {}
-    name = headers.get(USER_HEADER)
+    name = headers.get(config.user_header)
 
     if not name:
         if not config.allow_development_login:
             raise PermissionError(
-                f"No {USER_HEADER} header: the application is not behind its "
-                f"authenticating proxy, and development login is disabled."
+                f"No {config.user_header} header: the application is not "
+                f"behind its authenticating proxy, and development login is "
+                f"disabled."
             )
-        return Identity(DEVELOPMENT_USER, [ADMIN_GROUP], True, False)
+        return Identity(DEVELOPMENT_USER, [config.admin_group], True, False)
 
     groups = [group.strip() for group in
-              (headers.get(GROUPS_HEADER) or "").split(",") if group.strip()]
+              (headers.get(config.groups_header) or "").split(",")
+              if group.strip()]
 
-    return Identity(name, groups, ADMIN_GROUP in groups, True)
+    return Identity(name, groups, config.admin_group in groups, True)
 
 
 # One connection per thread. A SQLite connection may only be used by the thread
