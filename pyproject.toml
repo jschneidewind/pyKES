@@ -35,6 +35,11 @@ dependencies = [
     "pyyaml",
 ]
 
+[project.scripts]
+# Resolves the entry script from the installed package, so a service
+# definition never carries a site-packages path.
+photocat-app = "pyKES.database_app.launch:main"
+
 [project.urls]
 "Homepage" = "https://github.com/jschneidewind/pyKES"
 "Bug Tracker" = "https://github.com/jschneidewind/pyKES/issues"

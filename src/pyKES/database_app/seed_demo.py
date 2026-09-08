@@ -1,10 +1,11 @@
 """
 Seed a database so the application can be opened and tried.
 
-Run this before `streamlit run` to get a prototype with something in it::
+Run this before starting the application to get a prototype with something in
+it::
 
     python -m pyKES.database_app.seed_demo --root /tmp/photocat-demo
-    PHOTOCAT_DATA_ROOT=/tmp/photocat-demo streamlit run src/pyKES/database_app/Home.py
+    PHOTOCAT_DATA_ROOT=/tmp/photocat-demo PHOTOCAT_ALLOW_DEV_LOGIN=1 photocat-app
 
 With no arguments it builds a synthetic archive whose reference chain matches
 the group's own — experiment, catalyst batch, finished semiconductor, precursor
@@ -454,8 +455,10 @@ def main() -> None:
     print(f"Seeded {root}:")
     for entity_type, count in counts.items():
         print(f"  {count:5d}  {entity_type}")
-    print(f"\nPHOTOCAT_DATA_ROOT={root} streamlit run "
-          f"src/pyKES/database_app/Home.py")
+    # Development login has to be asked for: it is off by default so that a
+    # deployment whose proxy stops sending Remote-User fails rather than
+    # serving an unauthenticated admin session.
+    print(f"\nPHOTOCAT_DATA_ROOT={root} PHOTOCAT_ALLOW_DEV_LOGIN=1 photocat-app")
 
 
 if __name__ == "__main__":
