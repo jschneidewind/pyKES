@@ -39,6 +39,10 @@ dependencies = [
 # Resolves the entry script from the installed package, so a service
 # definition never carries a site-packages path.
 photocat-app = "pyKES.database_app.launch:main"
+# The repair the schema-version check names. Deliberately a command rather
+# than an admin button: it holds the write lock for minutes and cannot be
+# safely interrupted by a browser refresh.
+photocat-rebuild = "pyKES.database_app.rebuild_cli:main"
 
 [project.urls]
 "Homepage" = "https://github.com/jschneidewind/pyKES"

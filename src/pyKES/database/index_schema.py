@@ -58,6 +58,7 @@ ADDED_COLUMNS = (
     ("metadata_keys", "sub_keys", "TEXT"),
     ("entities", "search_text", "TEXT NOT NULL DEFAULT ''"),
     ("edges", "ordinal", "INTEGER NOT NULL DEFAULT 0"),
+    ("uploads", "ingest_options", "TEXT"),
 )
 
 # Index versions this code can open. A database written before inherited
@@ -116,7 +117,13 @@ CREATE TABLE IF NOT EXISTS uploads (
     kind         TEXT    NOT NULL,
     uploaded_by  TEXT    NOT NULL,
     uploaded_at  TEXT    NOT NULL,
-    entity_count INTEGER NOT NULL DEFAULT 0
+    entity_count INTEGER NOT NULL DEFAULT 0,
+    -- How this file was read, as JSON: the entity type it was ingested as,
+    -- and for a sheet its identifier column, worksheet and reference
+    -- declarations. Recorded because a rebuild has to read the file the same
+    -- way it was read the first time, and none of it is recoverable from the
+    -- file itself -- the operator chose it in the upload form.
+    ingest_options TEXT
 );
 
 CREATE TABLE IF NOT EXISTS entities (

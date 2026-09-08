@@ -254,7 +254,9 @@ def store_upload(connection,
                  paths: IndexPaths,
                  file_path: Path,
                  uploaded_by: str,
-                 kind: str) -> tuple:
+                 kind: str,
+                 options: Optional[Dict[str, Any]] = None,
+                 uploaded_at: Optional[str] = None) -> tuple:
     """
     Record an upload and keep the file verbatim.
 
@@ -270,6 +272,14 @@ def store_upload(connection,
         Authenticated user the upload is attributed to.
     kind : str
         ``UPLOAD_KIND_HDF5`` or ``UPLOAD_KIND_ENTITY_SHEET``.
+    options : dict, optional
+        How the file was read — the entity type, and for a sheet its
+        identifier column, worksheet and reference declarations. Recorded so a
+        rebuild reads it the same way; none of it can be recovered from the
+        file, because the operator chose it in the upload form.
+    uploaded_at : str, optional
+        Original upload time, passed by a rebuild so the chronology survives
+        it. Defaults to now.
 
     Returns
     -------
@@ -297,13 +307,43 @@ def store_upload(connection,
 
     cursor = connection.execute(
         """INSERT INTO uploads
-           (sha256, filename, stored_path, byte_count, kind, uploaded_by, uploaded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (digest, file_path.name, str(stored_path), stored_path.stat().st_size,
-         kind, uploaded_by, datetime.now(timezone.utc).isoformat()),
+           (sha256, filename, stored_path, byte_count, kind, uploaded_by,
+            uploaded_at, ingest_options)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (digest, file_path.name, stored_path.name, stored_path.stat().st_size,
+         kind, uploaded_by,
+         uploaded_at or datetime.now(timezone.utc).isoformat(),
+         json.dumps(options or {})),
     )
 
     return cursor.lastrowid, False
+
+
+def resolve_stored_path(paths: IndexPaths, stored_path: str) -> Path:
+    """
+    Locate a retained upload from what its row records.
+
+    Only the file name is trusted, because rows written before the store
+    became relative hold an absolute path — and an absolute path is wrong the
+    moment the data root moves, which a restore into a scratch directory, a
+    rehearsal on a copy and a container mounting the data elsewhere all do. It
+    is also what made the documented restore test read the *live* upload store
+    rather than the backup it was meant to be checking. `write_payload` has
+    always stored payloads by name for the same reason.
+
+    Parameters
+    ----------
+    paths : IndexPaths
+        Filesystem layout of the database.
+    stored_path : str
+        Value of ``uploads.stored_path``, relative or absolute.
+
+    Returns
+    -------
+    path : Path
+        The file inside this database's upload store.
+    """
+    return paths.upload_directory / Path(stored_path).name
 
 
 # =============================================================================
@@ -517,7 +557,8 @@ def insert_entity(connection,
                   display_group: Optional[str] = None,
                   color: Optional[str] = None,
                   payload: Optional[tuple] = None,
-                  provenance: Optional[Dict[str, Any]] = None) -> None:
+                  provenance: Optional[Dict[str, Any]] = None,
+                  created_at: Optional[str] = None) -> None:
     """
     Write one entity row.
 
@@ -543,6 +584,9 @@ def insert_entity(connection,
         ``(path, byte_count, digest)`` for entries that have measurements.
     provenance : dict, optional
         The experiment's ``version`` dictionary.
+    created_at : str, optional
+        When the entry first entered the database, passed by a rebuild so it
+        does not report every entry as created at the rebuild. Defaults to now.
 
     Returns
     -------
@@ -564,7 +608,7 @@ def insert_entity(connection,
     # nothing on the ingestion path that has already done it.
     metadata = coerce_index_mapping(metadata)
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = created_at or datetime.now(timezone.utc).isoformat()
     provenance = provenance or {}
     external = provenance.get("external_version") or {}
     payload_path, payload_bytes, payload_digest = payload or (None, None, None)
@@ -665,7 +709,10 @@ def ingest_hdf5_upload(connection,
                        file_path: Path,
                        uploaded_by: str,
                        entity_type: str = "experiment",
-                       schemas: Optional[Dict[str, EntitySchema]] = None) -> IngestionReport:
+                       schemas: Optional[Dict[str, EntitySchema]] = None,
+                       validate: bool = True,
+                       commit: bool = True,
+                       uploaded_at: Optional[str] = None) -> IngestionReport:
     """
     Ingest one HDF5 batch produced by the processing app.
 
@@ -682,7 +729,19 @@ def ingest_hdf5_upload(connection,
     entity_type : str, optional
         Type assigned to every experiment in the file.
     schemas : dict, optional
-        Schemas to check the metadata against.
+        Schemas to read and check the metadata with.
+    validate : bool, optional
+        Whether to refuse the upload when it violates its schema. A rebuild
+        passes False: files already accepted must stay re-ingestable when a
+        field is later made required. It does **not** stop the schema being
+        used to *read* the metadata, which is what `schemas` is for — the two
+        were one switch before, so declining to re-validate also silently
+        stopped mapping fields being parsed and derived scalars computed.
+    commit : bool, optional
+        Whether to commit. A rebuild passes False so that its deletes and all
+        its re-ingestion are one transaction.
+    uploaded_at : str, optional
+        Original upload time, passed by a rebuild to preserve the chronology.
 
     Returns
     -------
@@ -707,54 +766,68 @@ def ingest_hdf5_upload(connection,
         entity_type,
         {name: split_identity_metadata(experiment.metadata)
          for name, experiment in dataset.experiments.items()},
-        schemas)
+        schemas) if validate else []
 
     upload_id, already = store_upload(connection, paths, file_path,
-                                      uploaded_by, UPLOAD_KIND_HDF5)
+                                      uploaded_by, UPLOAD_KIND_HDF5,
+                                      options={"entity_type": entity_type},
+                                      uploaded_at=uploaded_at)
     report = IngestionReport(upload_id=upload_id, already_ingested=already,
                              undeclared_fields=undeclared)
     if already:
         return report
 
-    index_instructions = read_index_instructions(dataset)
-    reference_instructions = read_reference_instructions(dataset)
-    report.result_conflicts = register_result_keys(connection, index_instructions,
-                                                   upload_id)
+    # Ingestion is documented as all-or-nothing, and was so only on the happy
+    # path: sqlite3 opens an implicit transaction on the first INSERT, so a
+    # failure part-way through left it open on a connection the Streamlit
+    # session goes on reusing — holding the write lock against everyone else,
+    # showing that one session rows nobody else can see, and committing them
+    # alongside its next successful operation.
+    try:
+        index_instructions = read_index_instructions(dataset)
+        reference_instructions = read_reference_instructions(dataset)
+        report.result_conflicts = register_result_keys(connection, index_instructions,
+                                                       upload_id)
 
-    for name in sorted(dataset.experiments):
-        experiment = dataset.experiments[name]
-        entity_id, version = allocate_entity_id(connection, name)
-        metadata = coerce_index_mapping(prepare_metadata(
-            schema, split_identity_metadata(experiment.metadata)))
+        for name in sorted(dataset.experiments):
+            experiment = dataset.experiments[name]
+            entity_id, version = allocate_entity_id(connection, name)
+            metadata = coerce_index_mapping(prepare_metadata(
+                schema, split_identity_metadata(experiment.metadata)))
 
-        insert_entity(
-            connection,
-            entity_id=entity_id,
-            base_id=name,
-            version=version,
-            entity_type=entity_type,
-            metadata=metadata,
-            results=apply_index_instructions(experiment, index_instructions),
-            owner=uploaded_by,
-            upload_id=upload_id,
-            display_group=experiment.group,
-            color=experiment.color,
-            payload=write_payload(experiment, paths, entity_id,
-                                  dataset.plotting_instruction),
-            provenance=experiment.version,
-        )
+            insert_entity(
+                connection,
+                entity_id=entity_id,
+                base_id=name,
+                version=version,
+                entity_type=entity_type,
+                metadata=metadata,
+                results=apply_index_instructions(experiment, index_instructions),
+                owner=uploaded_by,
+                upload_id=upload_id,
+                display_group=experiment.group,
+                color=experiment.color,
+                payload=write_payload(experiment, paths, entity_id,
+                                      dataset.plotting_instruction),
+                provenance=experiment.version,
+                created_at=uploaded_at,
+            )
 
-        report.added.append(entity_id)
-        if version > 1:
-            report.versioned.append(entity_id)
+            report.added.append(entity_id)
+            if version > 1:
+                report.versioned.append(entity_id)
 
-        report.recomputed.extend(
-            finalise_entity(connection, entity_id, metadata, reference_instructions)
-        )
+            report.recomputed.extend(
+                finalise_entity(connection, entity_id, metadata, reference_instructions)
+            )
 
-    connection.execute("UPDATE uploads SET entity_count = ? WHERE id = ?",
-                       (len(report.added), upload_id))
-    connection.commit()
+        connection.execute("UPDATE uploads SET entity_count = ? WHERE id = ?",
+                           (len(report.added), upload_id))
+        if commit:
+            connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
 
     report.recomputed = sorted(set(report.recomputed))
 
@@ -773,7 +846,10 @@ def ingest_entity_sheet(connection,
                         reference_instructions: Optional[Dict[str, Any]] = None,
                         identifier_column: str = "Experiment",
                         sheet_name: str = "Sheet1",
-                        schemas: Optional[Dict[str, EntitySchema]] = None) -> IngestionReport:
+                        schemas: Optional[Dict[str, EntitySchema]] = None,
+                        validate: bool = True,
+                        commit: bool = True,
+                        uploaded_at: Optional[str] = None) -> IngestionReport:
     """
     Ingest a sheet of entries that carry metadata but no measurements.
 
@@ -802,7 +878,16 @@ def ingest_entity_sheet(connection,
     sheet_name : str, optional
         Worksheet to read from an Excel file.
     schemas : dict, optional
-        Schemas to check the metadata against.
+        Schemas to read and check the metadata with.
+    validate : bool, optional
+        Whether to refuse the sheet when it violates its schema. See
+        `ingest_hdf5_upload`; declining to re-validate must not stop the
+        schema being used to read the values.
+    commit : bool, optional
+        Whether to commit, so a rebuild can make its whole run one
+        transaction.
+    uploaded_at : str, optional
+        Original upload time, passed by a rebuild to preserve the chronology.
 
     Returns
     -------
@@ -831,50 +916,64 @@ def ingest_entity_sheet(connection,
         {str(row[identifier_column]).strip():
              {key: value for key, value in row.items() if key != identifier_column}
          for row in rows},
-        schemas)
+        schemas) if validate else []
 
-    upload_id, already = store_upload(connection, paths, file_path,
-                                      uploaded_by, UPLOAD_KIND_ENTITY_SHEET)
+    reference_instructions = reference_instructions or {}
+
+    upload_id, already = store_upload(
+        connection, paths, file_path, uploaded_by, UPLOAD_KIND_ENTITY_SHEET,
+        options={"entity_type": entity_type,
+                 "identifier_column": identifier_column,
+                 "sheet_name": sheet_name,
+                 "reference_instructions": reference_instructions},
+        uploaded_at=uploaded_at)
     report = IngestionReport(upload_id=upload_id, already_ingested=already,
                              undeclared_fields=undeclared)
     if already:
         return report
 
-    reference_instructions = reference_instructions or {}
+    # See `ingest_hdf5_upload`: without this a failed sheet leaves an open
+    # write transaction on a connection the session keeps using.
+    try:
+        for row in rows:
+            base_id = str(row[identifier_column]).strip()
+            entity_id, version = allocate_entity_id(connection, base_id)
+            metadata = coerce_index_mapping(prepare_metadata(
+                schema,
+                {key: value for key, value in row.items() if key != identifier_column}
+            ))
 
-    for row in rows:
-        base_id = str(row[identifier_column]).strip()
-        entity_id, version = allocate_entity_id(connection, base_id)
-        metadata = coerce_index_mapping(prepare_metadata(
-            schema,
-            {key: value for key, value in row.items() if key != identifier_column}
-        ))
+            insert_entity(
+                connection,
+                entity_id=entity_id,
+                base_id=base_id,
+                version=version,
+                entity_type=entity_type,
+                metadata=metadata,
+                results={},
+                owner=uploaded_by,
+                upload_id=upload_id,
+                display_group=metadata.get("group"),
+                color=metadata.get("color"),
+                created_at=uploaded_at,
+            )
 
-        insert_entity(
-            connection,
-            entity_id=entity_id,
-            base_id=base_id,
-            version=version,
-            entity_type=entity_type,
-            metadata=metadata,
-            results={},
-            owner=uploaded_by,
-            upload_id=upload_id,
-            display_group=metadata.get("group"),
-            color=metadata.get("color"),
-        )
+            report.added.append(entity_id)
+            if version > 1:
+                report.versioned.append(entity_id)
 
-        report.added.append(entity_id)
-        if version > 1:
-            report.versioned.append(entity_id)
+            report.recomputed.extend(
+                finalise_entity(connection, entity_id, metadata, reference_instructions)
+            )
 
-        report.recomputed.extend(
-            finalise_entity(connection, entity_id, metadata, reference_instructions)
-        )
+        connection.execute("UPDATE uploads SET entity_count = ? WHERE id = ?",
+                           (len(report.added), upload_id))
+        if commit:
+            connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
 
-    connection.execute("UPDATE uploads SET entity_count = ? WHERE id = ?",
-                       (len(report.added), upload_id))
-    connection.commit()
 
     report.recomputed = sorted(set(report.recomputed))
 
@@ -990,9 +1089,102 @@ def update_entity_metadata(connection,
 # Rebuilding
 # =============================================================================
 
+# Entity type assumed for an upload that recorded none, by the kind of file it
+# is. Every HDF5 batch the processing app produces holds experiments; a sheet
+# could be any kind of entry, so there is nothing better than the catch-all.
+DEFAULT_TYPE_BY_KIND = {
+    UPLOAD_KIND_HDF5: "experiment",
+    UPLOAD_KIND_ENTITY_SHEET: DEFAULT_ENTITY_TYPE,
+}
+
+
+def recover_entity_types(connection) -> Dict[int, str]:
+    """
+    Work out which kind of entry each upload produced, from the entries.
+
+    Needed for uploads stored before `uploads.ingest_options` existed, whose
+    chosen entity type was never written down. A sheet gives every one of its
+    rows the same type, so grouping is unambiguous; the ordering makes the
+    commonest type win for the odd upload that somehow spans two.
+
+    Must be called before the rebuild empties `entities`, which is the only
+    place this information survives.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+
+    Returns
+    -------
+    entity_type_by_upload : dict
+        ``{upload_id: entity_type}`` for every upload that produced entries.
+    """
+    return {row["upload_id"]: row["entity_type"] for row in connection.execute(
+        """SELECT upload_id, entity_type, COUNT(*) AS entries FROM entities
+           WHERE upload_id IS NOT NULL
+           GROUP BY upload_id, entity_type
+           ORDER BY entries ASC""")}
+
+
+def ingest_options_for(upload,
+                       recovered_types: Dict[int, str],
+                       overrides: Dict[int, str],
+                       schemas: Optional[Dict[str, EntitySchema]]) -> Dict[str, Any]:
+    """
+    Reconstruct how one stored upload should be read again.
+
+    Parameters
+    ----------
+    upload : sqlite3.Row
+        Row from the `uploads` table.
+    recovered_types : dict
+        Types inferred from the entries, for uploads that recorded none.
+    overrides : dict
+        ``{upload_id: entity_type}`` supplied by the caller, which wins over
+        both the recorded and the recovered type.
+    schemas : dict or None
+        Schemas used to fall back on a sheet's declared reference columns when
+        the upload did not record them.
+
+    Returns
+    -------
+    options : dict
+        ``entity_type`` plus, for a sheet, ``identifier_column``,
+        ``sheet_name`` and ``reference_instructions``.
+    """
+    recorded = json.loads(upload["ingest_options"] or "{}")
+
+    entity_type = overrides.get(upload["id"]) or recorded.get("entity_type") \
+        or recovered_types.get(upload["id"]) \
+        or DEFAULT_TYPE_BY_KIND[upload["kind"]]
+
+    options = {"entity_type": entity_type}
+
+    if upload["kind"] == UPLOAD_KIND_HDF5:
+        return options
+
+    options["identifier_column"] = recorded.get("identifier_column", "Experiment")
+    options["sheet_name"] = recorded.get("sheet_name", "Sheet1")
+
+    # An upload predating the column recorded no declarations, and rebuilding
+    # without any drops every edge the sheet created — which for the group's
+    # own chain is the entire reference graph. The schemas declare the same
+    # columns the upload form offered, so they are the best available stand-in.
+    declared = recorded.get("reference_instructions")
+    if declared is None:
+        schema = schema_for(entity_type, schemas)
+        declared = schema.reference_instructions() if schema else {}
+    options["reference_instructions"] = declared
+
+    return options
+
+
 def rebuild_index(connection,
                   paths: IndexPaths,
-                  entity_type_by_upload: Optional[Dict[int, str]] = None) -> List[IngestionReport]:
+                  entity_type_by_upload: Optional[Dict[int, str]] = None,
+                  schemas: Optional[Dict[str, EntitySchema]] = None
+                  ) -> List[IngestionReport]:
     """
     Rebuild the whole index from the retained uploads.
 
@@ -1001,6 +1193,24 @@ def rebuild_index(connection,
     the original files rather than from anybody's memory. Measured at roughly
     2.5 minutes for ten thousand experiments.
 
+    Every upload is re-read the way it was read the first time, from the
+    options recorded on its row — the entity type, and for a sheet its
+    identifier column, worksheet and reference declarations. None of that can
+    be recovered from the file itself, because the operator chose it in the
+    upload form, and guessing instead of recording it meant a sheet keyed on
+    anything but `Experiment` aborted the rebuild, a sheet's references
+    disappeared, and every non-experiment entry came back as `other_entity`.
+
+    The whole run is one transaction, so an interrupted rebuild leaves the
+    index as it was. Committing the deletes first, as this once did, meant a
+    failure part-way through — a corrupt file, a full disk, a restart — left a
+    half-built index and an upload log that no longer listed the files needed
+    to finish.
+
+    What a rebuild still cannot restore is corrections made on the entry page:
+    `update_entity_metadata` writes to the entity row and there is no journal
+    to replay, so they revert. Export them first; `photocat-rebuild` does.
+
     Parameters
     ----------
     connection : sqlite3.Connection
@@ -1008,46 +1218,67 @@ def rebuild_index(connection,
     paths : IndexPaths
         Filesystem layout of the database.
     entity_type_by_upload : dict, optional
-        ``{upload_id: entity_type}`` for uploads whose type is not
-        ``'experiment'``; entity sheets in particular.
+        ``{upload_id: entity_type}``, overriding what the upload recorded.
+        Only needed to correct an upload ingested as the wrong kind.
+    schemas : dict, optional
+        Schemas used to read the metadata. Defaults to the shipped ones.
 
     Returns
     -------
     reports : list of IngestionReport
         One report per re-ingested upload, in upload order.
     """
-    uploads = connection.execute(
-        "SELECT * FROM uploads ORDER BY id"
-    ).fetchall()
-    entity_type_by_upload = entity_type_by_upload or {}
+    uploads = connection.execute("SELECT * FROM uploads ORDER BY id").fetchall()
 
-    connection.execute("DELETE FROM contributions")
-    connection.execute("DELETE FROM contribution_sources")
-    connection.execute("DELETE FROM edges")
-    connection.execute("DELETE FROM entities")
-    connection.execute("DELETE FROM metadata_keys")
-    connection.execute("DELETE FROM result_keys")
-    connection.execute("DELETE FROM uploads")
-    connection.commit()
+    # Read before anything is deleted: for uploads stored before their options
+    # were recorded, the entries are the only remaining evidence of the type.
+    options_by_upload = {
+        upload["id"]: ingest_options_for(upload, recover_entity_types(connection),
+                                         entity_type_by_upload or {}, schemas)
+        for upload in uploads
+    }
 
     reports = []
-    for upload in uploads:
-        stored_path = Path(upload["stored_path"])
 
-        # Deliberately not re-validated. These files were checked against the
-        # schema in force when they arrived and accepted; re-checking them
-        # against today's would make every historical upload un-rebuildable the
-        # moment a field is made required, which would destroy the guarantee the
-        # upload store exists to provide.
-        if upload["kind"] == UPLOAD_KIND_HDF5:
-            entity_type = entity_type_by_upload.get(upload["id"], "experiment")
-            reports.append(ingest_hdf5_upload(connection, paths, stored_path,
-                                              upload["uploaded_by"], entity_type,
-                                              schemas={}))
-        else:
-            entity_type = entity_type_by_upload.get(upload["id"], DEFAULT_ENTITY_TYPE)
-            reports.append(ingest_entity_sheet(connection, paths, stored_path,
-                                               entity_type, upload["uploaded_by"],
-                                               schemas={}))
+    try:
+        connection.execute("DELETE FROM contributions")
+        connection.execute("DELETE FROM contribution_sources")
+        connection.execute("DELETE FROM edges")
+        connection.execute("DELETE FROM entities")
+        connection.execute("DELETE FROM metadata_keys")
+        connection.execute("DELETE FROM result_keys")
+        connection.execute("DELETE FROM uploads")
+
+        for upload in uploads:
+            options = options_by_upload[upload["id"]]
+            stored_path = resolve_stored_path(paths, upload["stored_path"])
+
+            # Deliberately not re-validated. These files were checked against
+            # the schema in force when they arrived and accepted; re-checking
+            # them against today's would make every historical upload
+            # un-rebuildable the moment a field is made required, which would
+            # destroy the guarantee the upload store exists to provide. The
+            # schemas are still passed, because they are also what *reads* a
+            # mapping field and computes the scalars derived from it.
+            if upload["kind"] == UPLOAD_KIND_HDF5:
+                reports.append(ingest_hdf5_upload(
+                    connection, paths, stored_path, upload["uploaded_by"],
+                    options["entity_type"], schemas=schemas, validate=False,
+                    commit=False, uploaded_at=upload["uploaded_at"]))
+            else:
+                reports.append(ingest_entity_sheet(
+                    connection, paths, stored_path, options["entity_type"],
+                    upload["uploaded_by"],
+                    reference_instructions=options["reference_instructions"],
+                    identifier_column=options["identifier_column"],
+                    sheet_name=options["sheet_name"],
+                    schemas=schemas, validate=False, commit=False,
+                    uploaded_at=upload["uploaded_at"]))
+
+        connection.commit()
+
+    except Exception:
+        connection.rollback()
+        raise
 
     return reports
