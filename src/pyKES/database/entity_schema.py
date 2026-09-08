@@ -21,6 +21,7 @@ absorb fields that did not exist when it was built, and a schema that rejected
 them would defeat it. Only a declared field can be got *wrong*.
 """
 
+import io
 import math
 import re
 from dataclasses import dataclass, field
@@ -964,6 +965,36 @@ def field_example(field_schema: FieldSchema) -> str:
                      for option in field_schema.key_options[:3])
 
 
+def template_bytes(schema: EntitySchema) -> bytes:
+    """
+    Build the Excel template for one kind of entry in memory.
+
+    The application offers this as a download, which needs the bytes rather
+    than a file — writing one out per render left a temporary directory behind
+    on every keystroke.
+
+    Parameters
+    ----------
+    schema : EntitySchema
+        Schema to build a template for.
+
+    Returns
+    -------
+    content : bytes
+        The ``.xlsx`` file.
+    """
+    import pandas as pd
+
+    entries, guide = template_frames(schema)
+    buffer = io.BytesIO()
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        entries.to_excel(writer, sheet_name="Sheet1", index=False)
+        guide.to_excel(writer, sheet_name="Field guide", index=False)
+
+    return buffer.getvalue()
+
+
 def write_template(schema: EntitySchema, path: Path) -> Path:
     """
     Write the Excel template for one kind of entry.
@@ -980,12 +1011,6 @@ def write_template(schema: EntitySchema, path: Path) -> Path:
     path : Path
         The written file.
     """
-    import pandas as pd
+    Path(path).write_bytes(template_bytes(schema))
 
-    entries, guide = template_frames(schema)
-
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        entries.to_excel(writer, sheet_name="Sheet1", index=False)
-        guide.to_excel(writer, sheet_name="Field guide", index=False)
-
-    return path
+    return Path(path)

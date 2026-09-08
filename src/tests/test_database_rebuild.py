@@ -30,6 +30,7 @@ from pyKES.database.index_ingest import (
     resolve_stored_path,
 )
 from pyKES.database.index_schema import IndexPaths, open_index
+from pyKES.database_app.rebuild_cli import find_orphan_uploads
 
 
 # =============================================================================
@@ -400,3 +401,58 @@ def test_a_rebuild_reproduces_the_inherited_metadata_exactly(connection, paths,
     rebuild_index(connection, paths, schemas=schemas)
 
     assert structure() == before
+
+
+# =============================================================================
+# Guards on the data root
+# =============================================================================
+
+def test_a_missing_data_root_is_refused_rather_than_created(tmp_path):
+    """
+    The failure this prevents is the one nobody notices. Creating a database
+    instead means the application comes up, the home page reports it empty and
+    invites an upload, and people begin filling a second archive somewhere the
+    backups do not run — which is exactly what a bind mount that failed to
+    attach, or a maintenance shell without the variable set, produces.
+    """
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        IndexPaths(root=tmp_path / "not-attached", create=False)
+
+
+def test_a_data_root_without_an_index_is_refused(tmp_path):
+    with pytest.raises(FileNotFoundError, match="No index at"):
+        IndexPaths(root=tmp_path, create=False)
+
+
+def test_an_existing_index_opens_without_creating_anything(tmp_path):
+    open_index(IndexPaths(root=tmp_path)).close()
+
+    paths = IndexPaths(root=tmp_path, create=False)
+
+    assert paths.index_path.is_file()
+
+
+# =============================================================================
+# Retained files with no row
+# =============================================================================
+
+def test_interrupted_ingestion_leaves_a_findable_orphan(connection, paths,
+                                                        tmp_path):
+    """
+    The verbatim copy is written before its row is committed, so an ingestion
+    killed part-way through leaves the file behind. It is harmless — a rebuild
+    iterates the table, and re-uploading the file overwrites it — but the
+    archive believes it does not have it, so an operator has to be able to
+    find it.
+    """
+    sheet = write_sheet(tmp_path, "things.xlsx",
+                        [{"Experiment": "THING-1", "Notes": "kept"}])
+    ingest_entity_sheet(connection, paths, sheet, "other_entity", "alice",
+                        schemas={})
+
+    assert find_orphan_uploads(connection, paths) == []
+
+    (paths.upload_directory / "abandoned.xlsx").write_bytes(b"leftover")
+
+    assert [path.name for path in find_orphan_uploads(connection, paths)] == \
+        ["abandoned.xlsx"]

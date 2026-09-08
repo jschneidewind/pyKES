@@ -118,6 +118,37 @@ def read_corrections(connection) -> List[Dict[str, Any]]:
 # Repairs that are not a rebuild
 # =============================================================================
 
+def find_orphan_uploads(connection, paths: IndexPaths) -> List[Path]:
+    """
+    List retained files that no upload row refers to.
+
+    The verbatim copy is written before the row is committed, so an ingestion
+    killed part-way through — a restart during a large batch — rolls the row
+    back and leaves the file. It is harmless: nothing reads it, a rebuild
+    iterates the table rather than the directory, and re-uploading the same
+    file overwrites it and inserts the row. But it is a file the archive
+    believes it does not have, and on a small disk they accumulate, so an
+    operator should be able to see them.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+    paths : IndexPaths
+        Filesystem layout of the database.
+
+    Returns
+    -------
+    orphans : list of Path
+        Files in the upload store with no matching row.
+    """
+    known = {Path(row["stored_path"]).name for row in
+             connection.execute("SELECT stored_path FROM uploads")}
+
+    return sorted(path for path in paths.upload_directory.iterdir()
+                  if path.is_file() and path.name not in known)
+
+
 def backfill_stored_paths(connection) -> int:
     """
     Rewrite absolute upload paths as names within the upload store.
@@ -192,10 +223,10 @@ def main() -> None:
 
     config = DatabaseAppConfig(data_root=arguments.data_root) \
         if arguments.data_root else DatabaseAppConfig()
-    paths = IndexPaths(root=config.data_root)
-
-    if not paths.index_path.is_file():
-        sys.exit(f"No index at {paths.index_path}.")
+    try:
+        paths = IndexPaths(root=config.data_root, create=False)
+    except FileNotFoundError as absent:
+        sys.exit(str(absent))
 
     # The version check is what a rebuild repairs, so it must not stand in the
     # way of running one.
@@ -212,6 +243,16 @@ def main() -> None:
 
     before = describe_index(connection)
     print_summary("Before", before)
+
+    orphans = find_orphan_uploads(connection, paths)
+    if orphans:
+        print(f"\n{len(orphans)} retained files have no upload row, left by an "
+              f"ingestion that was interrupted. A rebuild ignores them; delete "
+              f"them if the disk matters:")
+        for orphan in orphans[:10]:
+            print(f"  {orphan}")
+        if len(orphans) > 10:
+            print(f"  … and {len(orphans) - 10} more")
 
     corrections = read_corrections(connection)
     if corrections:

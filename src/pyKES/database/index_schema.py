@@ -269,12 +269,23 @@ class IndexPaths:
         Directory holding the index and both file tiers.
     index_path, payload_directory, upload_directory : Path
         Derived from ``root``; supplied explicitly only in tests.
+    create : bool, optional
+        Whether to create the file tiers. A deployment serving an existing
+        database passes False, so that a data root which is not there — a bind
+        mount that failed to attach, a typo, a variable missing from a
+        maintenance shell — is an error rather than a new empty archive.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``create`` is False and the root or the index is absent.
     """
 
     root: Path
     index_path: Path = field(default=None)
     payload_directory: Path = field(default=None)
     upload_directory: Path = field(default=None)
+    create: bool = True
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
@@ -286,8 +297,44 @@ class IndexPaths:
         if self.upload_directory is None:
             self.upload_directory = self.root / "uploads"
 
+        if not self.create:
+            self.require_existing()
+            return
+
         self.payload_directory.mkdir(parents=True, exist_ok=True)
         self.upload_directory.mkdir(parents=True, exist_ok=True)
+
+    def require_existing(self) -> None:
+        """
+        Refuse a data root that does not already hold a database.
+
+        Creating one instead is the failure nobody notices: the application
+        comes up, the home page says the database is empty and invites an
+        upload, and people start filling a second archive somewhere the
+        backups do not run.
+
+        Returns
+        -------
+        None : None
+
+        Raises
+        ------
+        FileNotFoundError
+            If the root or the index file is absent.
+        """
+        if not self.root.is_dir():
+            raise FileNotFoundError(
+                f"Data root {self.root} does not exist. Refusing to create one: "
+                f"an application that silently starts a second, empty archive "
+                f"is worse than one that will not start."
+            )
+
+        if not self.index_path.is_file():
+            raise FileNotFoundError(
+                f"No index at {self.index_path}. Seed one with "
+                f"`python -m pyKES.database_app.seed_demo`, or set "
+                f"PHOTOCAT_CREATE_INDEX=1 to create an empty one here."
+            )
 
 
 # =============================================================================

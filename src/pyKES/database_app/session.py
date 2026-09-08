@@ -14,7 +14,12 @@ from typing import List
 import streamlit as st
 
 from pyKES.database.index_schema import IndexPaths, open_index
-from pyKES.database_app.config import DEVELOPMENT_USER, DatabaseAppConfig
+from pyKES.database_app.config import (
+    DEVELOPMENT_USER,
+    DatabaseAppConfig,
+    as_boolean,
+    setting_from_environment,
+)
 
 
 @dataclass
@@ -114,7 +119,11 @@ def open_shared_index(data_root: str):
         _THREAD_STATE.handles = handles
 
     if data_root not in handles:
-        connection = open_index(IndexPaths(root=data_root))
+        # An absent data root is a mount that did not attach or a variable
+        # that was not set, not an invitation to start a second archive
+        # somewhere the backups do not run. Creating one has to be asked for.
+        create = setting_from_environment("CREATE_INDEX", False, as_boolean)
+        connection = open_index(IndexPaths(root=data_root, create=create))
 
         # Ingestion holds the write lock for a second or two on a large batch;
         # a reader that arrives meanwhile should wait rather than fail.
@@ -137,5 +146,12 @@ def index_paths(config: DatabaseAppConfig) -> IndexPaths:
     -------
     paths : IndexPaths
         Filesystem layout.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the data root holds no index and PHOTOCAT_CREATE_INDEX is not set.
     """
-    return IndexPaths(root=config.data_root)
+    return IndexPaths(root=config.data_root,
+                      create=setting_from_environment("CREATE_INDEX", False,
+                                                      as_boolean))

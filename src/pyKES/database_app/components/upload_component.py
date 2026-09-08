@@ -27,7 +27,7 @@ from pyKES.database.entity_schema import (
     TYPE_REFERENCE,
     TYPE_SELECT,
     load_entity_schemas,
-    write_template,
+    template_bytes,
 )
 from pyKES.database.index_ingest import (
     IngestionError,
@@ -60,6 +60,9 @@ REFERENCE_OPTION_LIMIT = 200
 # uploader reads back out of one.
 REFERENCE_JOIN = "; "
 
+# Session-state key holding this session's staging directory for uploads.
+STAGING_DIRECTORY_KEY = "upload_staging_directory"
+
 
 def stage_upload(uploaded_file) -> Path:
     """
@@ -73,15 +76,38 @@ def stage_upload(uploaded_file) -> Path:
     Returns
     -------
     staged : Path
-        Path to the staged copy. It lives in a temporary directory that the
-        operating system reclaims; the ingestion stores its own verbatim copy
-        under the file's hash.
+        Path to the staged copy, inside this session's staging directory. The
+        ingestion stores its own verbatim copy under the file's hash, so the
+        staged file is deleted as soon as it has been read.
     """
-    staged_directory = Path(tempfile.mkdtemp())
-    staged = staged_directory / uploaded_file.name
+    staged = session_staging_directory() / uploaded_file.name
     staged.write_bytes(uploaded_file.getbuffer())
 
     return staged
+
+
+def session_staging_directory() -> Path:
+    """
+    Find, or create, this session's directory for staged uploads.
+
+    One per session rather than one per upload. `mkdtemp` is not reclaimed by
+    anything — the operating system does not clean it up, whatever its name
+    suggests — so with a 1000 MB upload ceiling an afternoon of staging large
+    batches left gigabytes behind. Filling the disk stops SQLite writing and
+    breaks the nightly backup, and it reads as a database fault rather than as
+    a full disk. Holding the handle in session state means the directory is
+    removed when the session ends.
+
+    Returns
+    -------
+    directory : Path
+        Directory to stage this session's uploads in.
+    """
+    if STAGING_DIRECTORY_KEY not in st.session_state:
+        st.session_state[STAGING_DIRECTORY_KEY] = tempfile.TemporaryDirectory(
+            prefix="photocat-upload-")
+
+    return Path(st.session_state[STAGING_DIRECTORY_KEY].name)
 
 
 def report_result(report, connection) -> None:
@@ -180,10 +206,17 @@ def render_hdf5_upload(connection, config: DatabaseAppConfig, identity,
     if uploaded is None or not st.button("Ingest Batch", type="primary"):
         return
 
+    staged = stage_upload(uploaded)
+
     with st.spinner(f"Ingesting {uploaded.name}…"):
-        report = ingest_hdf5_upload(connection, index_paths(config),
-                                    stage_upload(uploaded), identity.name,
-                                    entity_type, schemas=schemas)
+        try:
+            report = ingest_hdf5_upload(connection, index_paths(config), staged,
+                                        identity.name, entity_type,
+                                        schemas=schemas)
+        finally:
+            # Ingestion has already stored its own verbatim copy under the
+            # file's hash, so the staged one is dead weight either way.
+            staged.unlink(missing_ok=True)
         analyse_index(connection)
 
     report_result(report, connection)
@@ -241,11 +274,15 @@ def render_sheet_upload(connection, config: DatabaseAppConfig, identity,
     if uploaded is None or not st.button("Ingest Sheet", type="primary"):
         return
 
+    staged = stage_upload(uploaded)
+
     with st.spinner(f"Ingesting {uploaded.name}…"):
-        report = ingest_entity_sheet(connection, index_paths(config),
-                                     stage_upload(uploaded), entity_type,
-                                     identity.name, declared, identifier_column,
-                                     schemas=schemas)
+        try:
+            report = ingest_entity_sheet(connection, index_paths(config), staged,
+                                         entity_type, identity.name, declared,
+                                         identifier_column, schemas=schemas)
+        finally:
+            staged.unlink(missing_ok=True)
         analyse_index(connection)
 
     report_result(report, connection)
@@ -578,14 +615,17 @@ def render_entry_form(connection, config: DatabaseAppConfig, identity,
         st.error(f"{schema.identifier_field} is required.")
         return
 
-    sheet = Path(tempfile.mkdtemp()) / f"{identifier.strip()}.xlsx"
+    sheet = session_staging_directory() / f"{identifier.strip()}.xlsx"
     pd.DataFrame([form_row(schema, identifier.strip(), values)]).to_excel(
         sheet, index=False)
 
-    report = ingest_entity_sheet(connection, index_paths(config), sheet,
-                                 entity_type, identity.name,
-                                 schema.reference_instructions(),
-                                 schema.identifier_field, schemas=schemas)
+    try:
+        report = ingest_entity_sheet(connection, index_paths(config), sheet,
+                                     entity_type, identity.name,
+                                     schema.reference_instructions(),
+                                     schema.identifier_field, schemas=schemas)
+    finally:
+        sheet.unlink(missing_ok=True)
     analyse_index(connection)
 
     report_result(report, connection)
@@ -621,12 +661,9 @@ def render_template_downloads(schemas: dict) -> None:
                                key="template_entity_type")
     schema = schemas[entity_type]
 
-    template = write_template(
-        schema, Path(tempfile.mkdtemp()) / f"{entity_type}_template.xlsx")
-
     st.download_button(f"Download {schema.label} Template",
-                       data=template.read_bytes(),
-                       file_name=template.name,
+                       data=template_bytes(schema),
+                       file_name=f"{entity_type}_template.xlsx",
                        mime="application/vnd.openxmlformats-officedocument."
                             "spreadsheetml.sheet")
 
