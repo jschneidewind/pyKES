@@ -1,0 +1,15 @@
+# Pull whatever the main branch last built and restart staging with it.
+#
+# Fired by the timer beside this file, and safe to run by hand. Production is
+# never touched: it runs a pinned tag and digest, and only photocat-deploy
+# changes them.
+[Unit]
+Description=Update the photocatalysis database staging instance
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/photocat pull app-staging
+ExecStart=/usr/local/bin/photocat up -d app-staging

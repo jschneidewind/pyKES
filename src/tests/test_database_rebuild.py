@@ -207,6 +207,29 @@ def test_a_rebuild_does_not_re_validate_history(connection, paths, tmp_path,
 
 
 # =============================================================================
+# The upload log
+# =============================================================================
+
+def test_the_uploaded_filename_survives_a_rebuild(connection, paths, tmp_path):
+    """
+    A rebuild re-reads each file out of the upload store, where it is named
+    after its hash — so without carrying the name through, the admin upload
+    log's readable names are replaced by 64 hex digits and nobody can tell
+    which batch was which.
+    """
+    sheet = write_sheet(tmp_path, "precursor_chemicals.xlsx",
+                        [{"Experiment": "EA-1", "Supplier": "Aldrich"}])
+    ingest_entity_sheet(connection, paths, sheet, "precursor_chemical",
+                        "alice", schemas={})
+
+    rebuild_index(connection, paths, schemas={})
+
+    assert connection.execute(
+        "SELECT filename FROM uploads").fetchone()["filename"] == \
+        "precursor_chemicals.xlsx"
+
+
+# =============================================================================
 # Chronology
 # =============================================================================
 

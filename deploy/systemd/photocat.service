@@ -1,0 +1,70 @@
+# The non-container way to run the application, kept correct and documented
+# because it is the fallback if the group ever decides Docker is not worth it
+# — and because the version in the provisioning guide could not start at all:
+# it ran `streamlit run Home.py` from /srv/photocat/app, and no install
+# produces a Home.py at that path.
+#
+# Not used by the recommended deployment. See docs/deployment.md.
+[Unit]
+Description=Photocatalysis database
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=exec reports a bad ExecStart when `systemctl start` runs, rather than
+# reporting success and then dying — which is exactly what the old unit's
+# wrong path produced.
+Type=exec
+User=photocat
+Group=photocat
+WorkingDirectory=/srv/photocat
+
+# Resolves the entry script from the installed package, so this line does not
+# carry a site-packages path that changes with the Python minor version.
+ExecStart=/srv/photocat/venv/bin/photocat-app
+
+Environment="PHOTOCAT_DATA_ROOT=/srv/photocat/data"
+Environment="PHOTOCAT_ENV=production"
+Environment="PHOTOCAT_ALLOW_DEV_LOGIN=0"
+
+# 127.0.0.1 here, unlike the container, where the application must bind
+# 0.0.0.0 because the container's own loopback is unreachable from host nginx.
+Environment="STREAMLIT_SERVER_ADDRESS=127.0.0.1"
+Environment="STREAMLIT_SERVER_PORT=8501"
+Environment="STREAMLIT_SERVER_HEADLESS=true"
+Environment="STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=true"
+Environment="STREAMLIT_SERVER_FILE_WATCHER_TYPE=none"
+Environment="STREAMLIT_CLIENT_TOOLBAR_MODE=viewer"
+
+Restart=on-failure
+RestartSec=5
+# Streamlit does not drain script threads on SIGTERM, so this does not make an
+# in-flight ingestion finish. It gives the open transaction time to commit or
+# roll back cleanly on a slow disk.
+TimeoutStopSec=30
+
+# ProtectSystem=strict makes the whole hierarchy read-only bar what is listed
+# below, so the writable places matplotlib and Streamlit need have to be
+# given explicitly — otherwise matplotlib warns on every start and rebuilds
+# its font cache each time, which is why the first plot after a restart used
+# to be seconds slower than it should be.
+CacheDirectory=photocat
+RuntimeDirectory=photocat
+Environment="HOME=/run/photocat"
+Environment="MPLCONFIGDIR=/var/cache/photocat/matplotlib"
+Environment="PYTHONDONTWRITEBYTECODE=1"
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+ReadWritePaths=/srv/photocat/data
+
+[Install]
+WantedBy=multi-user.target

@@ -256,7 +256,8 @@ def store_upload(connection,
                  uploaded_by: str,
                  kind: str,
                  options: Optional[Dict[str, Any]] = None,
-                 uploaded_at: Optional[str] = None) -> tuple:
+                 uploaded_at: Optional[str] = None,
+                 filename: Optional[str] = None) -> tuple:
     """
     Record an upload and keep the file verbatim.
 
@@ -280,6 +281,10 @@ def store_upload(connection,
     uploaded_at : str, optional
         Original upload time, passed by a rebuild so the chronology survives
         it. Defaults to now.
+    filename : str, optional
+        Name the file was uploaded under. A rebuild re-ingests straight out of
+        the upload store, where the file is named after its hash, so without
+        this the upload log's readable names are replaced by digests.
 
     Returns
     -------
@@ -310,7 +315,8 @@ def store_upload(connection,
            (sha256, filename, stored_path, byte_count, kind, uploaded_by,
             uploaded_at, ingest_options)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (digest, file_path.name, stored_path.name, stored_path.stat().st_size,
+        (digest, filename or file_path.name, stored_path.name,
+         stored_path.stat().st_size,
          kind, uploaded_by,
          uploaded_at or datetime.now(timezone.utc).isoformat(),
          json.dumps(options or {})),
@@ -712,7 +718,8 @@ def ingest_hdf5_upload(connection,
                        schemas: Optional[Dict[str, EntitySchema]] = None,
                        validate: bool = True,
                        commit: bool = True,
-                       uploaded_at: Optional[str] = None) -> IngestionReport:
+                       uploaded_at: Optional[str] = None,
+                       filename: Optional[str] = None) -> IngestionReport:
     """
     Ingest one HDF5 batch produced by the processing app.
 
@@ -742,6 +749,9 @@ def ingest_hdf5_upload(connection,
         its re-ingestion are one transaction.
     uploaded_at : str, optional
         Original upload time, passed by a rebuild to preserve the chronology.
+    filename : str, optional
+        Name the file was uploaded under, passed by a rebuild because it
+        re-reads the file from the store, where it is named after its hash.
 
     Returns
     -------
@@ -771,7 +781,8 @@ def ingest_hdf5_upload(connection,
     upload_id, already = store_upload(connection, paths, file_path,
                                       uploaded_by, UPLOAD_KIND_HDF5,
                                       options={"entity_type": entity_type},
-                                      uploaded_at=uploaded_at)
+                                      uploaded_at=uploaded_at,
+                                      filename=filename)
     report = IngestionReport(upload_id=upload_id, already_ingested=already,
                              undeclared_fields=undeclared)
     if already:
@@ -849,7 +860,8 @@ def ingest_entity_sheet(connection,
                         schemas: Optional[Dict[str, EntitySchema]] = None,
                         validate: bool = True,
                         commit: bool = True,
-                        uploaded_at: Optional[str] = None) -> IngestionReport:
+                        uploaded_at: Optional[str] = None,
+                        filename: Optional[str] = None) -> IngestionReport:
     """
     Ingest a sheet of entries that carry metadata but no measurements.
 
@@ -888,6 +900,9 @@ def ingest_entity_sheet(connection,
         transaction.
     uploaded_at : str, optional
         Original upload time, passed by a rebuild to preserve the chronology.
+    filename : str, optional
+        Name the file was uploaded under, passed by a rebuild because it
+        re-reads the file from the store, where it is named after its hash.
 
     Returns
     -------
@@ -926,7 +941,7 @@ def ingest_entity_sheet(connection,
                  "identifier_column": identifier_column,
                  "sheet_name": sheet_name,
                  "reference_instructions": reference_instructions},
-        uploaded_at=uploaded_at)
+        uploaded_at=uploaded_at, filename=filename)
     report = IngestionReport(upload_id=upload_id, already_ingested=already,
                              undeclared_fields=undeclared)
     if already:
@@ -1264,7 +1279,8 @@ def rebuild_index(connection,
                 reports.append(ingest_hdf5_upload(
                     connection, paths, stored_path, upload["uploaded_by"],
                     options["entity_type"], schemas=schemas, validate=False,
-                    commit=False, uploaded_at=upload["uploaded_at"]))
+                    commit=False, uploaded_at=upload["uploaded_at"],
+                    filename=upload["filename"]))
             else:
                 reports.append(ingest_entity_sheet(
                     connection, paths, stored_path, options["entity_type"],
@@ -1273,7 +1289,8 @@ def rebuild_index(connection,
                     identifier_column=options["identifier_column"],
                     sheet_name=options["sheet_name"],
                     schemas=schemas, validate=False, commit=False,
-                    uploaded_at=upload["uploaded_at"]))
+                    uploaded_at=upload["uploaded_at"],
+                    filename=upload["filename"]))
 
         connection.commit()
 

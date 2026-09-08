@@ -1,0 +1,16 @@
+# Staging follows the main branch on its own. Production does not, and that
+# asymmetry is the point: an unreviewed push should be able to reach an
+# instance somebody looks at deliberately, and never the group's record.
+[Unit]
+Description=Follow the main branch on the staging instance
+
+[Timer]
+# Every twenty minutes, offset randomly so a push and a pull do not race the
+# image being finished.
+OnBootSec=10min
+OnUnitActiveSec=20min
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,68 @@
+#!/bin/bash
+# Back up the two irreplaceable things, and the three that a rebuild cannot
+# reconstruct on its own.
+#
+#   photocat-backup                 # nightly, from cron
+#   photocat-backup pre-v0.3.0      # before an update, kept out of the prune
+#
+# `sqlite3 .backup` rather than cp, because the index is in WAL mode: copying
+# index.sqlite without its -wal and -shm gives a file missing the most recent
+# commits. The output is standalone, with no companion files to go stale.
+set -euo pipefail
+
+PHOTOCAT_ROOT="${PHOTOCAT_ROOT:-/srv/photocat}"
+DATA_ROOT="$PHOTOCAT_ROOT/data"
+LABEL="${1:-nightly}"
+DEST="$PHOTOCAT_ROOT/backups/$(date +%Y%m%d-%H%M%S)-${LABEL}"
+
+# Nightly snapshots older than this are removed. Labelled ones never are:
+# a pre-update snapshot is the rollback path and outlives its own usefulness
+# by less than a month.
+KEEP_NIGHTLY_DAYS=30
+
+mkdir -p "$DEST"
+
+sqlite3 "$DATA_ROOT/index.sqlite" ".backup '$DEST/index.sqlite'"
+rsync -a --delete "$DATA_ROOT/uploads/" "$DEST/uploads/"
+
+# payloads/ is derived and is deliberately absent from the nightly backup: it
+# is reconstructed from uploads/, which is the whole reason uploads are kept.
+# A pre-update snapshot is a different artefact with a different job — it is
+# what makes a rollback a file restore rather than a five-minute rebuild — so
+# it takes payloads too, as hardlinks against the last snapshot, which costs
+# almost nothing.
+if [ "$LABEL" != "nightly" ]; then
+    LAST_PAYLOADS=$(find "$PHOTOCAT_ROOT/backups" -maxdepth 2 -type d \
+        -name payloads 2>/dev/null | sort | tail -1)
+    if [ -n "$LAST_PAYLOADS" ]; then
+        rsync -a --delete --link-dest="$LAST_PAYLOADS" \
+            "$DATA_ROOT/payloads/" "$DEST/payloads/"
+    else
+        rsync -a --delete "$DATA_ROOT/payloads/" "$DEST/payloads/"
+    fi
+fi
+
+# What a rebuild reverts, and what it needs. Corrections made on the entry
+# page are written to the entity row with no journal to replay them from, and
+# the type each upload was ingested as lives only on the entries it produced
+# for uploads stored before that was recorded.
+sqlite3 -json "$DATA_ROOT/index.sqlite" \
+    "SELECT entity_id, entity_type, owner, created_at, updated_at, metadata
+     FROM entities WHERE updated_at > created_at ORDER BY entity_id;" \
+    > "$DEST/corrections.json"
+
+sqlite3 -json "$DATA_ROOT/index.sqlite" \
+    "SELECT upload_id, entity_type, COUNT(*) AS entries FROM entities
+     WHERE upload_id IS NOT NULL GROUP BY upload_id, entity_type
+     ORDER BY upload_id;" \
+    > "$DEST/entity_type_by_upload.json"
+
+# Which version wrote this, so a restored backup can be matched to the code
+# that produced it.
+cp "$PHOTOCAT_ROOT/.env" "$DEST/deployed-version.env" 2>/dev/null || true
+
+find "$PHOTOCAT_ROOT/backups" -maxdepth 1 -type d -name '*-nightly' \
+    -mtime +${KEEP_NIGHTLY_DAYS} -exec rm -rf {} +
+
+echo "backup: $DEST"
+du -sh "$DEST"

@@ -1,0 +1,23 @@
+#!/bin/bash
+# Stop new sessions starting, without stopping the container.
+#
+#   photocat-maintenance on
+#   photocat-maintenance off
+#
+# This is the drain before an update. It does not end sessions already open,
+# and it does not interrupt an ingestion in flight — which is the point: turn
+# it on, wait a minute, and whatever was being written has committed.
+set -euo pipefail
+
+SNIPPET=/etc/nginx/snippets/photocat-maintenance.conf
+
+case "${1:-}" in
+    on)  printf 'return 503;\n' > "$SNIPPET" ;;
+    off) : > "$SNIPPET" ;;
+    *)   echo "usage: photocat-maintenance on|off" >&2; exit 2 ;;
+esac
+
+nginx -t
+systemctl reload nginx
+
+echo "maintenance: ${1}"
