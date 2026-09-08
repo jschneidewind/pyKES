@@ -106,3 +106,25 @@ def test_the_running_version_is_knowable():
     PYTHONPATH without installing the project.
     """
     assert get_pykes_version() != UNKNOWN_VERSION
+
+
+# =============================================================================
+# The console entry point
+# =============================================================================
+
+def test_help_does_not_require_a_data_root(monkeypatch, capsys):
+    """
+    `main` verifies the data root before handing over, so that an absent or
+    unwritable one stops the service instead of surfacing later as a
+    traceback. A data root is not a precondition of printing usage, though,
+    and requiring one made `photocat-app --help` fail — which the container
+    image's own smoke test caught.
+    """
+    monkeypatch.setenv("PHOTOCAT_DATA_ROOT", "/nonexistent/never-attached")
+    monkeypatch.setattr("sys.argv", ["photocat-app", "--help"])
+
+    with pytest.raises(SystemExit) as exit_status:
+        launch.main()
+
+    assert exit_status.value.code == 0
+    assert "streamlit run" in capsys.readouterr().out

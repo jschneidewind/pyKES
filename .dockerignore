@@ -1,0 +1,34 @@
+# The build context is uploaded to the daemon in full, and everything left in
+# it can invalidate a layer. src/tests alone is 73 MB of instrument fixtures,
+# and CHANGELOG.md is touched by nearly every commit.
+.git
+.github
+.gitignore
+.claude
+.agents
+.venv
+src/tests
+**/__pycache__
+**/*.pyc
+**/*.pyo
+docs
+examples
+modelling
+CHANGELOG.md
+CLAUDE.md
+dist
+build
+*.egg-info
+Untracked
+htmlcov
+.coverage
+compose*.yaml
+.env
+.env.*
+dev-data
+*.h5
+*.sqlite
+*.sqlite-*
+
+# README.md is deliberately NOT excluded: uv_build reads project.readme, and
+# the build fails without it.

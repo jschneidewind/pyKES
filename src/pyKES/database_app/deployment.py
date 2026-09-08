@@ -15,12 +15,15 @@ import streamlit as st
 
 from pyKES.database.index_schema import (
     INDEX_SCHEMA_VERSION,
+    IndexPaths,
+    open_index,
     read_index_schema_version,
 )
 from pyKES.database_app.config import (
     DEVELOPMENT_ENVIRONMENT,
     PRODUCTION_ENVIRONMENT,
     DatabaseAppConfig,
+    as_boolean,
     setting_from_environment,
 )
 from pyKES.utilities.version_information import get_pykes_version
@@ -129,3 +132,69 @@ def render_environment_banner() -> None:
         f"Anything added here is not part of the group's record.",
         icon="🧪",
     )
+
+
+def verify_data_root(config: DatabaseAppConfig) -> Dict[str, str]:
+    """
+    Open the index once, before the server starts, and report what it found.
+
+    Doing this in the foreground moves three failures from "a traceback on
+    whichever page a user happens to open" to "the service does not start":
+    a data root that is not there, one the process cannot write to — a bind
+    mount whose owner does not match the container user is the usual cause —
+    and an additive column migration that cannot be applied. It also means the
+    migration happens once, on purpose, rather than inside whichever request
+    opens the first connection.
+
+    Parameters
+    ----------
+    config : DatabaseAppConfig
+        Deployment settings.
+
+    Returns
+    -------
+    summary : dict
+        As `deployment_summary`, read after any migration has been applied.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the data root holds no index and creating one was not asked for.
+    """
+    create = setting_from_environment("CREATE_INDEX", False, as_boolean)
+    paths = IndexPaths(root=config.data_root, create=create)
+
+    connection = open_index(paths)
+    try:
+        return deployment_summary(connection, config)
+    finally:
+        connection.close()
+
+
+def describe_startup(summary: Dict[str, str], config: DatabaseAppConfig) -> str:
+    """
+    Build the line a deployment logs when it starts.
+
+    Whoever is looking at `docker compose logs` or `journalctl` after an update
+    wants exactly this: which build came up, against which database, and
+    whether it is serving unauthenticated identities.
+
+    Parameters
+    ----------
+    summary : dict
+        As returned by `verify_data_root`.
+    config : DatabaseAppConfig
+        Deployment settings.
+
+    Returns
+    -------
+    line : str
+        One line for the log.
+    """
+    return (f"photocat: pyKES={summary['pykes_version']} "
+            f"image={summary['image_tag'] or 'none'} "
+            f"sha={summary['git_sha'] or 'none'} "
+            f"env={summary['environment']} "
+            f"data_root={summary['data_root']} "
+            f"index_schema={summary['recorded_schema']} "
+            f"dev_login={config.allow_development_login}")
