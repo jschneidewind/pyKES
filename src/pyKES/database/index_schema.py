@@ -287,7 +287,8 @@ class IndexPaths:
 # Connection handling
 # =============================================================================
 
-def open_index(paths: IndexPaths) -> sqlite3.Connection:
+def open_index(paths: IndexPaths,
+               allow_incompatible: bool = False) -> sqlite3.Connection:
     """
     Open the index database, creating and initialising it if absent.
 
@@ -295,6 +296,11 @@ def open_index(paths: IndexPaths) -> sqlite3.Connection:
     ----------
     paths : IndexPaths
         Filesystem layout of the database.
+    allow_incompatible : bool, optional
+        Open an index whose schema version this code cannot read. Only the
+        repair tooling passes True: `rebuild_index` needs a connection to the
+        very database the version check refuses, so without this the repair
+        the refusal names could not be performed.
 
     Returns
     -------
@@ -307,8 +313,14 @@ def open_index(paths: IndexPaths) -> sqlite3.Connection:
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
 
+    # Checked before `initialise_index`, so a database this code will not serve
+    # is left exactly as it was found. Checking afterwards means the additive
+    # migration has already altered a database on its way to being rejected,
+    # which is the one state a rollback to the older code cannot read.
+    if not allow_incompatible:
+        check_schema_version(connection)
+
     initialise_index(connection)
-    check_schema_version(connection)
 
     return connection
 
@@ -339,7 +351,14 @@ def check_schema_version(connection: sqlite3.Connection) -> None:
     """
     version = read_index_schema_version(connection)
 
-    if version in SUPPORTED_SCHEMA_VERSIONS or version is None:
+    if version in SUPPORTED_SCHEMA_VERSIONS:
+        return
+
+    # No recorded version and nothing stored is simply a database that does
+    # not exist yet, which `initialise_index` is about to create. No recorded
+    # version with entries in it is a database whose layout nothing can vouch
+    # for, and it is refused like any other unreadable one.
+    if version is None and not index_holds_entries(connection):
         return
 
     raise RuntimeError(
@@ -347,9 +366,33 @@ def check_schema_version(connection: sqlite3.Connection) -> None:
         f"{', '.join(SUPPORTED_SCHEMA_VERSIONS)}. Inherited metadata moved out "
         f"of the 'effective' column into its own table, so the stored values "
         f"cannot be read as they are. Rebuild it from the retained uploads "
-        f"with `rebuild_index`, which is what keeping every upload verbatim "
-        f"is for."
+        f"with `photocat-rebuild --data-root <root>`, which is what keeping "
+        f"every upload verbatim is for."
     )
+
+
+def index_holds_entries(connection: sqlite3.Connection) -> bool:
+    """
+    Report whether this database already holds entries.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection, possibly to a file that holds no tables yet.
+
+    Returns
+    -------
+    populated : bool
+        True when an `entities` table exists and is not empty.
+    """
+    present = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entities'"
+    ).fetchone()
+
+    if present is None:
+        return False
+
+    return connection.execute("SELECT COUNT(*) FROM entities").fetchone()[0] > 0
 
 
 def initialise_index(connection: sqlite3.Connection) -> None:
@@ -367,8 +410,16 @@ def initialise_index(connection: sqlite3.Connection) -> None:
     """
     connection.executescript(SCHEMA_STATEMENTS)
     add_missing_columns(connection)
+
+    # Recorded after the additive migration has succeeded, and updated rather
+    # than ignored, so the stored value describes the layout the database now
+    # has instead of the version that first created it. Written with INSERT OR
+    # IGNORE it never moved, so an index that had absorbed every column of a
+    # newer release still reported the old number — and the next release to
+    # list two supported versions would have refused it.
     connection.execute(
-        "INSERT OR IGNORE INTO index_meta (key, value) VALUES ('schema_version', ?)",
+        """INSERT INTO index_meta (key, value) VALUES ('schema_version', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
         (INDEX_SCHEMA_VERSION,),
     )
     connection.commit()
@@ -414,8 +465,19 @@ def read_index_schema_version(connection: sqlite3.Connection) -> Optional[str]:
     Returns
     -------
     version : str or None
-        Stored schema version, or None for a database predating ``index_meta``.
+        Stored schema version, or None for a database that has no
+        ``index_meta`` table yet — one this code is about to create, or one
+        predating the table.
     """
+    # Read before `initialise_index` has run, so the table may not exist. A
+    # missing table and a missing row mean the same thing to every caller.
+    present = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'index_meta'"
+    ).fetchone()
+
+    if present is None:
+        return None
+
     row = connection.execute(
         "SELECT value FROM index_meta WHERE key = 'schema_version'"
     ).fetchone()

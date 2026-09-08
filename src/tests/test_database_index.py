@@ -15,6 +15,7 @@ import sqlite3
 import pandas as pd
 import pytest
 
+from pyKES.database import index_schema
 from pyKES.database.database_experiments import Experiment, ExperimentalDataset
 from pyKES.database.index_ingest import (
     IngestionError,
@@ -797,3 +798,113 @@ def test_a_column_added_after_the_index_was_built_is_added_to_it(paths):
     reopened.close()
 
     assert "sub_keys" in columns
+
+
+# =============================================================================
+# The schema version gate
+# =============================================================================
+
+def test_an_index_from_an_unreadable_version_is_refused(paths):
+    """
+    The failure this guards against is silent, not loud: an index written
+    before inherited metadata moved into its own table opens perfectly and
+    answers every search with nothing, because the values are in a column
+    nothing reads any more.
+    """
+    connection = open_index(paths)
+    add_entity(connection, "EXP-1", "experiment", {"Notes": "kept"})
+    connection.execute("UPDATE index_meta SET value = '1.1' "
+                       "WHERE key = 'schema_version'")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="photocat-rebuild"):
+        open_index(paths)
+
+
+def test_the_refused_index_is_left_untouched(paths):
+    """
+    The check runs before the additive migration, so a database on its way to
+    being rejected does not quietly gain the newer release's columns — which
+    is the one state the older code could no longer read either.
+    """
+    connection = open_index(paths)
+    add_entity(connection, "EXP-1", "experiment", {"Notes": "kept"})
+    connection.execute("ALTER TABLE metadata_keys DROP COLUMN sub_keys")
+    connection.execute("UPDATE index_meta SET value = '1.1' "
+                       "WHERE key = 'schema_version'")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(RuntimeError):
+        open_index(paths)
+
+    reopened = open_index(paths, allow_incompatible=True)
+    columns = {row["name"] for row in
+               reopened.execute("PRAGMA table_info(metadata_keys)")}
+    recorded = read_index_schema_version(reopened)
+    reopened.close()
+
+    # Opened for repair it is migrated, as `rebuild_index` needs it to be.
+    assert "sub_keys" in columns
+    assert recorded == INDEX_SCHEMA_VERSION
+
+
+def test_the_repair_path_can_reach_a_refused_index(paths):
+    """
+    The refusal names a repair, and the repair needs a connection to the very
+    database that was refused. Without the escape hatch the instruction could
+    not be followed.
+    """
+    connection = open_index(paths)
+    add_entity(connection, "EXP-1", "experiment", {"Notes": "kept"})
+    connection.execute("UPDATE index_meta SET value = '1.1' "
+                       "WHERE key = 'schema_version'")
+    connection.commit()
+    connection.close()
+
+    reopened = open_index(paths, allow_incompatible=True)
+    count = reopened.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+    reopened.close()
+
+    assert count == 1
+
+
+def test_the_recorded_version_follows_the_layout(paths, monkeypatch):
+    """
+    Written with INSERT OR IGNORE the record never moved, so an index that had
+    absorbed every column of a newer release still reported the number it was
+    created at. Today's single supported version hides that; the case it
+    breaks is the next release that absorbs a column additively and therefore
+    reads two versions, which is what is simulated here.
+    """
+    connection = open_index(paths)
+    add_entity(connection, "EXP-1", "experiment", {"Notes": "kept"})
+    connection.execute("UPDATE index_meta SET value = '1.9' "
+                       "WHERE key = 'schema_version'")
+    connection.commit()
+    connection.close()
+
+    monkeypatch.setattr(index_schema, "SUPPORTED_SCHEMA_VERSIONS",
+                        ("1.9", INDEX_SCHEMA_VERSION))
+
+    reopened = open_index(paths)
+    try:
+        assert read_index_schema_version(reopened) == INDEX_SCHEMA_VERSION
+    finally:
+        reopened.close()
+
+
+def test_a_populated_index_with_no_recorded_version_is_refused(paths):
+    """
+    An empty file is a database that does not exist yet. One with entries and
+    no version is one whose layout nothing can vouch for.
+    """
+    connection = open_index(paths)
+    add_entity(connection, "EXP-1", "experiment", {"Notes": "kept"})
+    connection.execute("DELETE FROM index_meta WHERE key = 'schema_version'")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(RuntimeError):
+        open_index(paths)
