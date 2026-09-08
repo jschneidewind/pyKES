@@ -43,3 +43,14 @@ htmlcov/
 .coverage
 coverage.xml
 CLAUDE.md
+# Deployment
+# The real .env holds the pinned image tag and digest for one host; only
+# .env.example is committed. dev-data/ is the throwaway database
+# compose.dev.yaml mounts, and compose.override.yaml is the file compose
+# auto-loads -- it must never be committed, or a development configuration
+# could become the running deployment without anybody choosing it.
+.env
+.env.previous
+.env.failed
+compose.override.yaml
+dev-data/
