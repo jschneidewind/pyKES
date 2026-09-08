@@ -128,3 +128,62 @@ def test_help_does_not_require_a_data_root(monkeypatch, capsys):
 
     assert exit_status.value.code == 0
     assert "streamlit run" in capsys.readouterr().out
+
+
+# =============================================================================
+# Staging an upload
+# =============================================================================
+
+class FakeUpload:
+    """Stands in for Streamlit's UploadedFile, whose name comes from the browser."""
+
+    def __init__(self, name, content=b"payload"):
+        self.name = name
+        self._content = content
+
+    def getbuffer(self):
+        return self._content
+
+
+def test_an_upload_cannot_be_staged_outside_its_directory(tmp_path, monkeypatch):
+    """
+    The file name is whatever the browser sent. Joined unchanged it makes an
+    upload a write to any path the process can reach — and the data root is
+    writable by exactly this user, so `../../data/index.sqlite` would be
+    overwritten by an authenticated group member's upload.
+    """
+    from pyKES.database_app.components import upload_component
+
+    monkeypatch.setattr(upload_component, "session_staging_directory",
+                        lambda: tmp_path)
+    outside = tmp_path.parent / "index.sqlite"
+    outside.write_bytes(b"the real database")
+
+    staged = upload_component.stage_upload(
+        FakeUpload("../index.sqlite", b"attacker's bytes"))
+
+    assert staged.parent == tmp_path
+    assert outside.read_bytes() == b"the real database"
+
+
+def test_a_nameless_upload_is_refused(tmp_path, monkeypatch):
+    from pyKES.database.index_ingest import IngestionError
+    from pyKES.database_app.components import upload_component
+
+    monkeypatch.setattr(upload_component, "session_staging_directory",
+                        lambda: tmp_path)
+
+    with pytest.raises(IngestionError):
+        upload_component.stage_upload(FakeUpload("../"))
+
+
+def test_an_ordinary_name_is_unchanged(tmp_path, monkeypatch):
+    from pyKES.database_app.components import upload_component
+
+    monkeypatch.setattr(upload_component, "session_staging_directory",
+                        lambda: tmp_path)
+
+    staged = upload_component.stage_upload(FakeUpload("260903_AE857.h5"))
+
+    assert staged == tmp_path / "260903_AE857.h5"
+    assert staged.read_bytes() == b"payload"

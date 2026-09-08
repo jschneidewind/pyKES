@@ -79,8 +79,23 @@ def stage_upload(uploaded_file) -> Path:
         Path to the staged copy, inside this session's staging directory. The
         ingestion stores its own verbatim copy under the file's hash, so the
         staged file is deleted as soon as it has been read.
+
+    Raises
+    ------
+    IngestionError
+        If the upload carries no usable file name.
     """
-    staged = session_staging_directory() / uploaded_file.name
+    # Reduced to its last component before it is joined. The name is whatever
+    # the browser sent, and joining it unchanged makes the upload a write to
+    # any path the process can reach — `../../data/index.sqlite` among them,
+    # since the data root is writable by exactly this user.
+    name = Path(uploaded_file.name).name
+
+    if not name or name in (".", ".."):
+        raise IngestionError(
+            f"Upload has no usable file name ({uploaded_file.name!r}).")
+
+    staged = session_staging_directory() / name
     staged.write_bytes(uploaded_file.getbuffer())
 
     return staged
