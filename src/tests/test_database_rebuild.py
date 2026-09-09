@@ -29,8 +29,15 @@ from pyKES.database.index_ingest import (
     recover_entity_types,
     resolve_stored_path,
 )
-from pyKES.database.index_schema import IndexPaths, open_index
-from pyKES.database_app.rebuild_cli import find_orphan_uploads
+from pyKES.database.index_schema import (
+    INDEX_SCHEMA_VERSION,
+    IndexPaths,
+    open_index,
+)
+from pyKES.database_app.rebuild_cli import (
+    backfill_stored_paths,
+    find_orphan_uploads,
+)
 
 
 # =============================================================================
@@ -304,6 +311,102 @@ def test_an_interrupted_rebuild_changes_nothing(connection, paths, tmp_path,
         "SELECT entity_id FROM entities")) == entities_before
     assert connection.execute(
         "SELECT COUNT(*) FROM uploads").fetchone()[0] == uploads_before
+
+
+# =============================================================================
+# The schema version is recorded by the rebuild, not by opening for repair
+# =============================================================================
+
+def stamp_version(connection, version):
+    """Record a schema version the way an older release would have left it."""
+    connection.execute("UPDATE index_meta SET value = ? "
+                       "WHERE key = 'schema_version'", (version,))
+    connection.commit()
+
+
+def ingest_one_sheet(connection, paths, directory, schemas):
+    """One retained upload, enough for a rebuild to have something to do."""
+    sheet = write_sheet(directory, "semis.xlsx",
+                        [{"Experiment": "SEMI-1", "Precursor Chemicals": "EA-1",
+                          "Catalyst material": "SrTiO3",
+                          "Synthesis route": "Flux",
+                          "Synthesis temperature [°C]": 1150}])
+    ingest_entity_sheet(connection, paths, sheet, "finished_semiconductor",
+                        "alice", schemas=schemas)
+
+
+def test_a_completed_rebuild_records_the_schema_version(paths, connection,
+                                                        tmp_path, schemas):
+    """
+    The rebuild is what the refusal names, so the rebuild is what clears it.
+    Stamping the version when the index was opened for repair cleared it
+    before any repair had run.
+    """
+    ingest_one_sheet(connection, paths, tmp_path, schemas)
+    stamp_version(connection, "1.1")
+    connection.close()
+
+    repaired = open_index(paths, allow_incompatible=True)
+    rebuild_index(repaired, paths, schemas=schemas)
+    repaired.close()
+
+    assert read_index_schema_version_of(paths) == INDEX_SCHEMA_VERSION
+
+    # And the gate now lets it through, because the data has that shape.
+    reopened = open_index(paths)
+    reopened.close()
+
+
+def test_an_interrupted_rebuild_leaves_the_refusal_in_place(paths, connection,
+                                                            tmp_path, schemas):
+    """
+    A stamp committed when the connection was opened is one the rebuild's own
+    rollback cannot undo, so a rebuild that fails part-way through would have
+    left an unrebuilt index that opens cleanly.
+    """
+    ingest_one_sheet(connection, paths, tmp_path, schemas)
+    stamp_version(connection, "1.1")
+    connection.close()
+
+    repaired = open_index(paths, allow_incompatible=True)
+    stored = repaired.execute(
+        "SELECT stored_path FROM uploads ORDER BY id DESC LIMIT 1").fetchone()
+    resolve_stored_path(paths, stored["stored_path"]).unlink()
+
+    with pytest.raises(Exception):
+        rebuild_index(repaired, paths, schemas=schemas)
+    repaired.close()
+
+    assert read_index_schema_version_of(paths) == "1.1"
+
+
+def test_backfilling_paths_leaves_the_refusal_in_place(paths, connection,
+                                                       tmp_path, schemas):
+    """
+    `--backfill-paths` rewrites upload paths and re-reads nothing, so it is
+    not the repair the refusal names and must not answer for it.
+    """
+    ingest_one_sheet(connection, paths, tmp_path, schemas)
+    stamp_version(connection, "1.1")
+    connection.close()
+
+    repaired = open_index(paths, allow_incompatible=True)
+    backfill_stored_paths(repaired)
+    repaired.commit()
+    repaired.close()
+
+    assert read_index_schema_version_of(paths) == "1.1"
+
+
+def read_index_schema_version_of(paths):
+    """Read the recorded version without going through `open_index`."""
+    connection = sqlite3.connect(paths.index_path)
+    try:
+        return connection.execute(
+            "SELECT value FROM index_meta WHERE key = 'schema_version'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
 
 
 # =============================================================================

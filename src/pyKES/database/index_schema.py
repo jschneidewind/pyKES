@@ -332,8 +332,8 @@ class IndexPaths:
         if not self.index_path.is_file():
             raise FileNotFoundError(
                 f"No index at {self.index_path}. Seed one with "
-                f"`python -m pyKES.database_app.seed_demo`, or set "
-                f"PHOTOCAT_CREATE_INDEX=1 to create an empty one here."
+                f"`python -m pyKES.database_app.seed_demo --root {self.root}`, "
+                f"or set PHOTOCAT_CREATE_INDEX=1 to create an empty one here."
             )
 
 
@@ -374,7 +374,12 @@ def open_index(paths: IndexPaths,
     if not allow_incompatible:
         check_schema_version(connection)
 
-    initialise_index(connection)
+    # The version stamp is the gate, so opening for repair migrates the columns
+    # — `rebuild_index` needs them to write into — without clearing it. Only a
+    # committed rebuild records the new version; a dry run, a path backfill or a
+    # rebuild that fails leaves the refusal in place, which is the whole point
+    # of refusing.
+    initialise_index(connection, record_version=not allow_incompatible)
 
     return connection
 
@@ -449,9 +454,48 @@ def index_holds_entries(connection: sqlite3.Connection) -> bool:
     return connection.execute("SELECT COUNT(*) FROM entities").fetchone()[0] > 0
 
 
-def initialise_index(connection: sqlite3.Connection) -> None:
+def initialise_index(connection: sqlite3.Connection,
+                    record_version: bool = True) -> None:
     """
     Create the tables and indexes if they do not already exist.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+    record_version : bool, optional
+        Stamp the schema version this code writes. False on the repair path,
+        where the stamp is the gate that refuses the database being repaired:
+        clearing it before the repair has run would leave an unrebuilt index
+        that opens perfectly and answers every search with nothing.
+
+    Returns
+    -------
+    None : None
+    """
+    connection.executescript(SCHEMA_STATEMENTS)
+    add_missing_columns(connection)
+
+    if record_version:
+        record_schema_version(connection)
+
+    connection.commit()
+
+
+def record_schema_version(connection: sqlite3.Connection) -> None:
+    """
+    Record the schema version this code writes.
+
+    Called after the additive migration has succeeded, and an upsert rather
+    than an ignore, so the stored value describes the layout the database now
+    has instead of the version that first created it. Written with INSERT OR
+    IGNORE it never moved, so an index that had absorbed every column of a
+    newer release still reported the old number — and the next release to
+    list two supported versions would have refused it.
+
+    Does not commit: on the repair path this is the last statement of the
+    rebuild's transaction, so that the stamp lands with the rebuilt data or
+    not at all.
 
     Parameters
     ----------
@@ -462,21 +506,11 @@ def initialise_index(connection: sqlite3.Connection) -> None:
     -------
     None : None
     """
-    connection.executescript(SCHEMA_STATEMENTS)
-    add_missing_columns(connection)
-
-    # Recorded after the additive migration has succeeded, and updated rather
-    # than ignored, so the stored value describes the layout the database now
-    # has instead of the version that first created it. Written with INSERT OR
-    # IGNORE it never moved, so an index that had absorbed every column of a
-    # newer release still reported the old number — and the next release to
-    # list two supported versions would have refused it.
     connection.execute(
         """INSERT INTO index_meta (key, value) VALUES ('schema_version', ?)
            ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
         (INDEX_SCHEMA_VERSION,),
     )
-    connection.commit()
 
 
 def add_missing_columns(connection: sqlite3.Connection) -> None:

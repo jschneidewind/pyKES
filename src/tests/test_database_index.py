@@ -842,12 +842,37 @@ def test_the_refused_index_is_left_untouched(paths):
     reopened = open_index(paths, allow_incompatible=True)
     columns = {row["name"] for row in
                reopened.execute("PRAGMA table_info(metadata_keys)")}
-    recorded = read_index_schema_version(reopened)
     reopened.close()
 
     # Opened for repair it is migrated, as `rebuild_index` needs it to be.
     assert "sub_keys" in columns
-    assert recorded == INDEX_SCHEMA_VERSION
+
+
+def test_opening_for_repair_does_not_clear_the_refusal(paths):
+    """
+    The stamp is the gate, so a repair open must leave it alone: `--dry-run`
+    and `--backfill-paths` both open this way and change no data, and a
+    rebuild that fails part-way cannot roll back a version already committed
+    when the connection was made. Recorded early, the operator who runs the
+    dry run and stops there is left with an index that starts cleanly and is
+    not the shape the code expects.
+    """
+    connection = open_index(paths)
+    add_entity(connection, "EXP-1", "experiment", {"Notes": "kept"})
+    connection.execute("UPDATE index_meta SET value = '1.1' "
+                       "WHERE key = 'schema_version'")
+    connection.commit()
+    connection.close()
+
+    reopened = open_index(paths, allow_incompatible=True)
+    recorded = read_index_schema_version(reopened)
+    reopened.close()
+
+    assert recorded == "1.1"
+
+    # Still refused afterwards: the repair was reachable, not performed.
+    with pytest.raises(RuntimeError):
+        open_index(paths)
 
 
 def test_the_repair_path_can_reach_a_refused_index(paths):

@@ -55,6 +55,7 @@ from pyKES.database.index_schema import (
     ENTITY_TYPES,
     IndexPaths,
     VERSION_SUFFIX_SEPARATOR,
+    record_schema_version,
 )
 from pyKES.utilities.resolve_attributes import resolve_experiment_attributes
 
@@ -1291,6 +1292,12 @@ def rebuild_index(connection,
                     schemas=schemas, validate=False, commit=False,
                     uploaded_at=upload["uploaded_at"],
                     filename=upload["filename"]))
+
+        # Last statement of the transaction, so the version this code writes is
+        # recorded only once the data actually has that shape. Stamping it when
+        # the index was opened would clear the refusal before the repair it
+        # names had run — and a rollback cannot undo an already-committed stamp.
+        record_schema_version(connection)
 
         connection.commit()
 
