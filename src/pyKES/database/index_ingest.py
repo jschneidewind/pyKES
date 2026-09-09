@@ -1248,8 +1248,9 @@ def rebuild_index(connection,
 
     # Read before anything is deleted: for uploads stored before their options
     # were recorded, the entries are the only remaining evidence of the type.
+    recovered_types = recover_entity_types(connection)
     options_by_upload = {
-        upload["id"]: ingest_options_for(upload, recover_entity_types(connection),
+        upload["id"]: ingest_options_for(upload, recovered_types,
                                          entity_type_by_upload or {}, schemas)
         for upload in uploads
     }

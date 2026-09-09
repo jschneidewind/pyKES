@@ -365,9 +365,15 @@ def register_key(connection, key: str, value: Any, entity_type: Optional[str],
     if not sub_key and value not in sample and len(sample) < DISTINCT_SAMPLE_LIMIT:
         sample.append(value)
 
+    # Sorted, like `sub_keys` below: the only reader is a `json_each`
+    # membership join, so the order means nothing — but appended, it recorded
+    # whichever order the kinds happened to arrive in. Both repair paths walk
+    # the entries in a different order from the ingestions that first built the
+    # registry, so the same archive came back with the same kinds listed
+    # differently after a rebuild or after Admin's Rebuild Key Registry.
     entity_types = json.loads(row["entity_types"] or "[]")
     if entity_type and entity_type not in entity_types:
-        entity_types.append(entity_type)
+        entity_types = sorted(entity_types + [entity_type])
 
     sub_keys = json.loads(row["sub_keys"] or "[]")
     if sub_key and sub_key not in sub_keys:

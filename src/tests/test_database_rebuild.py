@@ -29,6 +29,7 @@ from pyKES.database.index_ingest import (
     recover_entity_types,
     resolve_stored_path,
 )
+from pyKES.database.index_registry import rebuild_metadata_key_registry
 from pyKES.database.index_schema import (
     INDEX_SCHEMA_VERSION,
     IndexPaths,
@@ -527,6 +528,65 @@ def test_a_rebuild_reproduces_the_inherited_metadata_exactly(connection, paths,
     rebuild_index(connection, paths, schemas=schemas)
 
     assert structure() == before
+
+
+def registry_without_its_clock(connection):
+    """
+    The key registry as anything reads it — the two `_seen` timestamps are the
+    registry's own bookkeeping and move with every rebuild by design.
+    """
+    return [tuple(row) for row in connection.execute(
+        """SELECT key, leaf_name, role_path, canonical_key, inferred_type,
+                  unit, occurrences, distinct_sample, entity_types, sub_keys
+           FROM metadata_keys ORDER BY key""")]
+
+
+def test_a_rebuild_reproduces_the_key_registry(connection, paths, tmp_path,
+                                               schemas):
+    """
+    `metadata_keys.entity_types` was appended to in the order the kinds
+    happened to be seen, so it recorded ingestion order in a column whose only
+    reader is a membership test — and a rebuild, propagating inherited values
+    in its own order, came back with the same kinds listed differently. The
+    registry drives the filter vocabulary on Browse, so it is part of what a
+    faithful rebuild has to return unchanged.
+    """
+    precursors = write_sheet(tmp_path, "precursors.xlsx",
+                             [{"Experiment": "EA-1", "Supplier": "Aldrich"}])
+    ingest_entity_sheet(connection, paths, precursors, "precursor_chemical",
+                        "alice", schemas={})
+
+    semiconductors = write_sheet(tmp_path, "semis.xlsx", [
+        {"Experiment": "SEMI-1", "Precursor Chemicals": "EA-1",
+         "Catalyst material": "SrTiO3", "Synthesis route": "Flux",
+         "Synthesis temperature [°C]": 1150}])
+    ingest_entity_sheet(
+        connection, paths, semiconductors, "finished_semiconductor", "alice",
+        reference_instructions=(
+            schemas["finished_semiconductor"].reference_instructions()),
+        schemas=schemas)
+
+    batches = write_sheet(tmp_path, "batches.xlsx", [
+        {"Experiment": "BATCH-1", "Finished Semiconductor": "SEMI-1",
+         "Loading method [photodeposition/wet impregnation]": "photodeposition"}])
+    ingest_entity_sheet(
+        connection, paths, batches, "catalyst_batch", "alice",
+        reference_instructions=schemas["catalyst_batch"].reference_instructions(),
+        schemas=schemas)
+
+    before = registry_without_its_clock(connection)
+    assert before
+
+    rebuild_index(connection, paths, schemas=schemas)
+
+    assert registry_without_its_clock(connection) == before
+
+    # Admin's Rebuild Key Registry is the other writer of this column, and it
+    # walks the entries in `entity_id` order rather than in arrival order, so
+    # it reordered the same list too.
+    rebuild_metadata_key_registry(connection)
+
+    assert registry_without_its_clock(connection) == before
 
 
 # =============================================================================
