@@ -1,0 +1,93 @@
+#!/bin/bash
+# Put the version pinned in .env into production.
+#
+#   sudoedit /srv/photocat/.env      # PHOTOCAT_TAG and PHOTOCAT_DIGEST
+#   photocat-deploy
+#
+# The order matters and is the whole point of having a script: drain, back up,
+# record what is live now, pull before swapping so the swap itself is quick,
+# then verify. Every step before the swap is reversible.
+set -euo pipefail
+
+PHOTOCAT_ROOT="${PHOTOCAT_ROOT:-/srv/photocat}"
+HEALTH_URL="http://127.0.0.1:8501/_stcore/health"
+
+# How long the drain waits after new sessions stop. An ingestion runs at about
+# 30 ms per experiment and commits once at the end, so a minute covers a batch
+# of well over a thousand.
+DRAIN_SECONDS=60
+
+# The health endpoint answers only once pandas, scipy, plotly, matplotlib and
+# pyarrow have been imported and Streamlit has booted.
+HEALTH_ATTEMPTS=30
+
+cd "$PHOTOCAT_ROOT"
+
+TAG=$(grep '^PHOTOCAT_TAG=' .env | cut -d= -f2)
+echo "==> deploying ${TAG}"
+
+# A development override bind-mounts the checkout over the installed package
+# and turns development login on. It should be impossible to have one here —
+# it is not copied to the server, and `photocat` always passes an explicit -f
+# — so if one is somehow in effect, stop rather than serve it.
+if photocat config | grep -q '/workspace'; then
+    echo "ABORT: the rendered configuration mounts /workspace, so a" >&2
+    echo "development override is in effect. Not deploying." >&2
+    exit 1
+fi
+
+echo "==> anything mid-flight?"
+photocat logs --since 20m app 2>/dev/null | grep -iE 'ingest|upload' | tail -5 || true
+photocat exec -T app sqlite3 -header /srv/photocat/data/index.sqlite \
+    "SELECT id, filename, uploaded_by, uploaded_at FROM uploads
+     ORDER BY id DESC LIMIT 3;" || true
+
+echo "==> draining"
+photocat-maintenance on
+sleep "$DRAIN_SECONDS"
+
+echo "==> backing up"
+photocat-backup "pre-${TAG}"
+
+echo "==> recording what is live"
+docker inspect photocat-app \
+    --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .RepoDigests 0}}' \
+    > "$PHOTOCAT_ROOT/previous-image" 2>/dev/null || true
+cp .env .env.previous
+
+# Pulled before the swap, so the container is only down for the recreate
+# rather than for the download as well.
+echo "==> pulling"
+photocat pull app
+
+echo "==> swapping"
+photocat up -d app
+
+echo "==> verifying"
+for attempt in $(seq 1 "$HEALTH_ATTEMPTS"); do
+    if curl -fsS "$HEALTH_URL" > /dev/null 2>&1; then
+        break
+    fi
+    if [ "$attempt" -eq "$HEALTH_ATTEMPTS" ]; then
+        echo "ABORT: not healthy after ${HEALTH_ATTEMPTS} attempts." >&2
+        photocat logs -n 40 app >&2
+        echo "Roll back with photocat-rollback; maintenance is still on." >&2
+        exit 1
+    fi
+    sleep 2
+done
+
+photocat logs -n 5 app | grep '^photocat:' || true
+docker inspect photocat-app \
+    --format 'running: {{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}'
+
+echo "==> opening up"
+photocat-maintenance off
+
+cat <<'NOTE'
+
+Deployed. Check in a browser before you walk away:
+  - the version line on Home names the tag you just deployed
+  - you are still signed in, and Home says who you are
+  - Browse returns rows with one metadata filter applied
+NOTE

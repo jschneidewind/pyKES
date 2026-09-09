@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "pyKES"
-version = "0.2.4"
+version = "0.3.0"
 description = "Python package for kinetic modelling of chemical reaction networks."
 keywords = ["kinetics", "photocatalysis", "water-splitting", "reaction-networks", "ode"]
 authors = [
@@ -17,7 +17,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -25,27 +24,40 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Chemistry",
 ]
 dependencies = [
-    "streamlit>=1.49",
-    "pandas",
+    "streamlit>=1.49,<2",
+    # Pinned deliberately: a pandas major changes how a cell is *read*, and
+    # that decision is stored. See issue #4 for the migration.
+    "pandas<3",
     "numpy",
     "plotly",
     "matplotlib",
     "scipy",
     "h5py",
-    "openpyxl",  
+    "openpyxl",
+    "pyyaml",
 ]
+
+[project.scripts]
+# Resolves the entry script from the installed package, so a service
+# definition never carries a site-packages path.
+photocat-app = "pyKES.database_app.launch:main"
+# The repair the schema-version check names. Deliberately a command rather
+# than an admin button: it holds the write lock for minutes and cannot be
+# safely interrupted by a browser refresh.
+photocat-rebuild = "pyKES.database_app.rebuild_cli:main"
 
 [project.urls]
 "Homepage" = "https://github.com/jschneidewind/pyKES"
 "Bug Tracker" = "https://github.com/jschneidewind/pyKES/issues"
 "Source" = "https://github.com/jschneidewind/pyKES"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["pyKES*"]
+[dependency-groups]
+# Installed by `uv sync`, excluded from the container image by
+# `uv sync --no-dev`. Declared so CI and a fresh checkout get the same
+# test runner instead of whatever happens to be on the machine.
+dev = [
+    "pytest>=8",
+]
 
 [tool.uv.build-backend]
 module-name = "pyKES"

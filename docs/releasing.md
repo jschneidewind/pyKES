@@ -85,7 +85,34 @@ source /tmp/pykes-pypi/bin/activate
 pip install pyKES==0.1.1
 ```
 
-## 6. Post-release
+## 6. What a tag now builds
+
+A `v*` tag triggers **two** workflows, and they are independent:
+
+* `release-pypi.yml` publishes the wheel, which is the library release.
+* `container-image.yml` runs the tests, then builds and pushes the image the
+  droplet actually runs, and prints the tag and digest to paste into the
+  deployment's `.env`.
+
+The server runs the **image**, not the wheel. That distinction is not
+cosmetic: version 0.2.4 on PyPI was released before any of the database work
+existed, so `pip install pyKES` at that version gets a tree with no
+`database_app` in it. See [deployment.md](deployment.md).
+
+The image workflow gates on the test suite; the PyPI workflow does not, and
+adding `needs: [tests]` to it would be a reasonable next change.
+
+One thing to write into the release notes when it applies: whether the release
+changes `INDEX_SCHEMA_VERSION`. `photocat-app` stamps the index with the
+version it writes at startup, and the supported set is an exact match, so
+after such a release the previous image can no longer open the index — a
+rollback has to restore the data alongside the image (`photocat-rollback
+--with-data`). It is the one release note the operator cannot infer from the
+tag. See [deployment.md](deployment.md) §5.
+
+---
+
+## 7. Post-release
 
 1. Create a GitHub Release for the tag.
 2. Copy key notes from [CHANGELOG.md](../CHANGELOG.md).

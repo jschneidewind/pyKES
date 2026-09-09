@@ -1,0 +1,36 @@
+# PLACEHOLDER schema for a stock solution. Replace the fields with the group's
+# own.
+
+entity_type: stock_solution
+label: Stock solution
+identifier_field: Experiment
+description: A solution made up for repeated use.
+
+fields:
+  - name: Commercial Chemical
+    type: reference
+    role: commercial_chemical
+    accepts: [commercial_chemical]
+
+  - name: Solvent
+    type: select
+    options: [Water, D2O, Methanol, Ethanol, Acetonitrile, Other]
+    required: true
+
+  - name: Concentration [mol/L]
+    type: number
+    unit: mol/L
+    required: true
+
+  - name: pH
+    type: number
+
+  - name: Prepared on
+    type: date
+
+  - name: Active
+    type: boolean
+    default: true
+
+  - name: Notes
+    type: text

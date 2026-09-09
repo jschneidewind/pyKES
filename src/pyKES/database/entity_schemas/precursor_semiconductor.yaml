@@ -1,0 +1,34 @@
+# PLACEHOLDER schema for a precursor semiconductor — an intermediate that is
+# itself processed further. Replace the fields with the group's own.
+
+entity_type: precursor_semiconductor
+label: Precursor semiconductor
+identifier_field: Experiment
+description: An intermediate semiconductor, processed further before use.
+
+fields:
+  - name: Precursor Chemicals
+    type: reference
+    role: precursor_chemical
+    accepts: [precursor_chemical, commercial_chemical]
+    multiple: true
+
+  - name: Preparation route
+    type: select
+    options: [Solid state, Hydrothermal, Sol-gel, Flux]
+    help: PLACEHOLDER — confirm the group's routes.
+
+  - name: Calcination temperature [°C]
+    type: number
+    unit: °C
+
+  - name: Calcination time [h]
+    type: number
+    unit: h
+
+  - name: Active
+    type: boolean
+    default: true
+
+  - name: Notes
+    type: text

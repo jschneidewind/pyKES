@@ -1,0 +1,66 @@
+#!/bin/bash
+# Go back to the version that was running before the last photocat-deploy.
+#
+#   photocat-rollback              # the image only
+#   photocat-rollback --with-data  # and restore the pre-update snapshot
+#
+# The image half takes under a minute, because the previous image is still on
+# disk — which is why the prune policy must never be `docker image prune -a`,
+# that being exactly the command that deletes the rollback target.
+set -euo pipefail
+
+PHOTOCAT_ROOT="${PHOTOCAT_ROOT:-/srv/photocat}"
+HEALTH_URL="http://127.0.0.1:8501/_stcore/health"
+
+cd "$PHOTOCAT_ROOT"
+
+if [ ! -f .env.previous ]; then
+    echo "No .env.previous: nothing recorded to roll back to." >&2
+    exit 1
+fi
+
+photocat-maintenance on
+
+echo "==> restoring the previous pin"
+cp .env .env.failed
+cp .env.previous .env
+grep '^PHOTOCAT_TAG=' .env
+
+if [ "${1:-}" = "--with-data" ]; then
+    # Only when the update ran a migration or a rebuild. A rollback of code
+    # alone does not need it, and restoring the data unnecessarily throws away
+    # whatever was uploaded since the snapshot.
+    SNAPSHOT=$(find "$PHOTOCAT_ROOT/backups" -maxdepth 1 -type d -name '*-pre-*' \
+        | sort | tail -1)
+    if [ -z "$SNAPSHOT" ]; then
+        echo "No pre-update snapshot found." >&2
+        exit 1
+    fi
+
+    echo "==> restoring data from $SNAPSHOT"
+    photocat stop app
+
+    # A restored main database beside the old -wal and -shm is a corruption
+    # trap. `sqlite3 .backup` output is standalone, so the stragglers go.
+    mv data/index.sqlite data/index.sqlite.failed
+    rm -f data/index.sqlite-wal data/index.sqlite-shm
+    cp "$SNAPSHOT/index.sqlite" data/index.sqlite
+    rsync -a --delete "$SNAPSHOT/uploads/" data/uploads/
+    if [ -d "$SNAPSHOT/payloads" ]; then
+        rsync -a --delete "$SNAPSHOT/payloads/" data/payloads/
+    fi
+    chown -R 10001:10001 data
+fi
+
+echo "==> swapping"
+photocat up -d app
+
+for attempt in $(seq 1 30); do
+    curl -fsS "$HEALTH_URL" > /dev/null 2>&1 && break
+    sleep 2
+done
+
+photocat logs -n 5 app | grep '^photocat:' || true
+photocat-maintenance off
+
+echo "Rolled back. The failed pin is in .env.failed."

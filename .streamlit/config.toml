@@ -1,0 +1,23 @@
+# Base theme for the pyKES Streamlit applications. Streamlit's own theming is
+# used for the palette so the colours reach every widget, including the ones a
+# stylesheet cannot address; see src/pyKES/database_app/styling.py for the
+# typography and spacing that configuration cannot express.
+
+[theme]
+base = "dark"
+primaryColor = "#22c55e"
+backgroundColor = "#0d1117"
+secondaryBackgroundColor = "#161b22"
+textColor = "#e6edf3"
+font = "sans serif"
+
+[server]
+# A batch of a few hundred experiments is around a hundred megabytes; the
+# 200 MB default would reject it.
+maxUploadSize = 1000
+
+[browser]
+# A private research archive should not be phoning home. The systemd unit used
+# to pass this as a flag, which meant every other way of starting the app --
+# a container, a local run -- silently did collect statistics.
+gatherUsageStats = false

@@ -1,0 +1,86 @@
+# Metadata schema for a photocatalysis experiment.
+#
+# Edit this file to change what the contribution form asks for, what the Excel
+# template contains, and what an upload is checked against. A field that is not
+# listed here is still accepted and still searchable — the database is built to
+# absorb metadata that did not exist when it was written — but only a field
+# listed here can be reported as wrong.
+#
+# type:     text | number | integer | boolean | select | multiselect | date | reference
+# required: an entry without it is rejected
+# options:  the allowed values, for select and multiselect
+# role:     for reference fields, the role the link is recorded under
+
+entity_type: experiment
+label: Experiment
+identifier_field: Experiment
+description: A single photocatalytic measurement.
+
+fields:
+  - name: Catalyst Batch [experiment no.]
+    type: reference
+    role: catalyst_batch
+    # Either an ordinary batch or one that was modified afterwards. The role
+    # stays `catalyst_batch` whichever it is, so one filter spans both: an
+    # inherited key is named after the relationship, not after the kind of
+    # entry at the far end of it.
+    accepts: [catalyst_batch, modified_catalyst_batch]
+    required: true
+    help: The catalyst batch this test was run on.
+
+  - name: Measured Analyte [O2 or H2]
+    type: select
+    options: [O2, H2]
+    required: true
+
+  - name: Measurement phase [liquid/gas]
+    type: select
+    options: [liquid, gas]
+    required: true
+
+  - name: Irradiation wavelength A [nm]
+    type: number
+    unit: nm
+    required: true
+
+  - name: Irradiance A [mW/cm2]
+    type: number
+    unit: mW/cm2
+    required: true
+
+  - name: Irradiation wavelength B [nm]
+    type: number
+    unit: nm
+
+  - name: Irradiance B [mW/cm2]
+    type: number
+    unit: mW/cm2
+
+  - name: Beam combiner [TRUE/FALSE]
+    type: boolean
+
+  - name: Temperature [°C]
+    type: number
+    unit: °C
+    required: true
+
+  - name: Catalyst concentration [g/L]
+    type: number
+    unit: g/L
+    required: true
+
+  - name: Gas phase volume [mL]
+    type: number
+    unit: mL
+
+  - name: Liquid phase volume [mL]
+    type: number
+    unit: mL
+
+  - name: Active
+    type: boolean
+    default: true
+    help: Clear this for a run that failed; it stays findable either way.
+
+  - name: Notes
+    type: text

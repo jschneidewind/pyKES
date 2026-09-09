@@ -21,6 +21,16 @@ from pyKES.utilities.version_information import (
 # 'version' attribute (both JSON, both optional for readers).
 SCHEMA_VERSION = "1.1"
 
+# Compression is applied only to arrays of at least this many elements. HDF5
+# refuses to compress scalar datasets outright, and on very small arrays the
+# filter costs more than it saves.
+COMPRESSION_MINIMUM_ELEMENTS = 128
+
+# gzip level used when a caller asks for compression without naming a level.
+# Measured on a real 44-experiment dataset: level 4 costs about 1 ms per
+# experiment and saves a third of the bytes.
+DEFAULT_COMPRESSION_LEVEL = 4
+
 
 def import_overview_excel(file_name, 
                           sheet_name,
@@ -67,13 +77,83 @@ class Experiment:
     processed_data: Dict[str, any]
     version: Dict[str, Any] = field(default_factory=dict)
 
-def _sanitize_hdf5_key(key: Any) -> str:
-    """Convert dict keys to HDF5-safe strings without breaking nested paths."""
+# Metadata keys routinely contain slashes — 'Catalyst concentration [g/L]',
+# 'Irradiance A [mW/cm2]' — while '/' is also the separator of a nested path.
+# Escaping the one inside the other keeps a joined path splittable, which is
+# what both the HDF5 layout and the database index rely on.
+KEY_SLASH_PLACEHOLDER = '__SLASH__'
+
+
+def sanitize_key(key: Any) -> str:
+    """
+    Escape a dict key so it can be joined into a slash-separated path.
+
+    Parameters
+    ----------
+    key : Any
+        Key to escape; non-strings are stringified, since uploads can carry
+        integer keys in nested dictionaries.
+
+    Returns
+    -------
+    escaped : str
+        Key with any slash replaced by `KEY_SLASH_PLACEHOLDER`.
+    """
     key_str = key if isinstance(key, str) else str(key)
-    return key_str.replace('/', '__SLASH__')
+
+    return key_str.replace('/', KEY_SLASH_PLACEHOLDER)
 
 
-def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
+def restore_key(key: str) -> str:
+    """
+    Reverse `sanitize_key` on one component of a split path.
+
+    Applied per component *after* splitting on the separator, never to a whole
+    path — the whole point is that the escaped slashes survive the split.
+
+    Parameters
+    ----------
+    key : str
+        One escaped path component.
+
+    Returns
+    -------
+    restored : str
+        Key as it was originally written.
+    """
+    return key.replace(KEY_SLASH_PLACEHOLDER, '/')
+
+
+def compression_arguments(value, compression):
+    """
+    Decide the h5py compression keywords for one value.
+
+    Parameters
+    ----------
+    value : Any
+        Value about to be written as a dataset.
+    compression : str or None
+        Compression filter requested by the caller, e.g. ``'gzip'``.
+
+    Returns
+    -------
+    keywords : dict
+        Keyword arguments for ``create_dataset``; empty when the value is too
+        small to be worth compressing or no compression was requested.
+    """
+    if compression is None:
+        return {}
+
+    if not isinstance(value, np.ndarray) or value.ndim == 0:
+        return {}
+
+    if value.size < COMPRESSION_MINIMUM_ELEMENTS:
+        return {}
+
+    return {'compression': compression, 'compression_opts': DEFAULT_COMPRESSION_LEVEL}
+
+
+def save_nested_dict_to_hdf5(group, data_dict, prefix="", compression=None):
     """
     Recursively save nested dictionaries to HDF5 group.
     Handles numpy arrays, basic Python types, and nested structures.
@@ -84,16 +164,17 @@ def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
         # Replace '/' in keys to avoid HDF5 path interpretation issues.
         # Data uploads can include integer keys in nested dicts; stringify them
         # before building an HDF5 path.
-        safe_key = _sanitize_hdf5_key(key)
+        safe_key = sanitize_key(key)
         full_key = f"{prefix}/{safe_key}" if prefix else safe_key
         
         if isinstance(value, np.ndarray):
             # Save numpy arrays directly
-            group.create_dataset(full_key, data=value)
+            group.create_dataset(full_key, data=value,
+                                 **compression_arguments(value, compression))
             
         elif isinstance(value, dict):
             # Recursively handle nested dictionaries
-            save_nested_dict_to_hdf5(group, value, full_key)
+            save_nested_dict_to_hdf5(group, value, full_key, compression)
             
         elif isinstance(value, (str, int, float, bool, np.bool_)):
             # Save basic types as datasets
@@ -167,7 +248,7 @@ def load_nested_dict_from_hdf5(group, prefix=""):
             # Build nested dictionary structure
             keys = key.split('/')
             # Restore '/' characters in keys
-            keys = [k.replace('__SLASH__', '/') for k in keys]
+            keys = [restore_key(k) for k in keys]
             
             current_dict = result
             for k in keys[:-1]:
@@ -402,9 +483,23 @@ class ExperimentalDataset:
             sort=False
         ).reset_index()
 
-    def save_to_hdf5(self, filename: str):
+    def save_to_hdf5(self, filename: str, compression: Optional[str] = None,
+                     verbose: bool = True):
         """
         Save experiments to HDF5 file.
+
+        Parameters
+        ----------
+        filename : str
+            Destination path.
+        compression : str, optional
+            h5py compression filter applied to arrays of at least
+            ``COMPRESSION_MINIMUM_ELEMENTS`` elements, e.g. ``'gzip'``. The
+            filter is transparent to readers, so a compressed file loads through
+            `load_from_hdf5` unchanged and needs no schema bump.
+        verbose : bool, optional
+            Whether to print a line per experiment. Callers that write one file
+            per experiment in a loop set this False.
         """
         with h5py.File(filename, 'w') as f:
             if not self.overview_df.empty:
@@ -447,17 +542,21 @@ class ExperimentalDataset:
                 # Save nested dictionaries in separate groups
                 if experiment.raw_data:
                     raw_data_group = exp_grp.create_group('raw_data')
-                    save_nested_dict_to_hdf5(raw_data_group, experiment.raw_data)
+                    save_nested_dict_to_hdf5(raw_data_group, experiment.raw_data,
+                                             compression=compression)
                 
                 if experiment.metadata:
                     metadata_group = exp_grp.create_group('metadata')
-                    save_nested_dict_to_hdf5(metadata_group, experiment.metadata)
+                    save_nested_dict_to_hdf5(metadata_group, experiment.metadata,
+                                             compression=compression)
                     
                 if experiment.processed_data:
                     processed_data_group = exp_grp.create_group('processed_data')
-                    save_nested_dict_to_hdf5(processed_data_group, experiment.processed_data)
+                    save_nested_dict_to_hdf5(processed_data_group, experiment.processed_data,
+                                             compression=compression)
 
-                print(f"Experiment {exp_name} added successfully.")
+                if verbose:
+                    print(f"Experiment {exp_name} added successfully.")
                 
     @classmethod
     def load_from_hdf5(cls, filename: str):

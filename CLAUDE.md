@@ -28,8 +28,15 @@ pip install -e <path-to-pyKES>
 - [src/pyKES/streamlit_app/](src/pyKES/streamlit_app/) — reusable Streamlit pages:
   - [config_interface.py](src/pyKES/streamlit_app/config_interface.py) — `FileUploadHandler`, `DataUploadConfig`, `HomeConfig`, `PyKESStreamlitConfig`.
   - [chunked_processing.py](src/pyKES/streamlit_app/chunked_processing.py) — advances a long processing run one experiment per rerun.
-  - [components/](src/pyKES/streamlit_app/components/) — `render_home`, `render_data_upload`, `render_analysis_results`, `render_time_series`.
-  - [pages/](src/pyKES/streamlit_app/pages/) — Streamlit page entry points; each delegates to a component.
+  - [components/](src/pyKES/streamlit_app/components/) — `render_home`, `render_data_upload`, `render_analysis_results`, `render_time_series`. External repos supply their own `Home.py` and `pages/`; this package has none.
+- [src/pyKES/database_app/](src/pyKES/database_app/) — the photocatalysis database application, which unlike the processing UI is a complete app rather than a library:
+  - [Home.py](src/pyKES/database_app/Home.py) and [pages/](src/pyKES/database_app/pages/) — the entry script and its five pages, discovered by Streamlit from inside the installed package.
+  - [launch.py](src/pyKES/database_app/launch.py) — the `photocat-app` console script; resolves the entry script from the package and verifies the data root before handing over.
+  - [page.py](src/pyKES/database_app/page.py) — `configure_page`, the preamble every page script starts with: page configuration, stylesheet, and the banner shown when this is not production. New pages call it rather than repeating the three lines.
+  - [config.py](src/pyKES/database_app/config.py) — `DatabaseAppConfig`, every field read from `PHOTOCAT_*`.
+  - [deployment.py](src/pyKES/database_app/deployment.py) — which version is running, against which database.
+  - [rebuild_cli.py](src/pyKES/database_app/rebuild_cli.py) — the `photocat-rebuild` command.
+- [docker/](docker/), [compose.yaml](compose.yaml), [deploy/](deploy/) — the deployment: image, compose stack, nginx, Authelia, systemd units and operator scripts. See [docs/deployment.md](docs/deployment.md).
 - [examples/external_repo/](examples/external_repo/) — sample wiring for an external app (Home, config, processing functions).
 - [src/tests/](src/tests/) — pytest suite.
 
@@ -66,5 +73,10 @@ When editing or adding code in this repo, follow these rules. [src/pyKES/reactio
 
 ## Running
 
-- Streamlit app: `streamlit run src/pyKES/streamlit_app/Home.py`
+- Database app: `python -m pyKES.database_app.seed_demo --root /tmp/photocat-demo --fresh`
+  then `PHOTOCAT_DATA_ROOT=/tmp/photocat-demo PHOTOCAT_ALLOW_DEV_LOGIN=1 photocat-app`.
+  The development login has to be asked for: without it the app refuses to
+  serve when no authenticating proxy is in front of it.
+- Processing app: `streamlit run examples/external_repo/Home.py` — this package
+  ships the components, not an entry script.
 - Tests: `pytest`

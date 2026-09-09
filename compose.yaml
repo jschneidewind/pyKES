@@ -1,0 +1,111 @@
+# The photocatalysis database, as deployed on the group's droplet.
+#
+# Substitute the placeholders before use — see docs/deployment.md:
+#   ghcr.io/jschneidewind/pykes-photocat   the image, in .env
+#   /srv/photocat/...                      the data root, if it moves
+#
+# Driven through deploy/bin/photocat, which always passes an explicit -f so a
+# development override can never be picked up here by accident.
+name: photocat
+
+# Anchored so production and staging cannot drift apart in the settings that
+# are about safety rather than about which instance this is.
+x-app-common: &app-common
+  image: ${PHOTOCAT_IMAGE}:${PHOTOCAT_TAG}@${PHOTOCAT_DIGEST}
+  # Redundant with the image's own USER, and kept because this is the line
+  # that has to agree with the owner of the bind-mounted data directory.
+  user: "10001:10001"
+  restart: unless-stopped
+  # Streamlit does not drain script threads on SIGTERM, so this does not make
+  # an in-flight ingestion finish; it gives the current transaction time to
+  # commit or roll back cleanly on a slow disk.
+  stop_grace_period: 30s
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  app:
+    <<: *app-common
+    container_name: photocat-app
+    environment:
+      PHOTOCAT_ENV: production
+      PHOTOCAT_ALLOW_DEV_LOGIN: "0"
+      PHOTOCAT_IMAGE_TAG: ${PHOTOCAT_TAG}
+      TZ: ${PHOTOCAT_TIMEZONE:-Europe/Berlin}
+    volumes:
+      # Mounted at the same path it has on the host. A bind mount rather than
+      # a named volume because the nightly backup already runs on the host as
+      # root, and because serving payloads through nginx eventually needs
+      # `alias /srv/photocat/data/payloads/` to be a real path.
+      - /srv/photocat/data:/srv/photocat/data
+      # `stage_upload` writes each upload here before ingesting it. On the
+      # host the space is visible to du and reclaimable by cron; deliberately
+      # not a tmpfs, or a 1000 MB upload would come out of RAM.
+      - /srv/photocat/tmp:/tmp
+    ports:
+      # The 127.0.0.1 prefix is load-bearing. Docker writes its own iptables
+      # rules ahead of ufw's, so a bare "8501:8501" publishes Streamlit to the
+      # whole internet with `ufw default deny incoming` still in force.
+      - "127.0.0.1:8501:8501"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2500M
+
+  # The same image, one tag behind or ahead, against a copy of the data. This
+  # is where a migration or a rebuild is rehearsed on real entries before it
+  # is run on the real archive.
+  app-staging:
+    <<: *app-common
+    image: ${PHOTOCAT_IMAGE}:${PHOTOCAT_STAGING_TAG:-main}
+    container_name: photocat-staging
+    environment:
+      PHOTOCAT_ENV: staging
+      PHOTOCAT_ALLOW_DEV_LOGIN: "0"
+      PHOTOCAT_IMAGE_TAG: ${PHOTOCAT_STAGING_TAG:-main}
+      TZ: ${PHOTOCAT_TIMEZONE:-Europe/Berlin}
+    volumes:
+      # A different host directory at the *same* container path, so a copy of
+      # the production index needs no rewriting to be served here.
+      - /srv/photocat/staging-data:/srv/photocat/data
+      - /srv/photocat/staging-tmp:/tmp
+    ports:
+      - "127.0.0.1:8502:8501"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 1500M
+
+  authelia:
+    image: ${AUTHELIA_IMAGE}
+    container_name: photocat-authelia
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      X_AUTHELIA_CONFIG: /config/configuration.yml
+      TZ: ${PHOTOCAT_TIMEZONE:-Europe/Berlin}
+    volumes:
+      # Writable: Authelia keeps its own SQLite database and the filesystem
+      # notifier here, and rewrites users.yml on a password change.
+      - /srv/photocat/authelia/config:/config
+      # Read-only, and never in the configuration file itself.
+      - /srv/photocat/authelia/secrets:/secrets:ro
+    ports:
+      - "127.0.0.1:9091:9091"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M

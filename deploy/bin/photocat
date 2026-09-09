@@ -1,0 +1,20 @@
+#!/bin/bash
+# The only way the stack is driven on the server.
+#
+#   photocat ps
+#   photocat logs -f app
+#   photocat exec app sqlite3 /srv/photocat/data/index.sqlite "SELECT COUNT(*) FROM entities;"
+#
+# Always passes an explicit -f, which is what stops compose auto-loading a
+# compose.override.yaml — the mechanism by which a development configuration,
+# with its bind-mounted checkout and its development login, could otherwise
+# become the running deployment without anybody choosing it.
+set -euo pipefail
+
+PHOTOCAT_ROOT="${PHOTOCAT_ROOT:-/srv/photocat}"
+
+exec docker compose \
+    --project-directory "$PHOTOCAT_ROOT" \
+    --env-file "$PHOTOCAT_ROOT/.env" \
+    -f "$PHOTOCAT_ROOT/compose.yaml" \
+    "$@"

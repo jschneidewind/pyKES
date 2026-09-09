@@ -1,0 +1,57 @@
+# Metadata schema for a catalyst batch — a semiconductor after cocatalyst
+# loading. See experiment.yaml for what the keys mean.
+
+entity_type: catalyst_batch
+label: Catalyst batch
+identifier_field: Experiment
+description: A semiconductor after cocatalyst deposition, as tested.
+
+fields:
+  - name: Finished Semiconductor
+    type: reference
+    role: finished_semiconductor
+    accepts: [finished_semiconductor]
+    required: true
+
+  - name: Loading method [photodeposition/wet impregnation]
+    type: select
+    options: [photodeposition, wet impregnation]
+    required: true
+
+  - name: Photodeposition wavelength [nm]
+    type: number
+    unit: nm
+
+  - name: Photodeposition time [min]
+    type: number
+    unit: min
+
+  # One field rather than the lettered A/B slots it replaces. The slots fixed
+  # the count in advance and made "everything with at least 0.02 wt% Cr" depend
+  # on which slot somebody happened to fill. Sheets that still carry the old
+  # columns are not rejected — an undeclared field is reported and accepted —
+  # but they are no longer checked or filtered as cocatalysts.
+  - name: Co-catalysts [wt%]
+    type: mapping
+    key_label: Element
+    value_label: wt%
+    key_options: [Rh, Cr, Pt, Ru, Ir, Co, Ni, Au]
+    unit: wt%
+    help: >-
+      Any number of cocatalysts, written as name=value pairs:
+      Rh=0.05; Cr=0.02.
+
+  - name: Coating [coating material]
+    type: select
+    options: [none, SiOx, TiOx, Al2O3]
+
+  - name: Coating loading [wt%]
+    type: number
+    unit: wt%
+
+  - name: Active
+    type: boolean
+    default: true
+
+  - name: Notes
+    type: text
