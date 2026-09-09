@@ -69,6 +69,24 @@ def test_the_entry_script_and_its_pages_are_installed():
                      "04_Contribute.py", "05_Admin.py"]
 
 
+def test_every_page_goes_through_the_shared_preamble():
+    """
+    The preamble is what applies the stylesheet and renders the
+    "not production" banner, and a page that skips it renders perfectly while
+    showing neither. Written out per page, the banner reached two of the six —
+    not Contribute, where uploading into staging is the mistake it exists to
+    prevent, and not Browse or Entity, which a shared search link opens
+    directly without ever passing Home.
+    """
+    scripts = [DATABASE_APP_DIRECTORY / launch.ENTRY_SCRIPT]
+    scripts += sorted((DATABASE_APP_DIRECTORY / "pages").glob("[0-9]*.py"))
+
+    missing = [script.name for script in scripts
+               if "configure_page(" not in script.read_text(encoding="utf-8")]
+
+    assert not missing
+
+
 def test_the_streamlit_configuration_is_installed():
     assert PACKAGED_STREAMLIT_CONFIG.is_file()
 

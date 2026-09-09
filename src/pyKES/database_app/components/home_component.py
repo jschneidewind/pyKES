@@ -10,10 +10,7 @@ import streamlit as st
 
 from pyKES.database.index_query import database_statistics, display_entity_type
 from pyKES.database_app.config import DEFAULT_CONFIG, DatabaseAppConfig
-from pyKES.database_app.deployment import (
-    render_environment_banner,
-    render_version_caption,
-)
+from pyKES.database_app.deployment import render_version_caption
 from pyKES.database_app.session import open_shared_index, read_identity
 
 
@@ -34,7 +31,6 @@ def render_home(config: DatabaseAppConfig = DEFAULT_CONFIG) -> None:
     identity = read_identity(config)
 
     st.title(config.title)
-    render_environment_banner()
 
     if not identity.authenticated:
         st.warning(
