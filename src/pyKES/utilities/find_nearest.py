@@ -1,21 +1,35 @@
+"""Locate the array entries closest to given target values."""
+
 import math
 import numpy as np
 
 def find_nearest(array, values):
     """
-    Find the indices of the nearest values in the array to a list of target values.
+    Find the indices of the array entries closest to a set of target values.
 
-    Parameters:
-        array (numpy.ndarray): The input array.
-        values (numpy.ndarray or scalar): The target values.
+    Used to translate physical positions into array indices: a time in seconds
+    into the index of the sample nearest it, for instance.
 
-    Returns:
-        list: A list of indices of the nearest values in the array to the target values.
+    Parameters
+    ----------
+    array : numpy.ndarray
+        Values searched, ascending. A two-dimensional array is reduced to its
+        first column.
+    values : array_like or scalar
+        Target values.
 
-    Note:
-        If the input array has more than one dimension, the function flattens the first dimension.
-        The function uses the `numpy.searchsorted` function to find the indices of the target values in the array.
-        The function then checks if the index is not the last index in the array and if the difference between the target value and the previous value in the array is less than the difference between the target value and the current value in the array. If both conditions are true, the index of the previous value is returned, otherwise the index of the current value is returned.
+    Returns
+    -------
+    list of int
+        Index of the closest entry of `array` for each target value, in the
+        order the targets were given.
+
+    Notes
+    -----
+    Uses `numpy.searchsorted` to bracket each target, then picks whichever of
+    the two neighbours is closer — so the result is the nearest entry, not
+    merely the insertion point, and the search stays logarithmic in the length
+    of the array.
     """
 
     if array.ndim != 1:

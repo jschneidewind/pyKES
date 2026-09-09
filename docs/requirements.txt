@@ -1,0 +1,15 @@
+# Documentation build requirements.
+#
+# Read the Docs installs the `docs` extra of pyproject.toml instead of this
+# file (see .readthedocs.yaml); this exists so a local build can be set up
+# without an editable install:
+#
+#     pip install -r docs/requirements.txt
+
+sphinx>=7.2
+sphinx-rtd-theme>=2.0
+sphinx-copybutton>=0.5
+sphinx-design>=0.5
+sphinxcontrib-mermaid>=0.9
+myst-parser>=2.0
+linkify-it-py>=2.0

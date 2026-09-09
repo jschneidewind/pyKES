@@ -1,8 +1,34 @@
+"""Resample an unevenly sampled time series onto a regular grid."""
+
 import pandas as pd
 from scipy.stats import binned_statistic
 import numpy as np
 
 def resample_time_series(time_values, data_values, interval = 5):
+    """
+    Bin a time series into fixed-width intervals and average each bin.
+
+    Reduces both the sampling rate and the noise of a densely sampled sensor
+    trace: averaging within a bin suppresses uncorrelated noise, unlike simply
+    taking every n-th point. Bins are of equal width in time, so the result is
+    evenly spaced even when the input is not.
+
+    Parameters
+    ----------
+    time_values : array_like
+        Time points, ascending.
+    data_values : array_like
+        Measured values, the same length as `time_values`.
+    interval : float, optional
+        Bin width, in the unit of `time_values`.
+
+    Returns
+    -------
+    new_time : numpy.ndarray
+        Bin centers.
+    new_data : numpy.ndarray
+        Mean of the values in each bin. Empty bins come back as NaN.
+    """
 
     bins = np.arange(time_values[0], time_values[-1] + interval, interval)
 
@@ -16,6 +42,14 @@ def resample_time_series(time_values, data_values, interval = 5):
     return new_time, new_data
 
 def testing():
+    """
+    Resample a noisy sine and plot it against the original.
+
+    Returns
+    -------
+    None
+        Shows the comparison plot.
+    """
 
     import matplotlib.pyplot as plt
 

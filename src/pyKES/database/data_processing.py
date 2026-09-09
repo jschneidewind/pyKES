@@ -1,3 +1,39 @@
+"""Read raw measurement files into a dataset, and reprocess them later.
+
+The pipelines here all have the same three-callable shape, supplied by the
+embedding app:
+
+* ``metadata_retrival_function(name_or_file, overview_df) -> metadata_dict``
+* ``raw_data_reading_function(source, metadata_dict) -> raw_data_dict``
+* ``processing_function(raw_data_dict, metadata_dict) -> processed_data_dict``
+
+Each successfully processed file becomes an
+`pyKES.database.database_experiments.Experiment` in the dataset, stamped with
+the version of the code that produced it. A file whose processing raises is
+reported with its traceback and skipped rather than aborting the run — with a
+plate of a hundred wells, one unreadable file should not cost the other
+ninety-nine.
+
+There are three entry points, which differ in how they are driven rather than
+in what they do:
+
+* `read_in_experiments_multiprocessing` spreads the files over a
+  `concurrent.futures.ProcessPoolExecutor`. The fastest option, and the reason
+  the processing callables must be importable at module level: closures and
+  lambdas cannot be sent to a subprocess.
+* `read_in_experiments_single_threaded` walks the overview sheet in order,
+  reporting progress through an optional callback.
+* `ingest_experiment` performs a single experiment, so a caller can drive the
+  loop itself. This is what the Streamlit page does, one experiment per rerun,
+  to keep its progress bar alive in the browser; see
+  `pyKES.streamlit_app.chunked_processing`.
+
+The second half of the module reruns the processing step against raw data
+already stored in a dataset (`reprocess_experiments`), which is how an improved
+algorithm is applied to finished HDF5 files without the original instrument
+files. See ``docs/versioning_and_reprocessing.md``.
+"""
+
 import os
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
@@ -61,6 +97,28 @@ def resolve_external_version(database: ExperimentalDataset,
     return (database.version or {}).get('external_version') or None
 
 def generate_list_of_files(keywords, directory):
+    """
+    List the files of a directory whose name contains one of the keywords.
+
+    Parameters
+    ----------
+    keywords : list of str
+        Substrings matched against the file names. A file matching any of them
+        is included.
+    directory : str
+        Directory listed.
+
+    Returns
+    -------
+    list of str
+        Matching paths, each joined onto `directory`.
+
+    Notes
+    -----
+    Files beginning with ``'~$'`` are skipped: those are the lock files Excel
+    leaves beside an open workbook, and they match the same keywords as the
+    workbook itself.
+    """
 
     files = [
         os.path.join(directory, file) 
@@ -80,14 +138,43 @@ def read_in_single_experiment(file_name: str,
                               legacy_mode = True,
                               external_version: Optional[dict] = None):
     """
-    Legacy mode is for use with file-based processing and use in multi-processing mode.
+    Read, process and wrap one raw-data file as an `Experiment`.
 
-    Non-legacy mode is for use with overview_df-based processing in single-threaded mode, 
-    where the file name is not necessarily the key to retrieve metadata and raw data.
-    In this case, the file name is used as an argument to the metadata retrieval function,
-    which then retrieves the necessary metadata and file paths for raw data reading and processing.
+    The single step every ingestion pipeline of this module is built from.
+    Exceptions raised by any of the three callables are caught and returned as
+    a failed result with its traceback, so one bad file does not abort a run
+    over a whole directory.
 
+    Parameters
+    ----------
+    file_name : str
+        Path to the raw-data file in legacy mode, experiment name otherwise.
+    database : ExperimentalDataset
+        Dataset supplying ``overview_df`` to the metadata retrieval. Not
+        mutated here — the caller adds the returned experiment.
+    metadata_retrival_function : callable
+        ``(file_name, overview_df) -> metadata_dict``. Must return at least
+        ``'experiment_name'``; ``'color'`` and ``'group'`` are optional.
+    raw_data_reading_function : callable
+        ``(source, metadata_dict) -> raw_data_dict``, where the source is
+        `file_name` in legacy mode and `directory` otherwise.
+    processing_function : callable
+        ``(raw_data_dict, metadata_dict) -> processed_data_dict``.
+    directory : Path, optional
+        Directory the raw data is read from in non-legacy mode.
+    legacy_mode : bool, optional
+        Whether the file name identifies the raw data directly (legacy, used by
+        the multiprocessing pipeline) or only names the experiment, leaving the
+        metadata function to resolve the actual files (used by the
+        overview-sheet pipelines).
+    external_version : dict, optional
+        Provenance of the external app, stamped onto the experiment.
 
+    Returns
+    -------
+    dict
+        ``{'success': True, 'data': Experiment}`` or
+        ``{'success': False, 'file': file_name, 'error': message}``.
     """
     
     try:
@@ -363,7 +450,55 @@ def read_in_experiments_multiprocessing(database: ExperimentalDataset,
                                         overview_df_experiment_column: Optional[str] = 'Experiment',
                                         external_version: Optional[dict] = None): 
     """
-    
+    Process raw-data files in parallel and add them to a dataset.
+
+    The fastest of the ingestion entry points: the files are spread over one
+    worker process per CPU. Successfully processed experiments are added to the
+    dataset, failures are reported with their traceback and skipped.
+
+    Two ways of choosing the files are supported. By default, every file of
+    `directory` whose name contains one of `keywords` is processed. With
+    ``overview_df_based_processing=True`` the file names come from the overview
+    sheet instead, which is the right mode when the sheet, not the directory
+    listing, defines the dataset.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset the experiments are added to; mutated in place.
+    metadata_retrival_function : callable
+        ``(file_name, overview_df) -> metadata_dict``.
+    raw_data_reading_function : callable
+        ``(file_name, metadata_dict) -> raw_data_dict``.
+    processing_function : callable
+        ``(raw_data_dict, metadata_dict) -> processed_data_dict``.
+    keywords : list of str, optional
+        Substrings selecting files inside `directory`. Required unless
+        `overview_df_based_processing` is set.
+    directory : str, optional
+        Directory the raw-data files are read from.
+    overview_df_based_processing : bool, optional
+        Take the file names from ``overview_df`` rather than from a directory
+        listing.
+    overview_df_experiment_column : str, optional
+        Column of ``overview_df`` holding the file names, in that mode.
+    external_version : dict, optional
+        Provenance of the external app, stamped onto every processed
+        experiment. Defaults to the dataset's own
+        ``version['external_version']``.
+
+    Returns
+    -------
+    list of dict
+        One result dict per file, as returned by `read_in_single_experiment`.
+
+    Notes
+    -----
+    The three callables are sent to worker processes and must therefore be
+    importable at module top level — no closures, no lambdas, no locally
+    defined functions. This is also why the browser deployment cannot use this
+    entry point: Pyodide has no processes to fork. Use
+    `read_in_experiments_single_threaded` or `ingest_experiment` there.
     """
 
     if overview_df_based_processing:
@@ -609,7 +744,20 @@ def reprocess_experiments(database: ExperimentalDataset,
 
 
 def testing():
-    
+    """
+    Ingest a directory of measurement files through the overview sheet.
+
+    Exercises the single-threaded pipeline end to end against the fixtures in
+    ``src/tests/data``: read the overview workbook, build a dataset carrying
+    the app's group mapping and plotting instructions, and process every
+    experiment the sheet lists.
+
+    Returns
+    -------
+    None
+        Prints one processed experiment.
+    """
+
     from tests.data.processing_functions_overview_df import (metadata_retrival_function, 
                                                              raw_data_reading_function, 
                                                              processing_function)

@@ -8,7 +8,7 @@ table whose rows are the experiments and whose columns are the analysis
 quantities.
 
 The columns are defined by the external app through the
-``results_table_instructions`` entry of ``ExperimentalDataset.plotting_instruction``:
+``results_table_instructions`` entry of ``ExperimentalDataset.plotting_instruction``::
 
     'results_table_instructions': {
         'Max. rate (mmol/h/g)': {'result': 'processed_data/max_rate_mmol_h_g'},

@@ -4,8 +4,8 @@ This document describes the release process for publishing pyKES to TestPyPI and
 
 ## 1. Pre-release checklist
 
-1. Update version in [pyproject.toml](../pyproject.toml).
-2. Update [CHANGELOG.md](../CHANGELOG.md).
+1. Update version in [pyproject.toml](https://github.com/jschneidewind/pyKES/blob/main/pyproject.toml).
+2. Update [CHANGELOG.md](https://github.com/jschneidewind/pyKES/blob/main/CHANGELOG.md).
 3. Ensure tests pass locally:
 
 ```bash
@@ -88,5 +88,5 @@ pip install pyKES==0.1.1
 ## 6. Post-release
 
 1. Create a GitHub Release for the tag.
-2. Copy key notes from [CHANGELOG.md](../CHANGELOG.md).
+2. Copy key notes from [CHANGELOG.md](https://github.com/jschneidewind/pyKES/blob/main/CHANGELOG.md).
 3. Open a follow-up issue for the next version milestone.

@@ -1,10 +1,51 @@
+"""Resolve slash-separated paths into experiment objects.
+
+Model definitions in `pyKES.fitting_ODE` do not carry values, they carry
+*paths*: an initial condition is written as
+``'experiment_metadata/ru_concentration_uM'`` and resolved against each
+experiment in turn, so one model definition covers a whole dataset of
+experiments run under different conditions.
+
+`resolve_experiment_attributes` walks a template dictionary and replaces every
+such path with the value it points at, following both object attributes and
+dictionary keys. Its three modes decide how strict that has to be: a photon
+flux missing from an experiment is a mistake worth raising on, whereas a
+species that simply was not measured in one run should just be skipped.
+"""
+
+
 def resolve_path_slash(path_string, obj):
         """
         Resolve a slash-separated path through object attributes and dict keys.
         
-        Handles dict keys that contain '/' by trying the longest possible match first.
-        For example, 'metadata/Catalyst loading [wt% Rh/Cr]' will correctly resolve
-        to obj.metadata['Catalyst loading [wt% Rh/Cr]'] even though the key contains '/'.
+        Attributes and dictionary keys are followed alike, so a path may cross
+        freely between the two.
+
+        Parameters
+        ----------
+        path_string : str
+            Slash-separated path, e.g. ``'metadata/Temperature_C'``.
+        obj : object
+            Object the path is resolved against.
+
+        Returns
+        -------
+        object
+            The value the path points at.
+
+        Raises
+        ------
+        ValueError
+            If a component of the path cannot be resolved, listing the keys
+            that were tried and what was available.
+
+        Notes
+        -----
+        Keys may themselves contain ``'/'`` — metadata columns such as
+        ``'Catalyst loading [wt% Rh/Cr]'`` do — so the components are joined
+        back together greedily, longest candidate first, and
+        ``'metadata/Catalyst loading [wt% Rh/Cr]'`` resolves as the two-part
+        path it was meant to be.
         """
         current = obj
         components = path_string.split('/')
@@ -140,9 +181,26 @@ def resolve_experiment_attributes(template_dict, experiment, mode='strict'):
 
 
 def testing():
+    """
+    Resolve a template against a stand-in experiment in permissive mode.
+
+    The template covers the awkward cases: a key containing ``'/'``, a nested
+    path several levels deep, a path that cannot be resolved at all, and a
+    literal string that must be passed through untouched rather than treated as
+    a path.
+
+    Returns
+    -------
+    None
+        Prints the resolved dictionary.
+    """
 
     class Experiment:
+        """Minimal stand-in carrying only the metadata the template needs."""
+
         def __init__(self):
+            """Populate the metadata dictionary used by the demo."""
+
             self.metadata = {
                 'Catalyst loading [wt% Rh/Cr]': 5.0,
                 'Temperature_C': 350,

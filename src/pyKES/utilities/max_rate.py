@@ -1843,6 +1843,22 @@ def plot_max_rate(result, time, values, axes=None):
 
 
 def test_function():
+    """
+    Run the pipeline against synthetic data with a known true rate.
+
+    The trace is built to contain exactly the three disturbances the module is
+    designed for, and nothing else: a slow baseline wave whose local slope
+    rivals the true rate, one bubble artifact whose instantaneous slope is
+    seventy-five times it, and white noise. The true rate is 0.02 umol/s after
+    an induction period, so the printed result can be checked against it
+    directly.
+
+    Returns
+    -------
+    None
+        Prints the extracted rate, the cross-check and the fitted noise
+        structure, and shows the two-panel diagnostic figure.
+    """
 
     import matplotlib.pyplot as plt
 
@@ -1878,6 +1894,19 @@ def test_function():
     plt.show()
 
 def test_function_experimental_data():
+    """
+    Run the pipeline against a measured trace read from a CSV file.
+
+    The counterpart to `test_function`: no ground truth to compare against, so
+    the diagnostic figure is the whole output. Reads a two-column
+    ``time, amount`` file from a local path, which has to be edited to point at
+    a file that exists.
+
+    Returns
+    -------
+    None
+        Shows the two-panel diagnostic figure.
+    """
 
     from pyKES.database.database_experiments import ExperimentalDataset
     import matplotlib.pyplot as plt

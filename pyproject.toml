@@ -35,10 +35,27 @@ dependencies = [
     "openpyxl",  
 ]
 
+[project.optional-dependencies]
+docs = [
+    "sphinx>=7.2",
+    "sphinx-rtd-theme>=2.0",
+    "sphinx-copybutton>=0.5",
+    "sphinx-design>=0.5",
+    "sphinxcontrib-mermaid>=0.9",
+    "myst-parser>=2.0",
+    "linkify-it-py>=2.0",
+]
+dev = [
+    "pyKES[docs]",
+    "pytest",
+]
+
 [project.urls]
 "Homepage" = "https://github.com/jschneidewind/pyKES"
 "Bug Tracker" = "https://github.com/jschneidewind/pyKES/issues"
 "Source" = "https://github.com/jschneidewind/pyKES"
+"Documentation" = "https://pykes.readthedocs.io"
+"Changelog" = "https://github.com/jschneidewind/pyKES/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -24,7 +24,7 @@ plot_max_rate(result, time, amount)         # two-panel diagnostic figure
 
 ## 0. Units
 
-Inputs and outputs are [`Quantity`](../src/pyKES/utilities/unit_handler/quantity.py)
+Inputs and outputs are [`Quantity`](https://github.com/jschneidewind/pyKES/blob/main/src/pyKES/utilities/unit_handler/quantity.py)
 objects, so a result carries its own units and nothing depends on what the
 caller happened to record in:
 

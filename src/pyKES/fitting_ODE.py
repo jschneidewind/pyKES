@@ -1,3 +1,30 @@
+"""Fit the rate constants of a reaction network to experimental data.
+
+`Fitting_Model` holds a reaction network whose rate constants are unknown,
+together with the experiments it should reproduce, and searches for the
+constants that minimize the disagreement. `objective_function` is the bridge
+between the two: for a trial set of rate constants it integrates the network
+once per experiment and accumulates the loss.
+
+Two things make the fit work across a whole dataset rather than one curve:
+
+* **Per-experiment conditions are resolved from the experiments themselves.**
+  Initial conditions, multipliers and time grids are given as *paths* into an
+  `pyKES.database.database_experiments.Experiment` (for example
+  ``'experiment_metadata.ru_concentration_uM'``), resolved by
+  `pyKES.utilities.resolve_attributes.resolve_experiment_attributes`. One model
+  definition therefore covers experiments run at different concentrations,
+  light intensities and durations.
+* **Experiments can be weighted.** An entry of ``experiments`` may be a bare
+  experiment or an ``(experiment, weight)`` tuple, so a noisy or atypical run
+  can be down-weighted instead of dropped.
+
+The loss functions at the top of the module select *what* is compared. Fitting
+the derivative (`square_loss_ydiff`) rather than the integrated trace is often
+the better choice for evolved-gas measurements, where a constant offset in the
+accumulated amount says nothing about the kinetics.
+"""
+
 import numpy as np
 from scipy.optimize import differential_evolution, dual_annealing, minimize
 from types import SimpleNamespace
@@ -9,6 +36,20 @@ from pyKES.reaction_ODE import solve_ode_system, parse_reactions, calculate_exci
 from pyKES.database.database_experiments import ExperimentalDataset
 from pyKES.utilities.resolve_attributes import resolve_experiment_attributes
 from pyKES.utilities.make_json_serializable import make_json_serializable
+
+# The module namespace also holds SciPy's `minimize`, `differential_evolution`
+# and `dual_annealing`, whose names are generic enough to be worth keeping out
+# of a star import — and out of the generated API reference.
+__all__ = [
+    'square_loss_time_series',
+    'square_loss_time_series_normalized',
+    'square_loss_max_rate_ydiff',
+    'square_loss_ydiff',
+    'Fitting_Model',
+    'objective_function',
+    'test_function',
+]
+
 
 def square_loss_time_series(model_data, experimental_data, **kwargs):
     '''
@@ -162,15 +203,6 @@ class Fitting_Model:
     result : OptimizeResult
         Optimization result object (set after calling optimization methods)
     
-    Methods
-    -------
-    optimize(workers=-1, disp=True)
-        Optimize rate constants using differential evolution algorithm
-    optimize_dual_annealing()
-        Optimize rate constants using dual annealing algorithm
-    minimize(x0, method='L-BFGS-B')
-        Optimize rate constants using local minimization
-    
     Examples
     --------
     >>> reactions = ['[RuII] + [S2O8] > [RuIII] + [SO4], k1 ; hv_functionA',
@@ -183,6 +215,27 @@ class Fitting_Model:
     """
 
     def __init__(self, reaction_network: list, **kwargs):
+        """
+        Initialize the fitting model and parse its reaction network.
+
+        Parameters
+        ----------
+        reaction_network : list of str
+            Reactions in the string format of
+            `pyKES.reaction_ODE.parse_reactions`.
+        **kwargs
+            ``fixed_rate_constants``, ``rate_constants_to_optimize``,
+            ``data_to_be_fitted``, ``initial_conditions``,
+            ``other_multipliers``, ``times``, ``experiments``,
+            ``loss_function`` and ``x0``, as documented on the class. Each
+            defaults to an empty container or None, so a model is normally
+            built by assigning to the attributes after construction.
+
+        Returns
+        -------
+        None
+        """
+
         self.reaction_network = reaction_network
         self.fixed_rate_constants: dict = kwargs.get('fixed_rate_constants', {})
         self.rate_constants_to_optimize: dict = kwargs.get('rate_constants_to_optimize', {})
@@ -200,6 +253,40 @@ class Fitting_Model:
                  workers = -1, 
                  disp = True, 
                  print_results = True):
+        """
+        Fit the rate constants by differential evolution.
+
+        The default optimizer of this module. Rate constants of a
+        photochemical network span many orders of magnitude and the loss
+        surface has many local minima, so a global search is needed; a local
+        method such as `minimize` is best used afterwards to polish the
+        result.
+
+        Parameters
+        ----------
+        workers : int, optional
+            Processes used for the population, as in
+            `scipy.optimize.differential_evolution`. ``-1`` uses every
+            available core. Requires the loss function and every multiplier
+            function to be importable at module level, since the population is
+            evaluated in subprocesses.
+        disp : bool, optional
+            Print the best loss of every generation while the fit runs.
+        print_results : bool, optional
+            Print the optimizer result together with the fitted and fixed rate
+            constants when the fit has finished.
+
+        Returns
+        -------
+        None : None
+            The result is stored as ``self.result``; the fitted values are in
+            ``self.result.x``, in the order of ``rate_constants_to_optimize``.
+
+        Notes
+        -----
+        Updating is deferred rather than immediate, which is what allows the
+        population to be evaluated in parallel.
+        """
 
         bounds = list(self.rate_constants_to_optimize.values())
 
@@ -221,7 +308,19 @@ class Fitting_Model:
             pprint(self.fixed_rate_constants)
 
     def optimize_dual_annealing(self):
-        
+        """
+        Fit the rate constants by dual annealing.
+
+        An alternative global optimizer, single-process and often better at
+        escaping a narrow local minimum than differential evolution, at the
+        cost of not using multiple cores.
+
+        Returns
+        -------
+        None : None
+            The result is stored as ``self.result`` and printed.
+        """
+
         bounds = list(self.rate_constants_to_optimize.values())
 
         self.result = dual_annealing(
@@ -233,6 +332,26 @@ class Fitting_Model:
         print(self.result)
 
     def minimize(self, x0, method = 'L-BFGS-B'):
+        """
+        Refine the rate constants by local minimization.
+
+        Intended as a polishing step after a global search, started from the
+        values that search returned. Note that the bounds in
+        ``rate_constants_to_optimize`` are *not* applied here, so a local run
+        may leave the range the global search was confined to.
+
+        Parameters
+        ----------
+        x0 : array_like
+            Starting values, in the order of ``rate_constants_to_optimize``.
+        method : str, optional
+            Any method accepted by `scipy.optimize.minimize`.
+
+        Returns
+        -------
+        None : None
+            The result is stored as ``self.result`` and printed.
+        """
 
         self.result = minimize(
             objective_function,
@@ -245,8 +364,24 @@ class Fitting_Model:
 
     def visualize_optimization_results(self, ax = None):
         """
+        Plot fitted curves against the experimental data they were fitted to.
 
+        Every experiment is drawn in its own color, the measurement as points
+        and the model as a line, so systematic misfits stand out per experiment
+        rather than being hidden in the total loss.
+
+        Requires one of the optimization methods to have been run.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes drawn on. A new figure is created when omitted.
+
+        Returns
+        -------
+        None
         """
+
         error, model_results = objective_function(self.result.x, self, return_full = True)
 
         if ax is None:
@@ -417,13 +552,15 @@ def objective_function(rate_constants_to_optimize,
     Notes
     -----
     The function performs the following steps for each experiment:
-    1. Combines optimized rate constants with fixed rate constants
-    2. Resolves experiment-specific attributes (initial conditions, multipliers, times, data)
-        Note: data_to_be_fitted and initial_conditions is resolved in 'semi-strict' mode, 
-        meaning only at least one entry must resolved
-    3. Solves the ODE system using the reaction network and rate constants
-    4. Calculates error between model predictions and experimental data using the loss function
-    5. Accumulates weighted errors across all experiments
+
+    1. Combines optimized rate constants with fixed rate constants.
+    2. Resolves experiment-specific attributes (initial conditions, multipliers,
+       times, data). ``data_to_be_fitted`` and ``initial_conditions`` are
+       resolved in 'semi-strict' mode, meaning at least one entry must resolve.
+    3. Solves the ODE system using the reaction network and rate constants.
+    4. Calculates the error between model predictions and experimental data
+       using the loss function.
+    5. Accumulates weighted errors across all experiments.
     
     Experiments can be provided as single objects (weight=1.0) or as (experiment, weight) tuples
     to allow differential weighting of experiments in the optimization.
@@ -504,6 +641,25 @@ def objective_function(rate_constants_to_optimize,
 
 
 def test_function(dataset): 
+    """
+    Fit the Ru(bpy)3 / persulfate network to a measured dataset.
+
+    Demonstrates the intended workflow end to end: load an HDF5 dataset,
+    declare which rate constants are fixed and which are searched within
+    bounds, point the initial conditions and the photon flux at per-experiment
+    metadata, and fit the O2 evolution rate across sixteen experiments at once.
+
+    Parameters
+    ----------
+    dataset : str
+        Path to an HDF5 dataset written by
+        `pyKES.database.database_experiments.ExperimentalDataset.save_to_hdf5`.
+
+    Returns
+    -------
+    None
+        Runs the optimization and shows the resulting figure.
+    """
 
     dataset = ExperimentalDataset.load_from_hdf5(dataset)
     dataset.update_reaction_data()

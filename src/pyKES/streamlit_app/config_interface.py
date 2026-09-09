@@ -65,6 +65,15 @@ class FileUploadHandler:
     processing_function: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]] = None
 
     def __post_init__(self) -> None:
+        """
+        Derive a session-state key from the label when none was given.
+
+        Returns
+        -------
+        None : None
+            ``self.file_storage_key`` is filled in place.
+        """
+
         # Derive a stable session-state key from the label, e.g.
         # "Upload Data (CSV)" -> "upload_data_csv".
         if self.file_storage_key is None:

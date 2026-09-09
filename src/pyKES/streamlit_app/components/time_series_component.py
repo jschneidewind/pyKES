@@ -4,7 +4,7 @@ Time-Series Data Visualization
 This module provides a Streamlit interface for plotting the time-series data of
 selected experiments. Experiments are picked through group expanders and the
 curves to plot are defined by the external app through the
-``time_series_instructions`` entry of ``ExperimentalDataset.plotting_instruction``:
+``time_series_instructions`` entry of ``ExperimentalDataset.plotting_instruction``::
 
     'time_series_instructions': {
         'Reaction (O2)': {

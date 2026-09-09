@@ -1,3 +1,31 @@
+"""HDF5-backed storage for experimental datasets.
+
+An `ExperimentalDataset` is the single object every other part of pyKES reads
+from: the fitting code takes its experiments, the Streamlit pages render them,
+and the analysis utilities write their results back into them. It holds a
+mapping of `Experiment` objects, an overview DataFrame describing them, and
+the dataset-level configuration an embedding app supplies (plotting
+instructions, group mapping, processing parameters).
+
+Each `Experiment` keeps three dictionaries side by side: the ``metadata`` read
+from the overview sheet, the ``raw_data`` as measured, and the
+``processed_data`` a processing function derived from them. Keeping the raw
+data in the file is what makes `pyKES.database.data_processing.reprocess_experiments`
+possible — an improved algorithm can be applied to a finished dataset without
+going back to the original instrument files.
+
+Datasets round-trip through HDF5. Nested dictionaries become nested groups,
+NumPy arrays are stored natively, and anything else falls back to JSON and then
+to pickle, so a processing function is free to return whatever structure suits
+it. Keys containing ``'/'`` — common in metadata columns such as
+``'Catalyst loading [wt% Rh/Cr]'`` — are escaped, since HDF5 would otherwise
+read them as path separators.
+
+Every file records a `SCHEMA_VERSION` and a provenance dictionary naming the
+pyKES version, the embedding app's version and the relevant timestamps; see
+`pyKES.utilities.version_information` and ``docs/versioning_and_reprocessing.md``.
+"""
+
 import pandas as pd
 import numpy as np
 import h5py
@@ -27,7 +55,24 @@ def import_overview_excel(file_name,
                           dtype = None):
     
     '''
-    Import the overview Excel sheet as a DataFrame.
+    Read the overview sheet describing a set of experiments.
+
+    Parameters
+    ----------
+    file_name : str
+        Path to the Excel workbook.
+    sheet_name : str
+        Sheet holding the overview table.
+    dtype : dict, optional
+        Per-column dtypes handed to `pandas.read_excel`. Worth setting for
+        columns pandas would otherwise guess wrongly — flag columns such as
+        ``'Processed'`` are compared as the strings ``'True'`` / ``'False'``
+        elsewhere and should be read with ``str``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The overview sheet.
     '''
 
     df = pd.read_excel(file_name, 
@@ -75,10 +120,34 @@ def _sanitize_hdf5_key(key: Any) -> str:
 
 def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
     """
-    Recursively save nested dictionaries to HDF5 group.
-    Handles numpy arrays, basic Python types, and nested structures.
-    
-    Note: Replaces '/' in keys with '__SLASH__' to avoid HDF5 path conflicts.
+    Write a nested dictionary into an HDF5 group.
+
+    Nested dictionaries become nested HDF5 paths. NumPy arrays and scalars are
+    stored natively; lists and tuples are converted to arrays where possible
+    and serialized as JSON otherwise; anything left is pickled. The fallbacks
+    exist because processing functions may return arbitrary structures, and a
+    dataset that cannot be written is worse than one written inefficiently. The
+    encoding used is recorded in the dataset's ``type`` attribute so
+    `load_nested_dict_from_hdf5` can undo it.
+
+    Parameters
+    ----------
+    group : h5py.Group
+        Group written into.
+    data_dict : dict
+        Dictionary to store. Non-string keys are stringified.
+    prefix : str, optional
+        Path prefix within the group. Set by the recursion.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    ``'/'`` in a key is replaced by ``'__SLASH__'``, since HDF5 would otherwise
+    read it as a path separator and split the key into two groups. Metadata
+    columns such as ``'Catalyst loading [wt% Rh/Cr]'`` make this a real case.
     """
     for key, value in data_dict.items():
         # Replace '/' in keys to avoid HDF5 path interpretation issues.
@@ -132,13 +201,29 @@ def save_nested_dict_to_hdf5(group, data_dict, prefix=""):
 
 def load_nested_dict_from_hdf5(group, prefix=""):
     """
-    Recursively load nested dictionaries from HDF5 group.
-    
-    Note: Restores '__SLASH__' in keys back to '/' after loading.
+    Read a nested dictionary back out of an HDF5 group.
+
+    Inverse of `save_nested_dict_to_hdf5`: the group is walked recursively, the
+    encoding recorded on each dataset is undone, and the path of each dataset
+    is split back into nested dictionary keys.
+
+    Parameters
+    ----------
+    group : h5py.Group
+        Group read from.
+    prefix : str, optional
+        Path prefix stripped from the dataset names before they become keys.
+
+    Returns
+    -------
+    dict
+        The reconstructed nested dictionary, with ``'__SLASH__'`` restored to
+        ``'/'`` in the keys.
     """
     result = {}
     
     def visit_func(name, obj):
+        """Rebuild one dataset into its place in the nested result."""
         if isinstance(obj, h5py.Dataset):
             # Remove prefix from name
             key = name[len(prefix):].lstrip('/') if prefix else name
@@ -270,7 +355,20 @@ class ExperimentalDataset:
     schema_version: Optional[str] = None
 
     def add_experiment(self, experimental_data: 'Experiment'):
-        """Add an experiment to the dataset"""
+        """
+        Add an experiment to the dataset, keyed by its name.
+
+        An experiment whose name is already present is replaced.
+
+        Parameters
+        ----------
+        experimental_data : Experiment
+            Experiment to add.
+
+        Returns
+        -------
+        None
+        """
         self.experiments[experimental_data.experiment_name] = experimental_data
 
     # -----------------------------------------------------------------
@@ -404,7 +502,23 @@ class ExperimentalDataset:
 
     def save_to_hdf5(self, filename: str):
         """
-        Save experiments to HDF5 file.
+        Write the whole dataset to an HDF5 file.
+
+        The file is written from scratch, so it always reflects the dataset as
+        it is now. The overview DataFrame, the schema version and the
+        dataset-level configuration go into the file root; each experiment
+        becomes a group holding its metadata, raw data and processed data. The
+        dataset is version-stamped as part of the save, so every file records
+        which code wrote it and when.
+
+        Parameters
+        ----------
+        filename : str
+            Path written to. An existing file is overwritten.
+
+        Returns
+        -------
+        None
         """
         with h5py.File(filename, 'w') as f:
             if not self.overview_df.empty:
@@ -462,7 +576,23 @@ class ExperimentalDataset:
     @classmethod
     def load_from_hdf5(cls, filename: str):
         """
-        Load experiments from HDF5 file.
+        Read a dataset back from an HDF5 file.
+
+        Parameters
+        ----------
+        filename : str
+            Path to a file written by `save_to_hdf5`.
+
+        Returns
+        -------
+        ExperimentalDataset
+            The reconstructed dataset.
+
+        Notes
+        -----
+        Files predating schema 1.1 carry neither a dataset-level nor a
+        per-experiment ``version`` attribute; those fields come back empty
+        rather than raising, so older files stay readable.
         """
 
         dataset = cls()
@@ -525,16 +655,22 @@ class ExperimentalDataset:
     
     def list_experiments(self) -> List[str]:
         """
-        List all experiments in the dataset
-        
-        Returns:
-            List[str]: A sorted list of experiment names
+        Names of all experiments in the dataset.
+
+        Returns
+        -------
+        list of str
+            Experiment names, sorted alphabetically.
         """
         return sorted(self.experiments.keys())
 
     def print_experiments(self):
         """
-        Print all experiments in the dataset in a formatted way
+        Print a numbered list of the experiments in the dataset.
+
+        Returns
+        -------
+        None
         """
         if not self.experiments:
             print("No experiments in dataset")
@@ -635,7 +771,19 @@ class ExperimentalDataset:
         return merged_dataset
 
 def usage_example():
-    """Demonstrate basic ExperimentalDataset functionality."""
+    """
+    Build, save and reload a small dataset.
+
+    Covers the round trip the class exists for, including the parts that are
+    easy to get wrong: nested dictionaries inside ``processed_data``, NumPy
+    arrays in ``raw_data``, and dataset-level configuration stored as file
+    attributes.
+
+    Returns
+    -------
+    None
+        Writes ``src/tests/experiments.h5`` and prints what it reads back.
+    """
     
 
 
