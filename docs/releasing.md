@@ -102,6 +102,14 @@ existed, so `pip install pyKES` at that version gets a tree with no
 The image workflow gates on the test suite; the PyPI workflow does not, and
 adding `needs: [tests]` to it would be a reasonable next change.
 
+One thing to write into the release notes when it applies: whether the release
+changes `INDEX_SCHEMA_VERSION`. `photocat-app` stamps the index with the
+version it writes at startup, and the supported set is an exact match, so
+after such a release the previous image can no longer open the index — a
+rollback has to restore the data alongside the image (`photocat-rollback
+--with-data`). It is the one release note the operator cannot infer from the
+tag. See [deployment.md](deployment.md) §5.
+
 ---
 
 ## 7. Post-release

@@ -32,6 +32,7 @@ pip install -e <path-to-pyKES>
 - [src/pyKES/database_app/](src/pyKES/database_app/) — the photocatalysis database application, which unlike the processing UI is a complete app rather than a library:
   - [Home.py](src/pyKES/database_app/Home.py) and [pages/](src/pyKES/database_app/pages/) — the entry script and its five pages, discovered by Streamlit from inside the installed package.
   - [launch.py](src/pyKES/database_app/launch.py) — the `photocat-app` console script; resolves the entry script from the package and verifies the data root before handing over.
+  - [page.py](src/pyKES/database_app/page.py) — `configure_page`, the preamble every page script starts with: page configuration, stylesheet, and the banner shown when this is not production. New pages call it rather than repeating the three lines.
   - [config.py](src/pyKES/database_app/config.py) — `DatabaseAppConfig`, every field read from `PHOTOCAT_*`.
   - [deployment.py](src/pyKES/database_app/deployment.py) — which version is running, against which database.
   - [rebuild_cli.py](src/pyKES/database_app/rebuild_cli.py) — the `photocat-rebuild` command.

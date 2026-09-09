@@ -353,6 +353,15 @@ photocat-rollback --with-data    # and the pre-update snapshot
 Only pass `--with-data` if the update ran a migration or a rebuild. Restoring
 the data unnecessarily discards whatever was uploaded since the snapshot.
 
+**One case where `--with-data` is not optional**: a release that changes
+`INDEX_SCHEMA_VERSION`. `photocat-app` stamps the index with the version it
+writes at startup, and `SUPPORTED_SCHEMA_VERSIONS` is an exact-match tuple, so
+once the new image has opened the index the *previous* image can no longer
+read it. A code-only rollback then fails at the health poll with maintenance
+still on, which is a discovery to make on staging rather than during a
+rollback. Whenever the release notes mention a schema version, roll back with
+the data.
+
 The image half is fast because the previous image is still on disk — which is
 why the prune policy must **never** be `docker image prune -a`. That is exactly
 the command that deletes your rollback target:
@@ -408,16 +417,47 @@ Run it with the application stopped:
 ```bash
 photocat-maintenance on
 photocat-backup pre-rebuild
-photocat-rebuild --dry-run                      # what it will re-read, as what
+photocat run --rm --entrypoint photocat-rebuild app --dry-run   # what it will
+                                                                # re-read, as what
 photocat stop app
 photocat run --rm --entrypoint photocat-rebuild app --yes
 photocat up -d app
 photocat-maintenance off
 ```
 
+Both `photocat-rebuild` invocations go through the container. The operator
+scripts (`photocat`, `photocat-maintenance`, `photocat-backup`) live on the
+host, but the package does not: nothing outside the image installs it, so a
+bare `photocat-rebuild` is not a command on this droplet. `PHOTOCAT_DATA_ROOT`
+is set in the compose environment rather than in your shell, too, so even
+where the command exists it would look for `~/.photocat` and stop. If you
+built the optional operator virtual environment from
+[server_provisioning.md](server_provisioning.md) §3, its form is
+`sudo -u photocat env PHOTOCAT_DATA_ROOT=/srv/photocat/data
+/srv/photocat/venv/bin/photocat-rebuild --dry-run` — the data root spelled
+out, every time.
+
+The dry run is safe to run against an index the version check refuses, and it
+is safe to stop after it. The version stamp is what the check reads, and only
+a *committed* rebuild writes it — so a dry run, a `--backfill-paths`, or a
+rebuild that fails part-way all leave the refusal in place, and the
+application still will not start until the real rebuild has run. That is the
+intended order: find out what the rebuild will do while the app is still
+serving, then stop it and do it.
+
 Rehearse it on staging first, against refreshed data, and compare the entry
 counts by kind and the reference count before and after — those two numbers are
 what a bad rebuild shows up in.
+
+**What a faithful rebuild still rewrites.** Everything the database is asked
+about comes back identical — every entry and its metadata, the reference
+graph, every inherited value, the upload log and the key registry. Two clocks
+do not: `entities.created_at`/`updated_at` are taken from the upload's own
+timestamp rather than from the moment each row was first written, so all the
+entries of one batch share one time instead of keeping the second they were
+each inserted at, and the registry's `first_seen`/`last_seen` move to the
+rebuild. Nothing computes on any of them — they order the admin log and the
+entry page — but do not expect a `created_at` comparison to be a round trip.
 
 **What a rebuild still cannot restore:** corrections made on the entry page.
 `update_entity_metadata` writes to the entity row and there is no journal to
