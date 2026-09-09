@@ -25,6 +25,8 @@ classifiers = [
 ]
 dependencies = [
     "streamlit>=1.49,<2",
+    # Pinned deliberately: a pandas major changes how a cell is *read*, and
+    # that decision is stored. See issue #4 for the migration.
     "pandas<3",
     "numpy",
     "plotly",
