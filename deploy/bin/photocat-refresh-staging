@@ -1,0 +1,35 @@
+#!/bin/bash
+# Point staging at a fresh copy of the production data.
+#
+#   photocat-refresh-staging
+#
+# This is what makes staging worth having: a migration or a rebuild rehearsed
+# against the group's real entries rather than against sixty synthetic ones.
+#
+# No paths are rewritten. Both containers see the data root at
+# /srv/photocat/data — the host directory behind it differs — and
+# uploads.stored_path is stored relative to the upload store, so a copy of the
+# production index resolves its own files here unchanged.
+set -euo pipefail
+
+PHOTOCAT_ROOT="${PHOTOCAT_ROOT:-/srv/photocat}"
+DATA_ROOT="$PHOTOCAT_ROOT/data"
+STAGING_ROOT="$PHOTOCAT_ROOT/staging-data"
+
+photocat stop app-staging || true
+
+mkdir -p "$STAGING_ROOT"
+
+# .backup rather than cp, for the same reason the nightly backup uses it: a
+# copy of index.sqlite without its WAL is missing the most recent commits.
+sqlite3 "$DATA_ROOT/index.sqlite" ".backup '$STAGING_ROOT/index.sqlite'"
+rm -f "$STAGING_ROOT/index.sqlite-wal" "$STAGING_ROOT/index.sqlite-shm"
+
+rsync -a --delete "$DATA_ROOT/uploads/" "$STAGING_ROOT/uploads/"
+rsync -a --delete "$DATA_ROOT/payloads/" "$STAGING_ROOT/payloads/"
+
+chown -R 10001:10001 "$STAGING_ROOT"
+
+photocat up -d app-staging
+
+echo "staging refreshed from production"

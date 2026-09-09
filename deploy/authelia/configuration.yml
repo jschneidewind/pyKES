@@ -1,0 +1,84 @@
+# Authelia for the photocatalysis database. Install as
+# /srv/photocat/authelia/config/configuration.yml, which compose mounts at
+# /config.
+#
+# Substitute the names before use: photocat.example.de,
+# photocat-test.example.de, auth.example.de, example.de.
+#
+# Secrets are never in this file. They are read from /secrets, which is
+# mounted read-only, and generated once on the host:
+#
+#   for secret in jwt session storage; do
+#     openssl rand -hex 48 > /srv/photocat/authelia/secrets/${secret}.secret
+#   done
+
+theme: light
+default_redirection_url: https://photocat.example.de/
+
+server:
+  # 0.0.0.0 inside the container, not 127.0.0.1: the container's own loopback
+  # is unreachable from host nginx. The confinement is the "127.0.0.1:9091"
+  # publish in compose.yaml.
+  address: 'tcp://0.0.0.0:9091'
+
+log:
+  level: info
+  # No file path: writing to stdout is what makes `docker compose logs
+  # authelia` work and leaves rotation to the logging driver.
+
+identity_validation:
+  reset_password:
+    jwt_secret_file: /secrets/jwt.secret
+
+authentication_backend:
+  # A YAML file is the right backend for a research group. Point this at LDAP
+  # instead if the institution offers one and you want accounts to follow
+  # employment automatically.
+  file:
+    path: /config/users.yml
+    password:
+      algorithm: argon2id
+
+access_control:
+  default_policy: deny
+  rules:
+    # Two factors for everyone. There is no public area of this application.
+    - domain: photocat.example.de
+      policy: two_factor
+
+    # Staging holds a copy of the real data and is where migrations are
+    # rehearsed, so it is not for everyone: a wrong belief about which
+    # instance you are looking at is the mistake that costs real work.
+    - domain: photocat-test.example.de
+      policy: two_factor
+      subject: ["group:admins"]
+
+session:
+  name: authelia_session
+  secret_file: /secrets/session.secret
+  expiration: 12h
+  inactivity: 2h
+  cookies:
+    - domain: example.de
+      authelia_url: https://auth.example.de
+
+regulation:
+  # Locks an account briefly after repeated failures, which is what makes a
+  # password-guessing attempt expensive. It bans by client address, so verify
+  # after the first login that the address in the log is the user's real one
+  # and not 172.17.0.1 — the Docker bridge gateway, which would mean the
+  # lockout hits everybody or nobody.
+  max_retries: 3
+  find_time: 2m
+  ban_time: 10m
+
+storage:
+  encryption_key_file: /secrets/storage.secret
+  local:
+    path: /config/db.sqlite3
+
+notifier:
+  # Enrolment and password-reset messages. A filesystem notifier keeps
+  # everything on this machine; swap in SMTP if the group prefers email.
+  filesystem:
+    filename: /config/notification.txt

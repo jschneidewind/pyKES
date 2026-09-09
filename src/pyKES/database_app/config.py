@@ -1,38 +1,94 @@
 """
 Configuration for the database application.
 
-Everything an installation needs to vary lives here, so the components
-themselves are not edited per deployment — the same convention the processing
-app's `config_interface` follows.
+Everything an installation needs to vary is read from the environment, so the
+deployed unit of code can be an unmodified wheel or container image. A
+deployment that had to edit this file would have to re-apply the edit on every
+update, and the setting it must never lose is `allow_development_login`:
+reverting that one silently turns the application into an unauthenticated
+admin console.
+
+Every variable is named `PHOTOCAT_<SETTING>`, so a deployment is one
+`Environment=` block in a systemd unit or one `environment:` mapping in a
+compose file. See docs/deployment.md.
 """
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from pyKES.database.entity_schema import DEFAULT_SCHEMA_DIRECTORY, load_entity_schemas
 
 
 # =============================================================================
-# Where the data lives
+# Reading settings from the environment
 # =============================================================================
 
-# Overridden by the systemd unit; the default suits a local prototype run.
-DATA_ROOT_VARIABLE = "PHOTOCAT_DATA_ROOT"
+# Shared prefix of every variable this application reads.
+SETTING_PREFIX = "PHOTOCAT_"
+
+# Suits a local prototype run; a deployment always sets PHOTOCAT_DATA_ROOT.
 DEFAULT_DATA_ROOT = Path.home() / ".photocat"
+
+# Accepted as true for a boolean setting. Anything else is false, so a
+# misspelt value fails closed rather than enabling the thing it names.
+TRUE_VALUES = ("1", "true", "yes", "on")
+
+
+def setting_from_environment(name: str, default: Any,
+                             cast: Callable[[str], Any] = str) -> Any:
+    """
+    Read one deployment setting from the environment.
+
+    Parameters
+    ----------
+    name : str
+        Setting name without the `PHOTOCAT_` prefix.
+    default : Any
+        Value used when the variable is unset.
+    cast : callable, optional
+        Converts the raw string to the field's type.
+
+    Returns
+    -------
+    value : Any
+        Converted value, or `default` when the variable is unset.
+    """
+    raw = os.environ.get(f"{SETTING_PREFIX}{name}")
+
+    return default if raw is None else cast(raw)
+
+
+def as_boolean(text: str) -> bool:
+    """
+    Interpret an environment variable as a flag.
+
+    Parameters
+    ----------
+    text : str
+        Raw variable value.
+
+    Returns
+    -------
+    enabled : bool
+        True only for an explicitly affirmative value.
+    """
+    return text.strip().lower() in TRUE_VALUES
 
 
 # =============================================================================
 # Identity
 # =============================================================================
 
-# Header Authelia sets through nginx. Read from the WebSocket request, which is
-# why the proxy must set it on the same location that proxies the upgrade.
+# Headers Authelia sets through nginx. Read from the WebSocket request, which
+# is why the proxy must set them on the same location that proxies the upgrade.
 USER_HEADER = "Remote-User"
 GROUPS_HEADER = "Remote-Groups"
 
-# Group whose members may edit and delete entries they do not own.
+# Group whose members may edit and delete entries they do not own. Overridable
+# because an institution's directory names its groups its own way, and pointing
+# this at an LDAP group should not require a release.
 ADMIN_GROUP = "admins"
 
 # Used only when no proxy header is present, i.e. running the app directly for
@@ -41,10 +97,26 @@ ADMIN_GROUP = "admins"
 DEVELOPMENT_USER = "developer"
 
 
+# =============================================================================
+# Deployment identity, for the version caption
+# =============================================================================
+
+# The value of PHOTOCAT_ENV that means "this is the real thing"; anything else
+# makes the application say so on every page. PHOTOCAT_ENV, PHOTOCAT_IMAGE_TAG
+# and PHOTOCAT_GIT_SHA are set by the container image and the systemd unit and
+# read where they are used, not bound here: a value captured at import is a
+# value no deployment and no test can correct afterwards.
+PRODUCTION_ENVIRONMENT = "production"
+DEVELOPMENT_ENVIRONMENT = "development"
+
+
 @dataclass
 class DatabaseAppConfig:
     """
     Settings for one deployment of the database application.
+
+    Every field reads `PHOTOCAT_<NAME>` from the environment, falling back to
+    the default given here.
 
     Parameters
     ----------
@@ -57,52 +129,101 @@ class DatabaseAppConfig:
     default_columns : list of str
         Effective-metadata keys and ``result:`` labels shown as table columns
         before the user chooses their own.
-    reference_instructions_by_type : dict
+    reference_instructions_by_type : dict, optional
         ``{entity_type: {column: {'role': role}}}`` offered as the default
-        reference declaration when uploading a sheet of that type.
+        reference declaration when uploading a sheet of that type. Left None it
+        is derived from `schema_directory` in `__post_init__`, so a deployment
+        with its own vocabulary cannot end up interpreting the same reference
+        column two different ways; an explicit empty dict declares that this
+        deployment has no reference columns at all.
     page_size : int
         Rows per page of search results.
     allow_development_login : bool
         Whether to fall back to ``DEVELOPMENT_USER`` when no proxy header is
-        present. Must be False in a deployment.
+        present. Defaults to False: the failure mode of the wrong default is
+        silent, since a proxy that stops sending the identity header would
+        otherwise make every visitor an admin called `developer`.
+    user_header, groups_header : str
+        Headers the authenticating proxy sets.
+    admin_group : str
+        Group whose members may edit entries they do not own.
     schema_directory : Path
         Directory of the per-entity-type metadata schemas. Defaults to the ones
         shipped with pyKES; a deployment maintaining its own copy points this at
         it, so the group can edit its vocabulary without touching the package.
     """
 
-    title: str = "Photocatalysis Database"
-    icon: str = ":microscope:"
-    data_root: Path = field(default_factory=lambda: Path(
-        os.environ.get(DATA_ROOT_VARIABLE, DEFAULT_DATA_ROOT)))
+    title: str = field(default_factory=lambda: setting_from_environment(
+        "TITLE", "Photocatalysis Database"))
+    icon: str = field(default_factory=lambda: setting_from_environment(
+        "ICON", ":microscope:"))
+    data_root: Path = field(default_factory=lambda: setting_from_environment(
+        "DATA_ROOT", DEFAULT_DATA_ROOT, Path))
     default_entity_type: str = "experiment"
     default_columns: List[str] = field(default_factory=list)
-    reference_instructions_by_type: Dict[str, Any] = field(default_factory=dict)
-    page_size: int = 50
-    allow_development_login: bool = True
-    schema_directory: Path = DEFAULT_SCHEMA_DIRECTORY
+    reference_instructions_by_type: Optional[Dict[str, Any]] = None
+    page_size: int = field(default_factory=lambda: setting_from_environment(
+        "PAGE_SIZE", 50, int))
+    allow_development_login: bool = field(default_factory=lambda:
+        setting_from_environment("ALLOW_DEV_LOGIN", False, as_boolean))
+    user_header: str = field(default_factory=lambda: setting_from_environment(
+        "USER_HEADER", USER_HEADER))
+    groups_header: str = field(default_factory=lambda: setting_from_environment(
+        "GROUPS_HEADER", GROUPS_HEADER))
+    admin_group: str = field(default_factory=lambda: setting_from_environment(
+        "ADMIN_GROUP", ADMIN_GROUP))
+    schema_directory: Path = field(default_factory=lambda:
+        setting_from_environment("SCHEMA_DIRECTORY", DEFAULT_SCHEMA_DIRECTORY, Path))
 
     def __post_init__(self) -> None:
         self.data_root = Path(self.data_root)
         self.schema_directory = Path(self.schema_directory)
+
+        # Derived rather than passed in, so the declarations an upload is read
+        # with and the ones a correction is re-resolved with come from the same
+        # schemas. Held apart, they drift the moment a deployment maintains its
+        # own vocabulary, and the same column then means two different things.
+        # `None` and `{}` have to stay distinguishable: the first asks for the
+        # schemas' own declarations, the second says this deployment declares
+        # no references at all.
+        if self.reference_instructions_by_type is None:
+            self.reference_instructions_by_type = reference_instructions(
+                self.schema_directory)
 
 
 # =============================================================================
 # The group's own wiring
 # =============================================================================
 
-# Which column of each kind of entry names another entry. Derived from the
-# schema files rather than written twice: a field of type `reference` already
-# says which column it is and what role the link takes, so a second hard-coded
-# copy here could only ever disagree with it.
-GROUP_REFERENCE_INSTRUCTIONS = {
-    entity_type: schema.reference_instructions()
-    for entity_type, schema in load_entity_schemas().items()
-    if schema.reference_instructions()
-}
+def reference_instructions(schema_directory: Path) -> Dict[str, Any]:
+    """
+    Read which column of each kind of entry names another entry.
+
+    Derived from the schema files rather than written twice: a field of type
+    `reference` already says which column it is and what role the link takes,
+    so a second hand-written copy could only ever disagree with it.
+
+    Parameters
+    ----------
+    schema_directory : Path
+        Directory of per-entity-type schema files.
+
+    Returns
+    -------
+    instructions : dict
+        ``{entity_type: {column: {'role': role}}}``, omitting types that
+        declare no references.
+    """
+    schemas = load_entity_schemas(schema_directory)
+
+    return {entity_type: schema.reference_instructions()
+            for entity_type, schema in schemas.items()
+            if schema.reference_instructions()}
+
+
+GROUP_REFERENCE_INSTRUCTIONS = reference_instructions(DEFAULT_SCHEMA_DIRECTORY)
 
 DEFAULT_CONFIG = DatabaseAppConfig(
-    reference_instructions_by_type=GROUP_REFERENCE_INSTRUCTIONS,
     default_columns=["result:Max. rate (umol/s)",
                      "result:Apparent quantum yield (%)"],
 )

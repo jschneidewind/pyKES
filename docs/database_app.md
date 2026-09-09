@@ -3,7 +3,8 @@
 The web application that sits on the index: Phases 3 and 4 of
 [photocatalytic_database.md](photocatalytic_database.md). The data layer it
 reads is documented in [database_index.md](database_index.md); the machine it
-runs on in [server_provisioning.md](server_provisioning.md).
+runs on in [server_provisioning.md](server_provisioning.md); how it is
+deployed and updated in [deployment.md](deployment.md).
 
 ## Trying it
 
@@ -12,17 +13,21 @@ reference chain matches the group's own, then run it:
 
 ```bash
 python -m pyKES.database_app.seed_demo --root /tmp/photocat-demo --fresh
-PHOTOCAT_DATA_ROOT=/tmp/photocat-demo streamlit run src/pyKES/database_app/Home.py
+PHOTOCAT_DATA_ROOT=/tmp/photocat-demo PHOTOCAT_ALLOW_DEV_LOGIN=1 photocat-app
 ```
 
 That gives 60 experiments with real traces, 12 catalyst batches, 6 finished
 semiconductors and 3 precursor chemicals, linked four levels deep. Point
 `--files` at a directory of real exports to seed from those instead.
 
-Running it directly, with no proxy in front, there is no `Remote-User` header —
-so the application says so on the home page and falls back to a development
-identity with admin rights. In a deployment nginx and Authelia sit in front, the
-notice does not appear, and `allow_development_login` should be set to False.
+`PHOTOCAT_ALLOW_DEV_LOGIN=1` is what makes that work, and it has to be asked
+for. Run directly, with no proxy in front, there is no `Remote-User` header, so
+without the variable the application **refuses to serve** rather than falling
+back to a development identity. That default is the way round it is because the
+failure mode of the other one is silent: a deployment whose proxy stopped
+sending the header would have served an unauthenticated admin session and
+attributed every upload to a person who does not exist. With the fallback asked
+for, the home page says so.
 
 ## The pages
 
@@ -381,19 +386,37 @@ Admins can also rebuild the key registry and run `ANALYZE`.
 
 ## Configuration
 
-`DatabaseAppConfig` holds everything a deployment varies; `config.py` also holds
-`GROUP_REFERENCE_INSTRUCTIONS`, which is the one place the group's own chain is
-encoded. Adding a kind of entry means adding it to `ENTITY_TYPES` in
-`index_schema` and, if it references anything, an entry here.
+`DatabaseAppConfig` holds everything a deployment varies, and every field reads
+`PHOTOCAT_<NAME>` from the environment. That matters more than it sounds: it is
+what makes the deployed unit of code an unmodified wheel or image. A deployment
+that had to edit `config.py` would have to re-apply the edit on every update,
+and the edit it must never lose is `allow_development_login`.
 
-```python
-DatabaseAppConfig(
-    data_root=Path("/srv/photocat/data"),   # or $PHOTOCAT_DATA_ROOT
-    default_entity_type="experiment",
-    page_size=50,
-    allow_development_login=False,          # False in a deployment
-)
-```
+| Variable | Default | What it is |
+| --- | --- | --- |
+| `PHOTOCAT_DATA_ROOT` | `~/.photocat` | holds `index.sqlite`, `payloads/`, `uploads/` |
+| `PHOTOCAT_ALLOW_DEV_LOGIN` | `0` | serve a development identity when no proxy header is present |
+| `PHOTOCAT_CREATE_INDEX` | `0` | create an index if the data root has none |
+| `PHOTOCAT_ADMIN_GROUP` | `admins` | group that may edit entries it does not own |
+| `PHOTOCAT_USER_HEADER` | `Remote-User` | header the proxy sets |
+| `PHOTOCAT_GROUPS_HEADER` | `Remote-Groups` | header the proxy sets |
+| `PHOTOCAT_SCHEMA_DIRECTORY` | the shipped schemas | the group's own vocabulary |
+| `PHOTOCAT_PAGE_SIZE` | `50` | rows per page of search results |
+| `PHOTOCAT_TITLE`, `PHOTOCAT_ICON` | — | branding |
+| `PHOTOCAT_ENV` | `development` | anything but `production` puts a banner on every page |
+| `PHOTOCAT_IMAGE_TAG`, `PHOTOCAT_GIT_SHA` | — | shown in the version caption |
+
+Only affirmative values (`1`, `true`, `yes`, `on`) turn a flag on, so a
+misspelt setting fails closed rather than enabling what it names.
+
+`reference_instructions_by_type` is derived from `schema_directory` rather than
+held beside it. A deployment maintaining its own vocabulary previously had its
+uploads read with its own declarations and its corrections re-resolved with the
+shipped ones, so the same reference column meant two different things depending
+on how the value arrived.
+
+Adding a kind of entry means adding it to `ENTITY_TYPES` in `index_schema` and,
+if it references anything, a `reference` field in its schema.
 
 ## Styling
 
@@ -437,6 +460,16 @@ checked against a fixed set rather than interpolated.
 * Deleting an entry is not exposed. `may_edit` decides who could, and the
   cascade to descendants would need designing before it is offered.
 * Key aliasing is reported on the admin page but not yet editable there.
+* **A rebuild reverts corrections made on the entry page.**
+  `update_entity_metadata` writes to the entity row and there is no journal to
+  replay from, so a rebuild — which is the documented repair for a schema
+  change — puts back what the uploads said. `photocat-rebuild` exports them
+  first so they can be re-applied by hand. A corrections journal is a design
+  question rather than a fix: it would make the entity row a second source of
+  truth that has to be replayed in order.
+* A rebuild is a command (`photocat-rebuild`), deliberately not a button on
+  the admin page: it holds the write lock for minutes on a real archive and
+  cannot be safely interrupted by a browser refresh.
 * Bulk correction — the `st.data_editor` patch flow from the plan — is not
   built; corrections are one field at a time on the entry page.
 * Comparison colours come from each experiment's own `color` metadata, as the

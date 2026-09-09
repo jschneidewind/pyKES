@@ -15,11 +15,10 @@ import streamlit as st
 
 from pyKES.database.index_schema import IndexPaths, open_index
 from pyKES.database_app.config import (
-    ADMIN_GROUP,
     DEVELOPMENT_USER,
     DatabaseAppConfig,
-    GROUPS_HEADER,
-    USER_HEADER,
+    as_boolean,
+    setting_from_environment,
 )
 
 
@@ -74,20 +73,22 @@ def read_identity(config: DatabaseAppConfig) -> Identity:
         development fallback.
     """
     headers = st.context.headers or {}
-    name = headers.get(USER_HEADER)
+    name = headers.get(config.user_header)
 
     if not name:
         if not config.allow_development_login:
             raise PermissionError(
-                f"No {USER_HEADER} header: the application is not behind its "
-                f"authenticating proxy, and development login is disabled."
+                f"No {config.user_header} header: the application is not "
+                f"behind its authenticating proxy, and development login is "
+                f"disabled."
             )
-        return Identity(DEVELOPMENT_USER, [ADMIN_GROUP], True, False)
+        return Identity(DEVELOPMENT_USER, [config.admin_group], True, False)
 
     groups = [group.strip() for group in
-              (headers.get(GROUPS_HEADER) or "").split(",") if group.strip()]
+              (headers.get(config.groups_header) or "").split(",")
+              if group.strip()]
 
-    return Identity(name, groups, ADMIN_GROUP in groups, True)
+    return Identity(name, groups, config.admin_group in groups, True)
 
 
 # One connection per thread. A SQLite connection may only be used by the thread
@@ -118,7 +119,11 @@ def open_shared_index(data_root: str):
         _THREAD_STATE.handles = handles
 
     if data_root not in handles:
-        connection = open_index(IndexPaths(root=data_root))
+        # An absent data root is a mount that did not attach or a variable
+        # that was not set, not an invitation to start a second archive
+        # somewhere the backups do not run. Creating one has to be asked for.
+        create = setting_from_environment("CREATE_INDEX", False, as_boolean)
+        connection = open_index(IndexPaths(root=data_root, create=create))
 
         # Ingestion holds the write lock for a second or two on a large batch;
         # a reader that arrives meanwhile should wait rather than fail.
@@ -141,5 +146,12 @@ def index_paths(config: DatabaseAppConfig) -> IndexPaths:
     -------
     paths : IndexPaths
         Filesystem layout.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the data root holds no index and PHOTOCAT_CREATE_INDEX is not set.
     """
-    return IndexPaths(root=config.data_root)
+    return IndexPaths(root=config.data_root,
+                      create=setting_from_environment("CREATE_INDEX", False,
+                                                      as_boolean))

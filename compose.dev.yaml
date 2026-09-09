@@ -1,0 +1,56 @@
+# Development only, and never deployed. Run it with an explicit second -f:
+#
+#   DEV_UID=$(id -u) DEV_GID=$(id -g) \
+#     docker compose -f compose.yaml -f compose.dev.yaml up app
+#
+# Deliberately not named compose.override.yaml, which compose loads by itself
+# whenever no -f is given. Everything on the droplet goes through
+# deploy/bin/photocat, which always passes -f and therefore never picks up an
+# override; only compose.yaml and .env are copied to the server; and
+# photocat-deploy refuses to run if the rendered configuration mentions
+# /workspace. If all of that fails, PHOTOCAT_ENV makes the page say so.
+#
+# The trade-off is worth stating: this throws away everything the immutable
+# image buys — the pinned dependency set, the digest, the build-time
+# assertions, the fixed non-root uid. It is a laptop tool. Used to "just fix
+# one thing" on the server, the deployment has no version and no rollback.
+services:
+  app:
+    image: photocat-local:dev
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        GIT_SHA: dev
+        IMAGE_TAG: dev
+    # The developer's own uid, so files written into ./dev-data stay editable.
+    user: "${DEV_UID:-1000}:${DEV_GID:-1000}"
+    environment:
+      # The checkout precedes site-packages on sys.path, so pyKES resolves to
+      # the bind mount. This is also what makes hot reload work at all:
+      # Streamlit's watcher deliberately ignores anything under
+      # site-packages, so editing an installed package reloads nothing however
+      # it is mounted.
+      PYTHONPATH: /workspace/src
+      PHOTOCAT_ENV: development
+      PHOTOCAT_ALLOW_DEV_LOGIN: "1"
+      PHOTOCAT_CREATE_INDEX: "1"
+      PHOTOCAT_DATA_ROOT: /srv/photocat/data
+      # An arbitrary uid has no /etc/passwd entry, so HOME has to be somewhere
+      # writable or matplotlib and Streamlit warn on every start.
+      HOME: /tmp
+      MPLCONFIGDIR: /tmp/matplotlib
+      XDG_CACHE_HOME: /tmp/cache
+      STREAMLIT_SERVER_RUN_ON_SAVE: "true"
+      # poll, not watchdog: inotify crosses a Linux bind mount, but not Docker
+      # Desktop's VirtioFS on macOS or Windows, where edits produce no events
+      # at all and nothing ever reloads.
+      STREAMLIT_SERVER_FILE_WATCHER_TYPE: poll
+      STREAMLIT_CLIENT_TOOLBAR_MODE: developer
+    volumes:
+      # Read-only, so the container cannot write into the git checkout.
+      - ./:/workspace:ro
+      - ./dev-data:/srv/photocat/data
+    restart: "no"
+    healthcheck:
+      disable: true

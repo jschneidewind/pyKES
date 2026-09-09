@@ -58,6 +58,7 @@ ADDED_COLUMNS = (
     ("metadata_keys", "sub_keys", "TEXT"),
     ("entities", "search_text", "TEXT NOT NULL DEFAULT ''"),
     ("edges", "ordinal", "INTEGER NOT NULL DEFAULT 0"),
+    ("uploads", "ingest_options", "TEXT"),
 )
 
 # Index versions this code can open. A database written before inherited
@@ -116,7 +117,13 @@ CREATE TABLE IF NOT EXISTS uploads (
     kind         TEXT    NOT NULL,
     uploaded_by  TEXT    NOT NULL,
     uploaded_at  TEXT    NOT NULL,
-    entity_count INTEGER NOT NULL DEFAULT 0
+    entity_count INTEGER NOT NULL DEFAULT 0,
+    -- How this file was read, as JSON: the entity type it was ingested as,
+    -- and for a sheet its identifier column, worksheet and reference
+    -- declarations. Recorded because a rebuild has to read the file the same
+    -- way it was read the first time, and none of it is recoverable from the
+    -- file itself -- the operator chose it in the upload form.
+    ingest_options TEXT
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -262,12 +269,23 @@ class IndexPaths:
         Directory holding the index and both file tiers.
     index_path, payload_directory, upload_directory : Path
         Derived from ``root``; supplied explicitly only in tests.
+    create : bool, optional
+        Whether to create the file tiers. A deployment serving an existing
+        database passes False, so that a data root which is not there — a bind
+        mount that failed to attach, a typo, a variable missing from a
+        maintenance shell — is an error rather than a new empty archive.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``create`` is False and the root or the index is absent.
     """
 
     root: Path
     index_path: Path = field(default=None)
     payload_directory: Path = field(default=None)
     upload_directory: Path = field(default=None)
+    create: bool = True
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
@@ -279,15 +297,52 @@ class IndexPaths:
         if self.upload_directory is None:
             self.upload_directory = self.root / "uploads"
 
+        if not self.create:
+            self.require_existing()
+            return
+
         self.payload_directory.mkdir(parents=True, exist_ok=True)
         self.upload_directory.mkdir(parents=True, exist_ok=True)
+
+    def require_existing(self) -> None:
+        """
+        Refuse a data root that does not already hold a database.
+
+        Creating one instead is the failure nobody notices: the application
+        comes up, the home page says the database is empty and invites an
+        upload, and people start filling a second archive somewhere the
+        backups do not run.
+
+        Returns
+        -------
+        None : None
+
+        Raises
+        ------
+        FileNotFoundError
+            If the root or the index file is absent.
+        """
+        if not self.root.is_dir():
+            raise FileNotFoundError(
+                f"Data root {self.root} does not exist. Refusing to create one: "
+                f"an application that silently starts a second, empty archive "
+                f"is worse than one that will not start."
+            )
+
+        if not self.index_path.is_file():
+            raise FileNotFoundError(
+                f"No index at {self.index_path}. Seed one with "
+                f"`python -m pyKES.database_app.seed_demo --root {self.root}`, "
+                f"or set PHOTOCAT_CREATE_INDEX=1 to create an empty one here."
+            )
 
 
 # =============================================================================
 # Connection handling
 # =============================================================================
 
-def open_index(paths: IndexPaths) -> sqlite3.Connection:
+def open_index(paths: IndexPaths,
+               allow_incompatible: bool = False) -> sqlite3.Connection:
     """
     Open the index database, creating and initialising it if absent.
 
@@ -295,6 +350,11 @@ def open_index(paths: IndexPaths) -> sqlite3.Connection:
     ----------
     paths : IndexPaths
         Filesystem layout of the database.
+    allow_incompatible : bool, optional
+        Open an index whose schema version this code cannot read. Only the
+        repair tooling passes True: `rebuild_index` needs a connection to the
+        very database the version check refuses, so without this the repair
+        the refusal names could not be performed.
 
     Returns
     -------
@@ -307,8 +367,19 @@ def open_index(paths: IndexPaths) -> sqlite3.Connection:
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
 
-    initialise_index(connection)
-    check_schema_version(connection)
+    # Checked before `initialise_index`, so a database this code will not serve
+    # is left exactly as it was found. Checking afterwards means the additive
+    # migration has already altered a database on its way to being rejected,
+    # which is the one state a rollback to the older code cannot read.
+    if not allow_incompatible:
+        check_schema_version(connection)
+
+    # The version stamp is the gate, so opening for repair migrates the columns
+    # — `rebuild_index` needs them to write into — without clearing it. Only a
+    # committed rebuild records the new version; a dry run, a path backfill or a
+    # rebuild that fails leaves the refusal in place, which is the whole point
+    # of refusing.
+    initialise_index(connection, record_version=not allow_incompatible)
 
     return connection
 
@@ -339,7 +410,14 @@ def check_schema_version(connection: sqlite3.Connection) -> None:
     """
     version = read_index_schema_version(connection)
 
-    if version in SUPPORTED_SCHEMA_VERSIONS or version is None:
+    if version in SUPPORTED_SCHEMA_VERSIONS:
+        return
+
+    # No recorded version and nothing stored is simply a database that does
+    # not exist yet, which `initialise_index` is about to create. No recorded
+    # version with entries in it is a database whose layout nothing can vouch
+    # for, and it is refused like any other unreadable one.
+    if version is None and not index_holds_entries(connection):
         return
 
     raise RuntimeError(
@@ -347,14 +425,77 @@ def check_schema_version(connection: sqlite3.Connection) -> None:
         f"{', '.join(SUPPORTED_SCHEMA_VERSIONS)}. Inherited metadata moved out "
         f"of the 'effective' column into its own table, so the stored values "
         f"cannot be read as they are. Rebuild it from the retained uploads "
-        f"with `rebuild_index`, which is what keeping every upload verbatim "
-        f"is for."
+        f"with `photocat-rebuild --data-root <root>`, which is what keeping "
+        f"every upload verbatim is for."
     )
 
 
-def initialise_index(connection: sqlite3.Connection) -> None:
+def index_holds_entries(connection: sqlite3.Connection) -> bool:
+    """
+    Report whether this database already holds entries.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection, possibly to a file that holds no tables yet.
+
+    Returns
+    -------
+    populated : bool
+        True when an `entities` table exists and is not empty.
+    """
+    present = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entities'"
+    ).fetchone()
+
+    if present is None:
+        return False
+
+    return connection.execute("SELECT COUNT(*) FROM entities").fetchone()[0] > 0
+
+
+def initialise_index(connection: sqlite3.Connection,
+                    record_version: bool = True) -> None:
     """
     Create the tables and indexes if they do not already exist.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Open connection to the index database.
+    record_version : bool, optional
+        Stamp the schema version this code writes. False on the repair path,
+        where the stamp is the gate that refuses the database being repaired:
+        clearing it before the repair has run would leave an unrebuilt index
+        that opens perfectly and answers every search with nothing.
+
+    Returns
+    -------
+    None : None
+    """
+    connection.executescript(SCHEMA_STATEMENTS)
+    add_missing_columns(connection)
+
+    if record_version:
+        record_schema_version(connection)
+
+    connection.commit()
+
+
+def record_schema_version(connection: sqlite3.Connection) -> None:
+    """
+    Record the schema version this code writes.
+
+    Called after the additive migration has succeeded, and an upsert rather
+    than an ignore, so the stored value describes the layout the database now
+    has instead of the version that first created it. Written with INSERT OR
+    IGNORE it never moved, so an index that had absorbed every column of a
+    newer release still reported the old number — and the next release to
+    list two supported versions would have refused it.
+
+    Does not commit: on the repair path this is the last statement of the
+    rebuild's transaction, so that the stamp lands with the rebuilt data or
+    not at all.
 
     Parameters
     ----------
@@ -365,13 +506,11 @@ def initialise_index(connection: sqlite3.Connection) -> None:
     -------
     None : None
     """
-    connection.executescript(SCHEMA_STATEMENTS)
-    add_missing_columns(connection)
     connection.execute(
-        "INSERT OR IGNORE INTO index_meta (key, value) VALUES ('schema_version', ?)",
+        """INSERT INTO index_meta (key, value) VALUES ('schema_version', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
         (INDEX_SCHEMA_VERSION,),
     )
-    connection.commit()
 
 
 def add_missing_columns(connection: sqlite3.Connection) -> None:
@@ -414,8 +553,19 @@ def read_index_schema_version(connection: sqlite3.Connection) -> Optional[str]:
     Returns
     -------
     version : str or None
-        Stored schema version, or None for a database predating ``index_meta``.
+        Stored schema version, or None for a database that has no
+        ``index_meta`` table yet — one this code is about to create, or one
+        predating the table.
     """
+    # Read before `initialise_index` has run, so the table may not exist. A
+    # missing table and a missing row mean the same thing to every caller.
+    present = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'index_meta'"
+    ).fetchone()
+
+    if present is None:
+        return None
+
     row = connection.execute(
         "SELECT value FROM index_meta WHERE key = 'schema_version'"
     ).fetchone()

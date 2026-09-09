@@ -1,0 +1,44 @@
+name: Tests
+
+# There was no test workflow at all, which is what made "main is deployable"
+# an assumption rather than a fact. The image workflow gates on this job, so a
+# release cannot be built from a tree whose tests do not pass.
+on:
+  # No push trigger for main: the image workflow calls this job before it
+  # builds, so a push to main would otherwise run the suite twice.
+  pull_request:
+  workflow_dispatch:
+  # Called by the image workflow, which must not build from a tree whose
+  # tests fail. A reusable workflow has to declare this trigger explicitly.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Includes the calling workflow, so a run reached through workflow_call
+  # cannot land in the same cancel-in-progress group as a directly triggered
+  # one and cancel it.
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.13"
+          enable-cache: true
+
+      # --locked, so a lock that no longer matches pyproject.toml fails here
+      # rather than in the image build or, worse, on the server.
+      - name: Install
+        run: uv sync --locked
+
+      - name: Run the tests
+        run: uv run pytest -q

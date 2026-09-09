@@ -240,6 +240,24 @@ Every upload is stored verbatim under its hash and kept indefinitely.
 changed index schema or a mapping that turned out to be wrong, and it is why the
 uploads tier exists.
 
+How each file was read the first time is recorded on its `uploads` row, in
+`ingest_options` — the entity type, the identifier column, the worksheet and
+the reference declarations — because guessing those is what made an earlier
+rebuild return a different database. The whole run is one transaction, so an
+interrupted rebuild is a no-op rather than a half-built index, and the schema
+version is recorded as its last statement: opening an index for repair leaves
+the version check armed, and only a committed rebuild clears it.
+
+What a rebuild returns unchanged: every entry and its metadata, the reference
+graph, every inherited value, the upload log and the key registry. What it
+rewrites: `created_at`/`updated_at`, which follow the upload's own timestamp
+rather than the moment each row was first written, and the registry's
+`first_seen`/`last_seen`. Nothing computes on those.
+
+Corrections made through `update_entity_metadata` are the one thing the
+uploads tier cannot restore — there is no journal to replay, so a rebuild puts
+back what the uploads said. `photocat-rebuild` exports them first.
+
 ---
 
 ## 6. Measured behaviour

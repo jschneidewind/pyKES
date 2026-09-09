@@ -682,8 +682,10 @@ redirect. Without it, the files are simply on the web.
 Self-hosting means these are now the group's responsibility, and none of them
 are optional:
 
-* **TLS**, from the institutional certificate authority or Let's Encrypt, with
-  automatic renewal. Private data over plain HTTP is not private.
+* **TLS**, from Let's Encrypt via certbot, renewed by its own timer. The
+  earlier preference for an institutional certificate authority applied to a
+  host that was not reachable from the public internet; the group's droplet is.
+  Private data over plain HTTP is not private.
 * **WebSocket proxying** — Streamlit needs `proxy_http_version 1.1`, the
   `Upgrade` and `Connection` headers, and generous `proxy_read_timeout`. Without
   these the app loads and then appears frozen.
