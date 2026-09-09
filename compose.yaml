@@ -84,7 +84,7 @@ services:
           memory: 1500M
 
   authelia:
-    image: ghcr.io/authelia/authelia:${AUTHELIA_TAG}
+    image: ${AUTHELIA_IMAGE}
     container_name: photocat-authelia
     restart: unless-stopped
     security_opt: ["no-new-privileges:true"]

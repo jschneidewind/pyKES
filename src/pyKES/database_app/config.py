@@ -16,7 +16,7 @@ compose file. See docs/deployment.md.
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from pyKES.database.entity_schema import DEFAULT_SCHEMA_DIRECTORY, load_entity_schemas
 
@@ -129,12 +129,13 @@ class DatabaseAppConfig:
     default_columns : list of str
         Effective-metadata keys and ``result:`` labels shown as table columns
         before the user chooses their own.
-    reference_instructions_by_type : dict
+    reference_instructions_by_type : dict, optional
         ``{entity_type: {column: {'role': role}}}`` offered as the default
-        reference declaration when uploading a sheet of that type. Derived from
-        `schema_directory` in `__post_init__` unless given explicitly, so a
-        deployment with its own vocabulary cannot end up interpreting the same
-        reference column two different ways.
+        reference declaration when uploading a sheet of that type. Left None it
+        is derived from `schema_directory` in `__post_init__`, so a deployment
+        with its own vocabulary cannot end up interpreting the same reference
+        column two different ways; an explicit empty dict declares that this
+        deployment has no reference columns at all.
     page_size : int
         Rows per page of search results.
     allow_development_login : bool
@@ -160,7 +161,7 @@ class DatabaseAppConfig:
         "DATA_ROOT", DEFAULT_DATA_ROOT, Path))
     default_entity_type: str = "experiment"
     default_columns: List[str] = field(default_factory=list)
-    reference_instructions_by_type: Dict[str, Any] = field(default_factory=dict)
+    reference_instructions_by_type: Optional[Dict[str, Any]] = None
     page_size: int = field(default_factory=lambda: setting_from_environment(
         "PAGE_SIZE", 50, int))
     allow_development_login: bool = field(default_factory=lambda:
@@ -182,7 +183,10 @@ class DatabaseAppConfig:
         # with and the ones a correction is re-resolved with come from the same
         # schemas. Held apart, they drift the moment a deployment maintains its
         # own vocabulary, and the same column then means two different things.
-        if not self.reference_instructions_by_type:
+        # `None` and `{}` have to stay distinguishable: the first asks for the
+        # schemas' own declarations, the second says this deployment declares
+        # no references at all.
+        if self.reference_instructions_by_type is None:
             self.reference_instructions_by_type = reference_instructions(
                 self.schema_directory)
 

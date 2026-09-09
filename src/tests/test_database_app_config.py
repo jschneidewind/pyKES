@@ -138,6 +138,23 @@ def test_reference_instructions_follow_the_configured_schemas(schema_directory):
     assert declared == reference_instructions(schema_directory)
 
 
+def test_declaring_no_references_is_distinguishable_from_declaring_none(
+        schema_directory):
+    """
+    Tested against the falsy default it replaced: `{}` used to be
+    indistinguishable from "not passed", so a deployment that wanted no
+    reference columns silently got the shipped schemas' instead.
+    """
+    explicit = DatabaseAppConfig(schema_directory=schema_directory,
+                                 reference_instructions_by_type={})
+
+    assert explicit.reference_instructions_by_type == {}
+
+    derived = DatabaseAppConfig(schema_directory=schema_directory)
+
+    assert derived.reference_instructions_by_type
+
+
 def test_paths_are_coerced_from_text():
     config = DatabaseAppConfig(data_root="/srv/photocat/data")
 

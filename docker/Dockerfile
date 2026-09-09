@@ -9,10 +9,17 @@ ARG PYTHON_VERSION=3.12
 ARG UV_VERSION=0.11.13
 
 
+# One stage for the sole purpose of resolving ${UV_VERSION}: `COPY --from` takes
+# no variable expansion ("variable expansion is not supported for --from"),
+# while `FROM` reads the global-scope ARG, so naming the stage here is what
+# keeps the pinned version in one place instead of two.
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+
 # ============================================================== builder stage
 FROM python:${PYTHON_VERSION}-slim-bookworm AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:0.11.13 /uv /usr/local/bin/uv
+COPY --from=uv /uv /usr/local/bin/uv
 
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_LINK_MODE=copy \
