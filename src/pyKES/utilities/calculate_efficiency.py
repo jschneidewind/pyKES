@@ -67,10 +67,14 @@ def calculate_apparent_quantum_yield(irradiation_wavelength: Quantity,
                                    * AVOGADRO_NUMBER.unit['1 / mol'],
                                      '1/s')
 
-    apparent_quantum_yield = Quantity(electron_transfer_per_reaction *  # e.g. 4 electrons are required to produce one molecule of O2
-                                      molecules_per_time.unit['1 / s']
-                                      / effective_photon_flux.unit['1 / s'],
-                                      '-')
+    # Set apparent quantum yield to zero if the effective photon flux is zero to avoid division by zero
+    if effective_photon_flux.unit['1 / s'] == 0:
+        apparent_quantum_yield = Quantity(0, '-')
+    else:
+        apparent_quantum_yield = Quantity(electron_transfer_per_reaction *  # e.g. 4 electrons are required to produce one molecule of O2
+                                        molecules_per_time.unit['1 / s']
+                                        / effective_photon_flux.unit['1 / s'],
+                                        '-')
 
     return apparent_quantum_yield
 
@@ -120,9 +124,13 @@ def light_to_hydrogen_efficiency(irradiation_area: Quantity,
                                          * WATER_SPLITTING_GIBBS_ENERGY_PER_ELECTRON.unit['J / mol'],
                                          'J /s')
 
-    light_to_hydrogen_efficiency = Quantity(energy_converted_per_time.unit['J / s']
-                                            / incident_power.unit['W'],
-                                            '-')
+    # Set light-to-hydrogen efficiency to zero if the incident power is zero to avoid division by zero
+    if incident_power.unit['W'] == 0:
+        light_to_hydrogen_efficiency = Quantity(0, '-')
+    else:
+        light_to_hydrogen_efficiency = Quantity(energy_converted_per_time.unit['J / s']
+                                                / incident_power.unit['W'],
+                                                '-')
 
     return light_to_hydrogen_efficiency
 
