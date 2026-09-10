@@ -41,3 +41,14 @@ Each is a page entry point taking, at most, its configuration dataclass.
 
 .. automodule:: pyKES.streamlit_app.components.results_table_component
    :members:
+
+Page sections
+-------------
+
+Rendered as part of a page rather than as one of their own.
+
+.. automodule:: pyKES.streamlit_app.components.metadata_editor
+   :members:
+
+.. automodule:: pyKES.streamlit_app.components.color_warning
+   :members:

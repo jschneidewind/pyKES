@@ -123,6 +123,7 @@ Where to start
 
    guide/streamlit_app
    plotting_instructions
+   metadata_editing
    browser_deployment
 
 .. toctree::

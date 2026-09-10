@@ -170,8 +170,12 @@ Ingestion modes
        are resolved against it — which is how the Streamlit uploader stages
        browser uploads in a temporary directory.
 
-Both skip experiments already flagged ``Processed`` in the overview sheet, so
-re-running an ingestion adds only what is new.
+``read_in_experiments_single_threaded`` skips experiments already flagged
+``Processed`` in the overview sheet, so re-running an ingestion adds only what
+is new; so does the Streamlit page, which steps through ``ingest_experiment``
+one experiment per rerun. ``read_in_experiments_multiprocessing`` does **not**:
+it processes every file its keywords or its overview column name, and reruns
+the processing for experiments the dataset already holds.
 
 
 Getting data out

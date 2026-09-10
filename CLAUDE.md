@@ -19,7 +19,7 @@ pip install -e <path-to-pyKES>
 
 ## Repository layout
 
-- [src/pyKES/database/](src/pyKES/database/) — `ExperimentalDataset`, `Experiment`, HDF5 save/load, and `read_in_experiments_multiprocessing` (parallel ingestion).
+- [src/pyKES/database/](src/pyKES/database/) — `ExperimentalDataset`, `Experiment`, HDF5 save/load, `read_in_experiments_multiprocessing` (parallel ingestion), and `metadata_editing` (in-app metadata edits and what they invalidate).
 - [src/pyKES/reaction_ODE.py](src/pyKES/reaction_ODE.py), [src/pyKES/reaction_model.py](src/pyKES/reaction_model.py) — ODE integration and the unified reaction-model interface.
 - [src/pyKES/fitting_ODE.py](src/pyKES/fitting_ODE.py) — parameter fitting against experimental data.
 - [src/pyKES/pathways/](src/pyKES/pathways/) — pathway propagation and transformation.
@@ -28,8 +28,7 @@ pip install -e <path-to-pyKES>
 - [src/pyKES/streamlit_app/](src/pyKES/streamlit_app/) — reusable Streamlit pages:
   - [config_interface.py](src/pyKES/streamlit_app/config_interface.py) — `FileUploadHandler`, `DataUploadConfig`, `HomeConfig`, `PyKESStreamlitConfig`.
   - [chunked_processing.py](src/pyKES/streamlit_app/chunked_processing.py) — advances a long processing run one experiment per rerun.
-  - [components/](src/pyKES/streamlit_app/components/) — `render_home`, `render_data_upload`, `render_analysis_results`, `render_time_series`.
-  - [pages/](src/pyKES/streamlit_app/pages/) — Streamlit page entry points; each delegates to a component.
+  - [components/](src/pyKES/streamlit_app/components/) — `render_home`, `render_data_upload`, `render_analysis_results`, `render_time_series`, `render_results_table`, `render_metadata_editor`.
 - [examples/external_repo/](examples/external_repo/) — sample wiring for an external app (Home, config, processing functions).
 - [src/tests/](src/tests/) — pytest suite.
 
@@ -66,5 +65,5 @@ When editing or adding code in this repo, follow these rules. [src/pyKES/reactio
 
 ## Running
 
-- Streamlit app: `streamlit run src/pyKES/streamlit_app/Home.py`
+- Streamlit app: `streamlit run examples/external_repo/Home.py` — the package ships components, not an entry script.
 - Tests: `pytest`

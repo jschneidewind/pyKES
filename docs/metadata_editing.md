@@ -1,0 +1,182 @@
+# Editing metadata in the app
+
+A metadata sheet is written before the experiments are processed, and it is
+usually wrong somewhere: an irradiance typed from the wrong logbook line, a
+volume in the wrong unit, a colour spelled `ligthblue`. Until now the only way
+to correct one was to edit the Excel sheet and upload it again — and nothing in
+the dataset recorded that the results sitting beside the corrected value had
+been computed from the old one.
+
+Section **4. ✏️ Edit Metadata** of the Data Upload page makes the overview
+sheet editable in place, and makes the consequence of each edit explicit.
+
+---
+
+## 1. What the dataset has to declare
+
+The editor is only offered for datasets that say which columns mean what.
+Two lists in `processing_parameters` do that:
+
+```python
+PROCESSING_PARAMETERS = {
+    'metadata_used_for_raw_data_loading': ['Experiment',
+                                           'group',
+                                           'File name H2',
+                                           'File name O2'],
+    'metadata_used_for_processing': ['Irradiance A [mW/cm2]',
+                                     'Irradiation wavelength A [nm]',
+                                     'Irradiated area [cm2]',
+                                     'Liquid phase volume [mL]',
+                                     'Offset',
+                                     'Pyroscience Irradiation start [s]',
+                                     'Pyroscience Irradiation end [s]',
+                                     'Catalyst concentration [g/L]'],
+    ...
+}
+```
+
+`metadata_used_for_raw_data_loading` names the columns the *raw-data reader*
+consults — which file to open, which sensor channel to read.
+`metadata_used_for_processing` names the columns the *processing function*
+consults.
+
+**Both keys must be present.** A dataset carrying only the processing list gets
+no editor either: without a declaration of what is locked, a filename column
+would become editable by omission, which is the one thing this feature must
+never do.
+
+### Old files keep working
+
+`processing_parameters` reaches a dataset from the HDF5 file it was loaded
+from. A file written before an app declared these lists carries neither, so its
+Data Upload page shows an explanatory note where the grid would be and nothing
+else changes. There is no migration and no flag day: such a dataset is edited
+the way it always was, by uploading a corrected sheet.
+
+To make an existing file editable, load the sheet into a fresh dataset created
+by an app whose configuration declares the two lists ("Start Fresh Dataset"),
+or merge it into one.
+
+---
+
+## 2. The policy
+
+| Kind of column | In the grid | Effect of an edit |
+| --- | --- | --- |
+| Declared under `metadata_used_for_raw_data_loading` | shown, **read-only** | — |
+| The `Processed` flag | shown, **read-only** | — |
+| Declared under `metadata_used_for_processing` | editable | clears `Processed`; the experiment is listed for reprocessing |
+| Anything else (comments, labels, `color`, `group`) | editable | none |
+
+Raw-data-loading columns are locked because changing one does not correct the
+experiment, it describes a different one: a new filename means different raw
+data, which the stored `raw_data` no longer is. Correcting one means uploading
+the corrected sheet **and the raw-data files** again.
+
+The `Processed` flag is read-only for the same reason a thermometer is not
+adjustable: it is derived, and the pipeline owns it.
+
+Everything not named in either list is editable and costs nothing, which is
+the common case — a comment, a label, a colour. `color` and `group` are
+re-derived onto the `Experiment` immediately, so a corrected colour takes
+effect on the plotting pages without a reprocessing run.
+
+A declared column the sheet does not actually have is reported as a warning
+above the grid. It is neither locked nor invalidating — it is not there to be
+edited — and the mismatch between the app's configuration and the uploaded
+sheet is worth seeing rather than guessing at.
+
+---
+
+## 3. Editing several experiments at once
+
+The grid is `st.data_editor`, so the spreadsheet gestures work: drag a
+selection, fill down from a cell's corner, and paste a block copied straight
+out of Excel. Correcting one column across forty experiments is a paste, not
+forty edits.
+
+Nothing is written until **Apply metadata changes** is pressed. Until then the
+grid is a scratch copy; navigating away discards it. On apply, the page reports
+how many cells changed and names the experiments that now need reprocessing.
+
+Rows cannot be added or deleted here. New experiments come from the metadata
+sheet, which is also what keeps the sheet and the dataset in step.
+
+---
+
+## 4. The `Processed` flag, at every transition
+
+The flag lives in the `Processed` column of `overview_df` as the text `'True'`
+or `'False'` — text, because it round-trips through Excel and HDF5. It answers
+one question: *does the stored `processed_data` follow from the metadata
+sitting next to it?*
+
+| Transition | Flag |
+| --- | --- |
+| Row seeded from a sheet, or by `ensure_processed_column` | `'False'` |
+| `ingest_experiment` succeeds | `'True'` |
+| `ingest_experiment` fails | unchanged (`'False'`) |
+| Processing-relevant metadata edited | `'False'` |
+| Non-processing metadata edited | unchanged |
+| `reprocess_experiment_by_name` succeeds | `'True'` |
+| Reprocessing fails | unchanged — the previous `processed_data` is kept |
+| Sheet re-upload changing a declared column | `'False'` |
+| Sheet re-upload changing only other columns | unchanged |
+
+Two of these are new, and both were wrong before:
+
+* **Reprocessing now raises the flag.** It never touched it, which was harmless
+  only because nothing ever lowered it for an experiment that had been
+  ingested. The editor does lower it, so reprocessing has to be able to
+  clear it again.
+* **A re-uploaded sheet no longer loses the flag.** A row the sheet changed was
+  replaced wholesale by the incoming row, which carries no `Processed` column;
+  the flag came back as `NaN`, which `select_unprocessed_experiments` happened
+  to read as "unprocessed". It is now set explicitly — and only when a
+  *declared* column differs, so re-uploading a sheet with a corrected comment
+  no longer invalidates a processing run.
+
+```{note}
+`read_in_experiments_multiprocessing` neither reads nor writes the flag: it
+processes every file its keywords match, regardless. That predates this work
+and is unchanged by it. The Streamlit page does not use that entry point.
+```
+
+---
+
+## 5. Reprocessing what the editor invalidated
+
+Section **3. ♻️ Reprocess Existing Experiments** carries the other half:
+
+* a standing warning naming every experiment whose results no longer match its
+  metadata. It sits above the section, so it stays visible while a job runs;
+* a checkbox, **"Only experiments needing reprocessing (n)"**, which overrides
+  the experiment multiselect with exactly that list, and is disabled when the
+  list is empty.
+
+An experiment appears on that list only if the dataset actually **holds** it.
+A row flagged `'False'` that has never been ingested needs *processing*, not
+reprocessing — there is no stored raw data to rerun the processing function
+against — and belongs to the raw-data uploader in section 2.
+
+Leave **"Refresh metadata from the overview table"** checked. Unchecked, the
+metadata stored inside the file is reused and the very edit that caused the
+reprocessing is ignored.
+
+Reprocessing needs no raw-data files: metadata and `raw_data` both come from
+the dataset. See {doc}`versioning_and_reprocessing`.
+
+---
+
+## 6. Where the code lives
+
+| Module | Responsibility |
+| --- | --- |
+| [`pyKES.database.metadata_editing`](https://github.com/jschneidewind/pyKES/blob/main/src/pyKES/database/metadata_editing.py) | the policy, Streamlit-free: which columns are locked, what changed, what an edit invalidates |
+| [`pyKES.streamlit_app.components.metadata_editor`](https://github.com/jschneidewind/pyKES/blob/main/src/pyKES/streamlit_app/components/metadata_editor.py) | the grid, the apply button and the messages |
+| [`pyKES.database.data_processing`](https://github.com/jschneidewind/pyKES/blob/main/src/pyKES/database/data_processing.py) | `mark_experiment_processed`, `mark_experiments_unprocessed`, `select_experiments_needing_reprocessing` |
+| [`ExperimentalDataset.update_overview_df`](https://github.com/jschneidewind/pyKES/blob/main/src/pyKES/database/database_experiments.py) | the same policy applied to a re-uploaded sheet |
+
+The editor needs no new configuration field: the column lists come from the
+*dataset*, which is exactly what makes the feature unavailable for old files.
+The only configuration it reads is `metadata_excel_experiment_column`.

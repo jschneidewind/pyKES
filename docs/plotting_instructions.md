@@ -118,14 +118,45 @@ experiment is one **row**:
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `result` | yes | path to the value |
-| `unit` | no | target unit; `Quantity` values are converted into it and the unit is appended to the cell |
+| `unit` | no | target unit; `Quantity` values are converted into it and the unit is appended to the displayed cell |
 | `format` | no | Python format spec, default `.4g` |
-| `error` | no | path to an uncertainty, rendered as `value ± error` |
+| `error` | no | path to an uncertainty, which gets a column of its own, `label (±)` |
 
 Every instruction key becomes a column whether or not the value exists, so the
-table keeps its shape across experiments; cells that cannot be resolved show
-`—`. Values must be scalar — single-element arrays are unwrapped, longer arrays
-have no meaningful cell representation and are treated as missing.
+table keeps its shape across experiments; cells that cannot be resolved stay
+empty. Values must be scalar — single-element arrays are unwrapped, longer
+arrays have no meaningful cell representation and are treated as missing.
+
+### Cells hold numbers, not text
+
+The table's cells are the resolved **numbers**; `format` and `unit` are applied
+at render time through `st.column_config.NumberColumn`, which shows the same
+digits and the same unit suffix as before. This is what makes the header sort
+work: sorting a column of pre-formatted strings compares them lexicographically,
+so an apparent quantum yield of `9` sorted above one of `18`. Sorting the
+underlying numbers compares magnitudes.
+
+The consequence for an instruction that defines `error`: the uncertainty is its
+own sortable column rather than part of a `value ± error` string. A result that
+genuinely resolves to a string keeps a plain text column and is left unformatted.
+
+`format` is translated into the printf spec the column configuration expects —
+`'.2f'` becomes `'%.2f'` — so any spec printf also understands works. A `%` in a
+unit is escaped automatically.
+
+### Choosing what the table shows
+
+Two selectors sit above the table:
+
+* **Results to show** — which instructions become columns. All of them by
+  default; an instruction's `(±)` column follows its value column.
+* **Metadata to show** — columns of `overview_df`, joined to the left of the
+  results. Empty by default, so the table looks as it always did. The columns
+  are taken from the overview sheet unchanged, keeping their own dtypes, so they
+  sort correctly too. The join is on the sheet's `Experiment` column; a dataset
+  whose overview sheet has no such column offers no metadata and says so.
 
 The table is exported as CSV with one row per experiment, which is the layout
-spreadsheets and plotting tools expect for per-experiment records.
+spreadsheets and plotting tools expect for per-experiment records. The export
+now holds numbers rather than pre-formatted text, so a spreadsheet reads them
+as numbers.
