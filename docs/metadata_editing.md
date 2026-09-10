@@ -118,35 +118,44 @@ corrected to `605.5` stays `605.5` — Streamlit's editor takes its field type
 from the column dtype, and an Excel column of whole numbers arrives as
 `int64`.
 
-### Why the page stays still
+### The page refreshes, and does not move
 
-The form sits inside an `st.fragment`, so pressing the button reruns the
-fragment and nothing else. The page body does not execute: the uploaded
-workbook is not re-read, the whole HDF5 file is not rewritten for the download
-button, and the scroll position does not move — measured in headless Chromium
-at 537 → 537 px with the button below the grid and 70 → 70 px above it, and
-1492 → 1492 px on the real page.
+Applying an edit changes something section 3 shows — its standing warning and
+its **"Only experiments needing reprocessing (n)"** checkbox — and section 3 is
+drawn by the page body, above the editor. So applying ends in
+`st.rerun(scope="app")`: the warning appears and the checkbox becomes
+selectable on the same press, rather than staying stale until the next page
+interaction.
 
-Two further details keep it still:
+An app-scoped rerun costs a page run — the uploaded workbook is checked, and
+the whole HDF5 file is rewritten to feed the download button — but that is what
+every page-level interaction already costs, and it buys a page that tells the
+truth about its own state.
+
+What it does *not* cost is the scroll position. Measured in headless Chromium
+with the button already in view: 686 → 686 px in an isolated layout, and
+1492 → 1499 px on the real page, where the 7 px is the reprocessing warning
+appearing in section 3 and pushing what follows down by its own height. Two
+things are what keep it still, and neither is the scope of the rerun:
 
 * **The grid's widget key does not change on submit.** Horizontal scroll
   survives a rerun of either scope (1200 → 1200 px) and is lost only to a new
   key (1200 → 0), which is why only an uploaded workbook bumps it.
 * **The status area is always the same two captions.** An `st.success` box that
-  comes and goes changes the height of the fragment and shifts everything below
-  it, which reads as the page moving under the reader. Section 3 carries the
-  same reprocessing list as a proper warning, where it has room to be loud.
+  comes and goes changes the height of the section and shifts everything below
+  it, which reads as the page moving under the reader.
 
-The one cost of the fragment is that the page body not re-running means section
-3's standing warning and its shortcut count catch up on the next page
-interaction — which is why the editor repeats that information in its own
-caption, where it is live.
+Because the applying run ends in a rerun, everything it drew is discarded — so
+what was stored is parked in session state under `METADATA_EDIT_SUMMARY_KEY`
+and rendered by the run that follows.
 
 ```{note}
-An earlier version reran at app scope after the submit, which re-focuses the
-button that was clicked and moved the page, and bumped the widget key on every
-apply, which sent the grid back to its first columns. Both look like
-reasonable things to write.
+An earlier version was measured as jumping ~300 px on an app-scoped rerun, and
+avoided one for that reason. That measurement was wrong: the browser automation
+had scrolled the off-screen button into view before clicking it, and the
+scrolling was its own. Re-measured with the button in view, the scope of the
+rerun makes no difference to the scroll position — the jumping came from the
+widget key and from the status box changing height.
 ```
 
 Rows cannot be added or deleted here. New experiments come from the metadata

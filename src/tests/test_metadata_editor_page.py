@@ -9,6 +9,11 @@ submit button, which is what a form does: nothing reaches Python until it is
 pressed, so a drag-fill or a pasted block is left undisturbed while it is
 being made.
 
+Applying ends in an app-scoped rerun, so section 3 — drawn by the page body,
+above the editor — shows the reprocessing warning and enables its shortcut on
+the same press. `test_the_reprocessing_shortcut_offers_exactly_the_flagged_experiments`
+is what pins that: it asserts on the press itself, with no extra run.
+
 `test_an_edit_survives_the_workbook_staying_in_the_uploader` is the regression
 that matters most here. The uploader keeps its file for the whole session, and
 re-merging the sheet on every rerun silently reverted every edit one rerun
@@ -193,10 +198,9 @@ def test_editing_a_processing_column_flags_the_experiment():
     assert any("Saved 1 change(s)" in caption for caption in captions)
     assert any("need reprocessing" in caption for caption in captions)
 
-    # Section 3 sits above the editor and had already rendered when the edit
-    # was stored, so its standing warning joins on the next page run. That lag
-    # is the price of not re-running the page to save an edit.
-    app.run(timeout=60)
+    # Section 3 is drawn by the page body, above the editor, so applying ends
+    # in an app-scoped rerun to bring it up to date on the same press rather
+    # than leaving it stale until the next page interaction.
     assert sum("Exp_001" in element.value for element in app.warning) == 1
 
     # The widget key is untouched: changing it would reset the grid's scroll
@@ -217,9 +221,7 @@ def test_editing_a_free_column_leaves_the_flag_alone():
 def test_the_reprocessing_shortcut_offers_exactly_the_flagged_experiments():
     app = edit_cell(run_page(), 0, "Irradiance [mW/cm2]", 55.0)
 
-    # Section 3 renders above the editor, so it picks the flag up one run later
-    app.run(timeout=60)
-
+    # Selectable on the same press: the app-scoped rerun redraws section 3.
     shortcut = next(checkbox for checkbox in app.checkbox
                     if "Only experiments needing reprocessing" in checkbox.label)
 

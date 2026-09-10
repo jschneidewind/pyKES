@@ -134,9 +134,10 @@ undisturbed while you make them.
 2. **Edit a processing column.** Change `Irradiance [mW/cm2]` for `NB-316`
    from `50` to `40`, press Enter, then press the button.
    *Look for:* "✅ Saved 1 change(s)…" and "⚠️ 1 experiment(s) need
-   reprocessing…". Nothing else on the page moves, and the grid stays scrolled
-   where it was — the button submits inside a fragment, so the page itself does
-   not re-run.
+   reprocessing…" under the grid, **and** section 3 above it picking the same
+   thing up on that press: its own warning appears and its "Only experiments
+   needing reprocessing (1)" checkbox becomes selectable. The grid stays
+   scrolled where it was.
 3. **Edit several at once.** Drag the small handle at the bottom-right of a
    corrected cell down a few rows, or paste a column straight out of Excel,
    then press the button once.

@@ -63,6 +63,10 @@ METADATA_EDITOR_REVISION_KEY = 'metadata_editor_revision'
 # re-seeded, and a stable key keeps the button's own state intact.
 METADATA_EDITOR_FORM_KEY = 'metadata_editor_form'
 
+# Outcome of an applied edit, rendered on the run *after* it. Applying ends in
+# an app-scoped rerun, which discards everything the applying run had drawn.
+METADATA_EDIT_SUMMARY_KEY = 'metadata_editor_last_summary'
+
 
 def metadata_editor_widget_key() -> str:
     """
@@ -211,6 +215,8 @@ def render_metadata_grid(dataset: ExperimentalDataset, experiment_column: str) -
     is live.
     """
 
+    parked_summary = st.session_state.pop(METADATA_EDIT_SUMMARY_KEY, None)
+
     view = metadata_editor_view(dataset, experiment_column)
 
     with st.form(key=METADATA_EDITOR_FORM_KEY, clear_on_submit=False):
@@ -231,21 +237,28 @@ def render_metadata_grid(dataset: ExperimentalDataset, experiment_column: str) -
 
     if changed_cells:
         apply_metadata_edits(dataset, changed_cells, experiment_column)
+        st.session_state[METADATA_EDIT_SUMMARY_KEY] = describe_saved_edits(changed_cells)
 
-    render_editor_status(dataset, experiment_column, submitted, changed_cells)
+        # Section 3's warning and its "only experiments needing reprocessing"
+        # checkbox are drawn by the page body, so a fragment-scoped rerun
+        # cannot refresh them — they would stay stale until the next page
+        # interaction. An app-scoped rerun refreshes them without moving the
+        # page: measured at 686 -> 686 px with the button in view, because
+        # what moved the page was the widget key changing and the status box
+        # changing height, not the scope of the rerun.
+        st.rerun(scope="app")
+
+    render_editor_status(dataset, experiment_column, submitted, parked_summary)
 
 
-def describe_saved_edits(submitted: bool, changed_cells: dict) -> str:
+def describe_saved_edits(changed_cells: dict) -> str:
     """
-    Describe what pressing the button did, or what it would do.
+    Describe an applied edit, for the run that renders after it.
 
     Parameters
     ----------
-    submitted : bool
-        Whether the button was pressed on this run.
     changed_cells : dict
-        ``{experiment_name: {column: new_value}}`` that was stored, empty on
-        any run the button was not pressed.
+        ``{experiment_name: {column: new_value}}`` that was stored.
 
     Returns
     -------
@@ -253,22 +266,42 @@ def describe_saved_edits(submitted: bool, changed_cells: dict) -> str:
         One line of status text.
     """
 
-    if not submitted:
-        return "Edits are stored when you press **Apply metadata changes**."
-
-    if not changed_cells:
-        return "Nothing had been changed, so nothing was stored."
-
     changed_count = sum(len(values) for values in changed_cells.values())
 
     return (f"✅ Saved {changed_count} change(s) to {len(changed_cells)} experiment(s): "
             + ", ".join(sorted(changed_cells)))
 
 
+def describe_editor_state(submitted: bool, parked_summary) -> str:
+    """
+    Say what the last press of the button did, or that nothing is stored yet.
+
+    Parameters
+    ----------
+    submitted : bool
+        Whether the button was pressed on this run.
+    parked_summary : str or None
+        Outcome of an edit applied by the previous run, if there was one.
+
+    Returns
+    -------
+    str
+        One line of status text.
+    """
+
+    if parked_summary:
+        return parked_summary
+
+    if submitted:
+        return "Nothing had been changed, so nothing was stored."
+
+    return "Edits are stored when you press **Apply metadata changes**."
+
+
 def render_editor_status(dataset: ExperimentalDataset,
                          experiment_column: str,
                          submitted: bool,
-                         changed_cells: dict) -> None:
+                         parked_summary) -> None:
     """
     Report what the button did and what still needs reprocessing.
 
@@ -280,8 +313,8 @@ def render_editor_status(dataset: ExperimentalDataset,
         Column of ``overview_df`` naming the experiments.
     submitted : bool
         Whether the button was pressed on this run.
-    changed_cells : dict
-        ``{experiment_name: {column: new_value}}`` that was stored.
+    parked_summary : str or None
+        Outcome of an edit applied by the previous run, if there was one.
 
     Returns
     -------
@@ -297,7 +330,7 @@ def render_editor_status(dataset: ExperimentalDataset,
     same reprocessing list as a proper warning, where it has room to be loud.
     """
 
-    st.caption(describe_saved_edits(submitted, changed_cells))
+    st.caption(describe_editor_state(submitted, parked_summary))
 
     stale_experiments = select_experiments_needing_reprocessing(dataset, experiment_column)
 
