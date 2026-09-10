@@ -9,19 +9,33 @@ drag-fill and pasting a block straight out of Excel, so no bulk-edit UI of our
 own is needed.
 
 Which columns may be written, and what each write costs, is decided by the
-dataset rather than by this page — see
-`pyKES.database.metadata_editing`. Datasets that declare nothing get an
-explanatory note instead of a grid, which is what keeps files written before
-the declarations existed working unchanged.
+dataset rather than by this page — see `pyKES.database.metadata_editing`.
+Datasets that declare nothing get an explanatory note instead of a grid, which
+is what keeps files written before the declarations existed working unchanged.
 
-The grid and its submit button live in a form on purpose. Outside one, every
-committed cell reruns the whole page, and the Data Upload page rewrites the
-entire HDF5 file on each run to feed its download button — a cost worth paying
-once per edit session, not once per cell.
+Edits save themselves. There is no submit button, and the grid lives in an
+`st.fragment`, which is what makes that affordable: a committed cell reruns
+the fragment alone, so the page body — which re-reads the uploaded workbook
+and rewrites the whole HDF5 file to feed its download button — does not run.
+Measured in headless Chromium: typing into a cell 1500 px to the right of the
+grid's origin saved the value, left the page body un-executed, and left the
+grid scrolled exactly where it was.
+
+Both of those were bugs in the first version of this page, and both are worth
+not reintroducing:
+
+* **A submit button that ends in `st.rerun` moves the page.** The app-scoped
+  rerun re-focuses the submit button and Streamlit's scroll container jumped
+  ~300 px (measured 180 -> 476), pushing the grid off screen.
+* **Changing the widget key resets the grid's horizontal scroll.** Scroll
+  survives a fragment rerun and an app-scoped rerun alike (1200 -> 1200) and
+  is lost only when the key changes (1200 -> 0), which is why the revision
+  counter is bumped on an uploaded sheet and nothing else.
 """
 
 import streamlit as st
 
+from pyKES.database.data_processing import select_experiments_needing_reprocessing
 from pyKES.database.database_experiments import ExperimentalDataset
 from pyKES.database.metadata_editing import (METADATA_LOADING_KEY, METADATA_PROCESSING_KEY,
                                              apply_metadata_edits, changed_metadata_cells,
@@ -31,27 +45,63 @@ from pyKES.database.metadata_editing import (METADATA_LOADING_KEY, METADATA_PROC
 from pyKES.streamlit_app.config_interface import DataUploadConfig
 
 
-# Bumped on every applied edit and carried in the widget key. Load-bearing:
+# Carried in the grid's widget key, and bumped only by an uploaded workbook.
 # `st.data_editor` keeps its `edited_rows` delta in session state and replays
-# it on top of whatever data it is handed, so a stale delta would silently
-# reassert an old value over the applied one. A new key re-seeds it clean.
+# it on top of whatever data it is handed, so after a sheet upload — which
+# takes precedence over anything edited here — a stale delta would reassert
+# the values the upload just replaced. A new key re-seeds the grid clean, at
+# the cost of resetting its scroll position, which is why nothing else bumps
+# it.
 METADATA_EDITOR_REVISION_KEY = 'metadata_editor_revision'
 
-# Outcome of the last applied edit, rendered on the run *after* it. Written
-# before `st.rerun`, which discards everything the finished run had drawn.
-METADATA_EDIT_SUMMARY_KEY = 'metadata_editor_last_summary'
+
+def metadata_editor_widget_key() -> str:
+    """
+    Widget key of the metadata grid.
+
+    Returns
+    -------
+    str
+        Key carrying the current editor revision.
+    """
+
+    revision = st.session_state.setdefault(METADATA_EDITOR_REVISION_KEY, 0)
+
+    return f"metadata_editor_{revision}"
+
+
+def discard_metadata_editor_state() -> None:
+    """
+    Re-seed the metadata grid, dropping the edits it still holds client-side.
+
+    Called when a newly uploaded workbook has replaced the overview sheet, so
+    that the grid shows the sheet rather than replaying edits over it.
+
+    Returns
+    -------
+    None : None
+        Bumped on every merged workbook, including the first. Whether the grid
+        had rendered yet cannot be told from here — a widget's key is not
+        visible in session state until its widget is created in the current
+        run, and the uploader runs before the grid — and re-keying a grid that
+        holds nothing costs nothing.
+    """
+
+    st.session_state[METADATA_EDITOR_REVISION_KEY] = (
+        st.session_state.get(METADATA_EDITOR_REVISION_KEY, 0) + 1)
 
 
 def render_metadata_editor(config: DataUploadConfig, dataset: ExperimentalDataset) -> None:
     """
-    Render the metadata grid and apply its edits on submit.
+    Render the metadata editing section.
 
     Parameters
     ----------
     config : DataUploadConfig
         Supplies the column naming the experiments.
     dataset : ExperimentalDataset
-        Dataset whose metadata is edited; mutated in place on submit.
+        Dataset whose metadata is edited; mutated in place as cells are
+        committed.
 
     Returns
     -------
@@ -74,41 +124,23 @@ def render_metadata_editor(config: DataUploadConfig, dataset: ExperimentalDatase
         st.info("No metadata to edit yet — upload a metadata Excel sheet first.")
         return
 
-    _render_last_edit_summary()
-
     experiment_column = config.metadata_excel_experiment_column
-    locked_columns = locked_metadata_columns(dataset, experiment_column)
 
-    _render_editing_policy(locked_columns, dataset)
+    render_editing_policy(dataset, locked_metadata_columns(dataset, experiment_column))
 
-    view = metadata_editor_view(dataset, experiment_column)
-
-    with st.form(key="metadata_editor_form", clear_on_submit=False):
-        edited_view = st.data_editor(
-            view,
-            key=f"metadata_editor_{st.session_state.setdefault(METADATA_EDITOR_REVISION_KEY, 0)}",
-            num_rows="fixed",
-            disabled=locked_columns,
-            width='stretch',
-        )
-        submitted = st.form_submit_button("💾 Apply metadata changes", width="stretch")
-
-    if not submitted:
-        return
-
-    _apply_edited_view(dataset, view, edited_view, experiment_column)
+    render_metadata_grid(dataset, experiment_column)
 
 
-def _render_editing_policy(locked_columns: list, dataset: ExperimentalDataset) -> None:
+def render_editing_policy(dataset: ExperimentalDataset, locked_columns: list) -> None:
     """
     Explain which columns are locked and which invalidate the processed data.
 
     Parameters
     ----------
-    locked_columns : list of str
-        Columns rendered read-only in the grid.
     dataset : ExperimentalDataset
         Dataset whose declarations are described.
+    locked_columns : list of str
+        Columns rendered read-only in the grid.
 
     Returns
     -------
@@ -117,11 +149,11 @@ def _render_editing_policy(locked_columns: list, dataset: ExperimentalDataset) -
     """
 
     st.markdown(
-        "Correct metadata directly in the table below, then apply the changes. "
-        "Cells can be selected, dragged and pasted into as in a spreadsheet, so "
-        "several experiments can be corrected in one go. Editing a column the "
-        "processing function reads clears the experiment's `Processed` flag and "
-        "lists it for reprocessing in section 3."
+        "Correct metadata directly in the table below. **Edits save as you make them** — "
+        "cells can be selected, dragged and pasted into as in a spreadsheet, so several "
+        "experiments can be corrected in one go. Editing a column the processing function "
+        "reads clears the experiment's `Processed` flag and lists it for reprocessing in "
+        "section 3. Uploading a metadata sheet above replaces whatever is edited here."
     )
 
     if locked_columns:
@@ -142,49 +174,24 @@ def _render_editing_policy(locked_columns: list, dataset: ExperimentalDataset) -
         )
 
 
-def _apply_edited_view(dataset: ExperimentalDataset,
-                       view,
-                       edited_view,
-                       experiment_column: str) -> None:
+@st.fragment
+def render_metadata_grid(dataset: ExperimentalDataset, experiment_column: str) -> None:
     """
-    Write back what the grid changed, then rerun with a clean editor.
+    Render the grid, save whatever it changed, and report what that invalidated.
+
+    A fragment on purpose: a committed cell reruns this function and nothing
+    else, so saving an edit costs neither a re-read of the uploaded workbook
+    nor a rewrite of the HDF5 file, and moves nothing on screen. The flip side
+    is that the page body does not re-run either, so section 3's standing
+    warning and its shortcut count catch up on the next page interaction —
+    which is why the same information is repeated here, where it is live.
 
     Parameters
     ----------
     dataset : ExperimentalDataset
         Dataset mutated in place.
-    view, edited_view : pandas.DataFrame
-        The table handed to the grid and the table it returned.
     experiment_column : str
         Column of ``overview_df`` naming the experiments.
-
-    Returns
-    -------
-    None : None
-    """
-
-    changed_cells = changed_metadata_cells(
-        view, edited_view, editable_metadata_columns(dataset, experiment_column))
-
-    if not changed_cells:
-        st.info("No changes to apply.")
-        return
-
-    invalidated_experiments = apply_metadata_edits(dataset, changed_cells, experiment_column)
-
-    st.session_state[METADATA_EDIT_SUMMARY_KEY] = {
-        'changed_cells': sum(len(values) for values in changed_cells.values()),
-        'changed_experiments': len(changed_cells),
-        'invalidated_experiments': invalidated_experiments,
-    }
-    st.session_state[METADATA_EDITOR_REVISION_KEY] += 1
-
-    st.rerun()
-
-
-def _render_last_edit_summary() -> None:
-    """
-    Report the edit applied by the previous run, once.
 
     Returns
     -------
@@ -192,19 +199,59 @@ def _render_last_edit_summary() -> None:
         Widgets are written to the current Streamlit container.
     """
 
-    summary = st.session_state.pop(METADATA_EDIT_SUMMARY_KEY, None)
+    view = metadata_editor_view(dataset, experiment_column)
 
-    if summary is None:
-        return
-
-    st.success(
-        f"✅ Applied {summary['changed_cells']} change(s) to "
-        f"{summary['changed_experiments']} experiment(s)."
+    edited_view = st.data_editor(
+        view,
+        key=metadata_editor_widget_key(),
+        num_rows="fixed",
+        disabled=locked_metadata_columns(dataset, experiment_column),
+        width='stretch',
     )
 
-    if summary['invalidated_experiments']:
+    changed_cells = changed_metadata_cells(
+        view, edited_view, editable_metadata_columns(dataset, experiment_column))
+
+    if changed_cells:
+        apply_metadata_edits(dataset, changed_cells, experiment_column)
+
+    render_editor_status(dataset, experiment_column, changed_cells)
+
+
+def render_editor_status(dataset: ExperimentalDataset,
+                         experiment_column: str,
+                         changed_cells: dict) -> None:
+    """
+    Report the edit just saved and what still needs reprocessing.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset the status is read from.
+    experiment_column : str
+        Column of ``overview_df`` naming the experiments.
+    changed_cells : dict
+        ``{experiment_name: {column: new_value}}`` saved by this run, empty
+        when the grid was only redrawn.
+
+    Returns
+    -------
+    None : None
+        Widgets are written to the current Streamlit container.
+    """
+
+    if changed_cells:
+        changed_count = sum(len(values) for values in changed_cells.values())
+        st.success(
+            f"✅ Saved {changed_count} change(s) to {len(changed_cells)} experiment(s): "
+            + ", ".join(sorted(changed_cells))
+        )
+
+    stale_experiments = select_experiments_needing_reprocessing(dataset, experiment_column)
+
+    if stale_experiments:
         st.warning(
-            "⚠️ Processing-relevant metadata changed — these experiments need "
-            "reprocessing before their results can be used: "
-            + ", ".join(summary['invalidated_experiments'])
+            f"⚠️ {len(stale_experiments)} experiment(s) need reprocessing before their "
+            "results can be used: " + ", ".join(stale_experiments)
+            + ". Use section 3 above."
         )
