@@ -13,24 +13,28 @@ dataset rather than by this page — see `pyKES.database.metadata_editing`.
 Datasets that declare nothing get an explanatory note instead of a grid, which
 is what keeps files written before the declarations existed working unchanged.
 
-Edits save themselves. There is no submit button, and the grid lives in an
-`st.fragment`, which is what makes that affordable: a committed cell reruns
-the fragment alone, so the page body — which re-reads the uploaded workbook
-and rewrites the whole HDF5 file to feed its download button — does not run.
-Measured in headless Chromium: typing into a cell 1500 px to the right of the
-grid's origin saved the value, left the page body un-executed, and left the
-grid scrolled exactly where it was.
+The grid sits **in a form, inside a fragment**, and both halves are
+load-bearing. Measured in headless Chromium against the deployed layout:
 
-Both of those were bugs in the first version of this page, and both are worth
-not reintroducing:
+* **The form is what makes the spreadsheet gestures work.** Inside one, a
+  committed cell sends nothing and triggers no rerun, so a drag-fill or a
+  pasted block is left alone until the button is pressed: dragging a value
+  down four rows arrived as one five-cell delta and all five were saved.
+  Saving on every committed cell instead — no form — reruns the grid
+  mid-gesture, which is what made drag-fill drop rows and single edits go
+  missing.
+* **The fragment is what keeps the page still.** A submit inside one reruns
+  the fragment alone: the page body does not execute, so neither the uploaded
+  workbook is re-read nor the whole HDF5 file rewritten for the download
+  button, and the scroll position does not move (537 -> 537 px with the button
+  below the grid, 70 -> 70 above it). The earlier version reran at app scope
+  and moved the page.
 
-* **A submit button that ends in `st.rerun` moves the page.** The app-scoped
-  rerun re-focuses the submit button and Streamlit's scroll container jumped
-  ~300 px (measured 180 -> 476), pushing the grid off screen.
-* **Changing the widget key resets the grid's horizontal scroll.** Scroll
-  survives a fragment rerun and an app-scoped rerun alike (1200 -> 1200) and
-  is lost only when the key changes (1200 -> 0), which is why the revision
-  counter is bumped on an uploaded sheet and nothing else.
+Two more things not to reintroduce. `st.rerun` after a submit is unnecessary
+here and is what an app-scoped rerun costs. And changing the grid's widget key
+resets its horizontal scroll to the first columns — scroll survives a rerun of
+either scope (1200 -> 1200 px) and is lost only to a new key — so the key is
+bumped by an uploaded workbook and nothing else.
 """
 
 import streamlit as st
@@ -53,6 +57,15 @@ from pyKES.streamlit_app.config_interface import DataUploadConfig
 # the cost of resetting its scroll position, which is why nothing else bumps
 # it.
 METADATA_EDITOR_REVISION_KEY = 'metadata_editor_revision'
+
+# Key of the form the grid and its button share. Fixed rather than following
+# the revision: the form's identity does not need to change when the grid is
+# re-seeded, and a stable key keeps the button's own state intact.
+METADATA_EDITOR_FORM_KEY = 'metadata_editor_form'
+
+# Outcome of an applied edit, rendered on the run *after* it. Applying ends in
+# an app-scoped rerun, which discards everything the applying run had drawn.
+METADATA_EDIT_SUMMARY_KEY = 'metadata_editor_last_summary'
 
 
 def metadata_editor_widget_key() -> str:
@@ -149,11 +162,13 @@ def render_editing_policy(dataset: ExperimentalDataset, locked_columns: list) ->
     """
 
     st.markdown(
-        "Correct metadata directly in the table below. **Edits save as you make them** — "
-        "cells can be selected, dragged and pasted into as in a spreadsheet, so several "
-        "experiments can be corrected in one go. Editing a column the processing function "
-        "reads clears the experiment's `Processed` flag and lists it for reprocessing in "
-        "section 3. Uploading a metadata sheet above replaces whatever is edited here."
+        "Correct metadata directly in the table below, then press **Apply metadata "
+        "changes**. Cells can be selected, dragged down and pasted into as in a "
+        "spreadsheet, so several experiments can be corrected in one go — nothing is "
+        "stored until the button is pressed, which is what leaves those gestures "
+        "undisturbed. Editing a column the processing function reads clears the "
+        "experiment's `Processed` flag and lists it for reprocessing in section 4 below. "
+        "Uploading a metadata sheet above replaces whatever is edited here."
     )
 
     if locked_columns:
@@ -177,19 +192,12 @@ def render_editing_policy(dataset: ExperimentalDataset, locked_columns: list) ->
 @st.fragment
 def render_metadata_grid(dataset: ExperimentalDataset, experiment_column: str) -> None:
     """
-    Render the grid, save whatever it changed, and report what that invalidated.
-
-    A fragment on purpose: a committed cell reruns this function and nothing
-    else, so saving an edit costs neither a re-read of the uploaded workbook
-    nor a rewrite of the HDF5 file, and moves nothing on screen. The flip side
-    is that the page body does not re-run either, so section 3's standing
-    warning and its shortcut count catch up on the next page interaction —
-    which is why the same information is repeated here, where it is live.
+    Render the grid and its button, and save what the grid changed on submit.
 
     Parameters
     ----------
     dataset : ExperimentalDataset
-        Dataset mutated in place.
+        Dataset mutated in place when the button is pressed.
     experiment_column : str
         Column of ``overview_df`` naming the experiments.
 
@@ -197,32 +205,106 @@ def render_metadata_grid(dataset: ExperimentalDataset, experiment_column: str) -
     -------
     None : None
         Widgets are written to the current Streamlit container.
+
+    Notes
+    -----
+    A fragment, so the submit reruns this function and nothing else. The page
+    body not re-running would leave section 4's standing warning and its
+    shortcut count stale, so an applied edit ends in an app-scoped rerun. That
+    section sits *below* this one, which is what keeps its warning from pushing
+    the grid down when it appears.
     """
+
+    parked_summary = st.session_state.pop(METADATA_EDIT_SUMMARY_KEY, None)
 
     view = metadata_editor_view(dataset, experiment_column)
 
-    edited_view = st.data_editor(
-        view,
-        key=metadata_editor_widget_key(),
-        num_rows="fixed",
-        disabled=locked_metadata_columns(dataset, experiment_column),
-        width='stretch',
-    )
+    with st.form(key=METADATA_EDITOR_FORM_KEY, clear_on_submit=False):
+        edited_view = st.data_editor(
+            view,
+            key=metadata_editor_widget_key(),
+            num_rows="fixed",
+            disabled=locked_metadata_columns(dataset, experiment_column),
+            width='stretch',
+        )
+        submitted = st.form_submit_button("💾 Apply metadata changes", width="stretch")
 
+    # The grid sends nothing until the form is submitted, so there is only
+    # something to compare against on the run the button was pressed.
     changed_cells = changed_metadata_cells(
-        view, edited_view, editable_metadata_columns(dataset, experiment_column))
+        view, edited_view,
+        editable_metadata_columns(dataset, experiment_column)) if submitted else {}
 
     if changed_cells:
         apply_metadata_edits(dataset, changed_cells, experiment_column)
+        st.session_state[METADATA_EDIT_SUMMARY_KEY] = describe_saved_edits(changed_cells)
 
-    render_editor_status(dataset, experiment_column, changed_cells)
+        # Section 4's warning and its "only experiments needing reprocessing"
+        # checkbox are drawn by the page body, so a fragment-scoped rerun
+        # cannot refresh them — they would stay stale until the next page
+        # interaction. An app-scoped rerun refreshes them without moving the
+        # page: measured at 686 -> 686 px with the button in view, because
+        # what moved the page was the widget key changing and the status box
+        # changing height, not the scope of the rerun. The section is below
+        # this one, so its warning appearing costs the grid no movement.
+        st.rerun(scope="app")
+
+    render_editor_status(dataset, experiment_column, submitted, parked_summary)
+
+
+def describe_saved_edits(changed_cells: dict) -> str:
+    """
+    Describe an applied edit, for the run that renders after it.
+
+    Parameters
+    ----------
+    changed_cells : dict
+        ``{experiment_name: {column: new_value}}`` that was stored.
+
+    Returns
+    -------
+    str
+        One line of status text.
+    """
+
+    changed_count = sum(len(values) for values in changed_cells.values())
+
+    return (f"✅ Saved {changed_count} change(s) to {len(changed_cells)} experiment(s): "
+            + ", ".join(sorted(changed_cells)))
+
+
+def describe_editor_state(submitted: bool, parked_summary) -> str:
+    """
+    Say what the last press of the button did, or that nothing is stored yet.
+
+    Parameters
+    ----------
+    submitted : bool
+        Whether the button was pressed on this run.
+    parked_summary : str or None
+        Outcome of an edit applied by the previous run, if there was one.
+
+    Returns
+    -------
+    str
+        One line of status text.
+    """
+
+    if parked_summary:
+        return parked_summary
+
+    if submitted:
+        return "Nothing had been changed, so nothing was stored."
+
+    return "Edits are stored when you press **Apply metadata changes**."
 
 
 def render_editor_status(dataset: ExperimentalDataset,
                          experiment_column: str,
-                         changed_cells: dict) -> None:
+                         submitted: bool,
+                         parked_summary) -> None:
     """
-    Report the edit just saved and what still needs reprocessing.
+    Report what the button did and what still needs reprocessing.
 
     Parameters
     ----------
@@ -230,28 +312,35 @@ def render_editor_status(dataset: ExperimentalDataset,
         Dataset the status is read from.
     experiment_column : str
         Column of ``overview_df`` naming the experiments.
-    changed_cells : dict
-        ``{experiment_name: {column: new_value}}`` saved by this run, empty
-        when the grid was only redrawn.
+    submitted : bool
+        Whether the button was pressed on this run.
+    parked_summary : str or None
+        Outcome of an edit applied by the previous run, if there was one.
 
     Returns
     -------
     None : None
         Widgets are written to the current Streamlit container.
+
+    Notes
+    -----
+    Always exactly two captions, whatever the state. An `st.success` box that
+    comes and goes changes the height of the fragment and shifts everything
+    below it on the page, which reads as the page moving under the reader —
+    the complaint this section is meant to have stopped. Section 4 carries the
+    same reprocessing list as a proper warning, where it has room to be loud.
     """
 
-    if changed_cells:
-        changed_count = sum(len(values) for values in changed_cells.values())
-        st.success(
-            f"✅ Saved {changed_count} change(s) to {len(changed_cells)} experiment(s): "
-            + ", ".join(sorted(changed_cells))
-        )
+    st.caption(describe_editor_state(submitted, parked_summary))
 
     stale_experiments = select_experiments_needing_reprocessing(dataset, experiment_column)
 
     if stale_experiments:
-        st.warning(
+        st.caption(
             f"⚠️ {len(stale_experiments)} experiment(s) need reprocessing before their "
             "results can be used: " + ", ".join(stale_experiments)
-            + ". Use section 3 above."
+            + " — use section 4 below."
         )
+        return
+
+    st.caption("All experiments in the dataset are up to date with their metadata.")

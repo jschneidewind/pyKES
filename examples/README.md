@@ -121,31 +121,38 @@ experiments.
 
 ## 5. Edit metadata
 
-Section **4. ✏️ Edit Metadata** is a spreadsheet grid over the overview sheet.
+Section **3. ✏️ Edit Metadata** is a spreadsheet grid over the overview sheet.
+
+Correct as many cells as you like, then press **💾 Apply metadata changes** —
+nothing is stored until you do, which is what leaves the spreadsheet gestures
+undisturbed while you make them.
 
 1. **Read-only columns.** `group`, `File name H2` and `File name O2` are
    greyed out: they select *which* measurement an experiment is, so correcting
    one means a corrected sheet and the raw files again. The caption above the
    grid lists them.
 2. **Edit a processing column.** Change `Irradiance [mW/cm2]` for `NB-316`
-   from `50` to `40` and press Enter.
-   *Look for:* "✅ Saved 1 change(s)…" immediately, and "⚠️ 1 experiment(s)
-   need reprocessing…". Nothing else on the page moves, and the grid stays
-   scrolled where it was — the grid saves from inside a fragment, so the page
-   itself does not re-run.
-3. **Edit several at once.** Select a block of cells and paste a column
-   straight out of Excel, or drag-fill from one cell. Streamlit's editor does
-   this natively.
-4. **Edit a free column.** Change a `Notes` cell.
-   *Look for:* it saves, and **no** reprocessing warning — `Notes` is read by
-   nobody but the reader.
+   from `50` to `40`, press Enter, then press the button.
+   *Look for:* "✅ Saved 1 change(s)…" and "⚠️ 1 experiment(s) need
+   reprocessing…" under the grid, **and** section 4 below it picking the same
+   thing up on that press: its own warning appears and its "Only experiments
+   needing reprocessing (1)" checkbox becomes selectable. Nothing moves — the
+   editor is above everything that changes.
+3. **Edit several at once.** Drag the small handle at the bottom-right of a
+   corrected cell down a few rows, or paste a column straight out of Excel,
+   then press the button once.
+   *Look for:* one message naming *every* experiment you touched — the whole
+   gesture arrives as a single change.
+4. **Edit a free column.** Change a `Notes` cell and apply.
+   *Look for:* it is stored, and **no** reprocessing warning — `Notes` is read
+   by nobody but the reader.
 5. **Try a fraction.** Set `Unisense Irradiation start [s]` to `605.5`.
    *Look for:* `605.5`, not `605`. Whole-number columns are widened rather
    than rounded.
 
 ## 6. Reprocess
 
-Section **3. ♻️ Reprocess Existing Experiments** shows the standing warning
+Section **4. ♻️ Reprocess Existing Experiments** shows the standing warning
 and a **"Only experiments needing reprocessing (n)"** checkbox.
 
 Pick the **💧 Liquid phase** pipeline, tick the checkbox, leave **Refresh
@@ -170,10 +177,12 @@ re-uploading it the way to undo an editing session.
 **Results Table.** Select all six experiments.
 - *Column selection:* **Results to show** and **Metadata to show**. Add
   `Irradiance [mW/cm2]`; it joins on the left of the results.
-- *Sorting:* click a column header → **Sort ascending**. `H2 max. rate` orders
-  `2.248` before `12.730` — by magnitude, not by first digit. The table holds
-  numbers; the digits you see come from each instruction's `format`.
-- *Uncertainties:* `H2 max. rate (±)` is a sortable column of its own.
+- *Sorting:* click a column header → **Sort ascending**. `H2 max. rate
+  (umol / h)` orders `2.248` before `12.730` — by magnitude, not by first
+  digit. The table holds numbers; the digits you see come from each
+  instruction's `format`, and the unit is named once in the header rather than
+  repeated in every cell.
+- *Uncertainties:* `H2 max. rate ± (umol / h)` is a sortable column of its own.
 - *Quality flags:* the `Rate quality flags` column carries whatever the
   max-rate fit wants a human to look at, empty for a clean series.
 - *Export:* **📥 Download Table as CSV** writes numbers, not formatted text.
@@ -230,5 +239,5 @@ against; download the dataset again to store the corrected file.
 Datasets whose `processing_parameters` declare neither
 `metadata_used_for_raw_data_loading` nor `metadata_used_for_processing` — every
 file written before those declarations existed — get an explanatory note in
-section 4 instead of a grid. Their metadata is corrected by editing the Excel
+section 3 instead of a grid. Their metadata is corrected by editing the Excel
 sheet and uploading it.

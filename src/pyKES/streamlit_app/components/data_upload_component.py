@@ -133,19 +133,25 @@ def render_data_upload(config: DataUploadConfig) -> None:
         _render_raw_data_uploaders(handler, dataset, config.external_version)
     st.divider()
 
-    st.subheader("3. ♻️ Reprocess Existing Experiments")
+    # The editor comes before the reprocessing section, and that ordering is
+    # load-bearing: applying an edit makes the reprocessing warning appear, and
+    # anything appearing *above* the grid pushes the grid down by its own
+    # height. Below it, the warning costs the editor nothing.
+    job_running = any_active_job(_page_job_keys(config))
+
+    st.subheader("3. ✏️ Edit Metadata")
+    _render_metadata_section(config, dataset, job_running)
+    st.divider()
+
+    st.subheader("4. ♻️ Reprocess Existing Experiments")
     _render_reprocessing_section(config, dataset)
     st.divider()
 
     # A running job reruns the page once per experiment. The sections below
     # rewrite the whole HDF5 file and re-derive the statistics on every run,
     # which would dwarf the processing itself, so they wait for it to finish.
-    if any_active_job(_page_job_keys(config)):
+    if job_running:
         return
-
-    st.subheader("4. ✏️ Edit Metadata")
-    render_metadata_editor(config, dataset)
-    st.divider()
 
     st.subheader("5. 📦 Merge HDF5 Files")
     _render_HDF5_merging(config, dataset)
@@ -166,6 +172,43 @@ def render_data_upload(config: DataUploadConfig) -> None:
     st.subheader("🧾 Dataset Provenance")
     _render_version_information(dataset)
     st.divider()
+
+
+def _render_metadata_section(config: DataUploadConfig,
+                             dataset: ExperimentalDataset,
+                             job_running: bool) -> None:
+    """
+    Render the metadata editor, or say why it is not editable right now.
+
+    Parameters
+    ----------
+    config : DataUploadConfig
+        Page configuration, handed on to the editor.
+    dataset : ExperimentalDataset
+        Dataset whose metadata is edited.
+    job_running : bool
+        Whether an ingestion or reprocessing run is in progress.
+
+    Returns
+    -------
+    None : None
+        Widgets are written to the current Streamlit container.
+
+    Notes
+    -----
+    The editor sits above the reprocessing section, which is before the
+    active-job guard, so unlike the sections after that guard it would
+    otherwise render while a run is stepping through the experiments. A grid
+    and a processing run writing to the same overview table at the same time is
+    worth refusing rather than resolving.
+    """
+
+    if job_running:
+        st.info("Metadata editing pauses while experiments are being processed — "
+                "the grid and the run would be writing to the same overview table.")
+        return
+
+    render_metadata_editor(config, dataset)
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +268,7 @@ def _render_metadata_uploader(
         label = '📋 Upload Metadata (Excel)',
         type = ['xlsx', 'xls'],
         help = 'Excel sheet listing experiments. Uploading merges into the dataset overview by '
-               'experiment name, and takes precedence over metadata edited in section 4.',
+               'experiment name, and takes precedence over metadata edited in section 3.',
         accept_multiple_files=False,
         key="metadata_excel_uploader",
         )

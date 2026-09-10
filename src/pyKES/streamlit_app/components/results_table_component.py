@@ -42,7 +42,9 @@ EXPERIMENT_NAME_COLUMN = 'Experiment'
 
 # Suffix of the column holding an instruction's uncertainty. A column of its
 # own rather than a 'value ± error' string, so both stay sortable numbers.
-ERROR_COLUMN_SUFFIX = ' (±)'
+# Bare rather than parenthesised, because the unit is parenthesised onto the
+# header after it and 'rate ± (umol / h)' reads better than 'rate (±) (umol / h)'.
+ERROR_COLUMN_SUFFIX = ' ±'
 
 # Format spec applied when an instruction does not define its own 'format'
 DEFAULT_VALUE_FORMAT = '.4g'
@@ -236,6 +238,34 @@ def error_column_name(label: str) -> str:
     return f"{label}{ERROR_COLUMN_SUFFIX}"
 
 
+def column_header(label: str, unit) -> str:
+    """
+    Build a column header, carrying the unit where the instruction names one.
+
+    Parameters
+    ----------
+    label : str
+        Display name of the instruction, or of its uncertainty.
+    unit : str or None
+        Target unit of the instruction.
+
+    Returns
+    -------
+    str
+        The header shown above the column.
+
+    Notes
+    -----
+    The unit belongs to the column, not to each of its cells: repeating it in
+    every row costs width, makes the numbers harder to compare down the
+    column, and puts text in a cell whose value is a number. `unit` still
+    decides what `Quantity` values are converted into — that is its other,
+    load-bearing job.
+    """
+
+    return f"{label} ({unit})" if unit else label
+
+
 def select_instructions(results_table_instructions: dict, selected_results: list) -> dict:
     """
     Keep the requested instructions, in the order the app declared them.
@@ -275,10 +305,11 @@ def result_column_names(results_table_instructions: dict) -> list:
     column_names = []
 
     for label, result_config in results_table_instructions.items():
-        column_names.append(label)
+        unit = result_config.get('unit', None)
+        column_names.append(column_header(label, unit))
 
         if result_config.get('error', None):
-            column_names.append(error_column_name(label))
+            column_names.append(column_header(error_column_name(label), unit))
 
     return column_names
 
@@ -406,7 +437,7 @@ def join_metadata_columns(table: pd.DataFrame,
     return metadata.join(table, how='right')
 
 
-def format_result_cell(value, format_spec: str = DEFAULT_VALUE_FORMAT, unit=None) -> str:
+def format_result_cell(value, format_spec: str = DEFAULT_VALUE_FORMAT) -> str:
     """
     Render one result value the way the instruction asks for.
 
@@ -416,13 +447,12 @@ def format_result_cell(value, format_spec: str = DEFAULT_VALUE_FORMAT, unit=None
         Resolved value of the cell.
     format_spec : str, optional
         Python format spec from the instruction.
-    unit : str or None, optional
-        Unit appended to the formatted number.
 
     Returns
     -------
     str
-        Formatted cell text.
+        Formatted cell text: the number alone. The unit is in the header, see
+        `column_header`.
 
     Notes
     -----
@@ -440,7 +470,7 @@ def format_result_cell(value, format_spec: str = DEFAULT_VALUE_FORMAT, unit=None
     if isinstance(value, str):
         return value
 
-    return f"{format(value, format_spec)} {unit}" if unit else format(value, format_spec)
+    return format(value, format_spec)
 
 
 def result_cell_formatters(results_table_instructions: dict) -> dict:
@@ -466,10 +496,9 @@ def result_cell_formatters(results_table_instructions: dict) -> dict:
         format_spec = result_config.get('format', DEFAULT_VALUE_FORMAT)
         unit = result_config.get('unit', None)
 
-        for column in (label, error_column_name(label)):
-            formatters[column] = partial(format_result_cell,
-                                         format_spec=format_spec,
-                                         unit=unit)
+        for name in (label, error_column_name(label)):
+            formatters[column_header(name, unit)] = partial(format_result_cell,
+                                                            format_spec=format_spec)
 
     return formatters
 
@@ -718,10 +747,10 @@ def render_help_section() -> None:
         ```
 
         Besides the required `'result'` path, each entry may define
-        `'unit'` (target unit, used to convert `Quantity` values),
-        `'format'` (Python format spec, default `'{DEFAULT_VALUE_FORMAT}'`) and
-        `'error'` (path to an uncertainty, which becomes its own
-        `label{ERROR_COLUMN_SUFFIX}` column).
+        `'unit'` (target unit: `Quantity` values are converted into it, and it
+        names the column — a cell holds the number alone), `'format'` (Python
+        format spec, default `'{DEFAULT_VALUE_FORMAT}'`) and `'error'` (path to
+        an uncertainty, which becomes its own `label{ERROR_COLUMN_SUFFIX}` column).
 
         #### Tips
         - The experiment selection is shared with the Time-Series page

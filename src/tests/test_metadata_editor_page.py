@@ -4,9 +4,15 @@ Tests for the metadata editor as it is wired into the Data Upload page.
 `AppTest` runs a Streamlit script in-process, so the grid and the save that
 follows a committed cell can be driven without a browser. The edits themselves
 are injected the way the frontend sends them — as the ``edited_rows`` delta
-`st.data_editor` keeps in session state — and there is no submit button: the
-grid autosaves, which is what keeps the page from re-running and moving under
-the user.
+`st.data_editor` keeps in session state — and applied with the form's own
+submit button, which is what a form does: nothing reaches Python until it is
+pressed, so a drag-fill or a pasted block is left undisturbed while it is
+being made.
+
+Applying ends in an app-scoped rerun, so section 4 — drawn by the page body,
+below the editor — shows the reprocessing warning and enables its shortcut on
+the same press. `test_the_reprocessing_shortcut_offers_exactly_the_flagged_experiments`
+is what pins that: it asserts on the press itself, with no extra run.
 
 `test_an_edit_survives_the_workbook_staying_in_the_uploader` is the regression
 that matters most here. The uploader keeps its file for the whole session, and
@@ -102,20 +108,32 @@ def run_page(declarations=DECLARATIONS):
     return app
 
 
-def edit_cell(app, row_index, column, value):
-    """Inject an edit the way the data editor's frontend sends one."""
+def edit_cells(app, edited_rows):
+    """
+    Inject edits the way the data editor's frontend sends them, and apply them.
+
+    ``edited_rows`` is the delta itself — ``{row_index: {column: value}}`` —
+    so one call can stand in for a drag-fill down several rows, which is what
+    the grid sends as a single delta on submit.
+    """
     revision = app.session_state[METADATA_EDITOR_REVISION_KEY]
 
-    app.session_state[f"metadata_editor_{revision}"] = {"edited_rows": {row_index: {column: value}},
+    app.session_state[f"metadata_editor_{revision}"] = {"edited_rows": edited_rows,
                                                         "added_rows": [],
                                                         "deleted_rows": []}
 
-    # No submit button: committing a cell is what triggers the rerun that saves it.
+    apply_button = next(button for button in app.button if "Apply metadata" in button.label)
+    apply_button.click()
     app.run(timeout=60)
 
     assert [element.value for element in app.exception] == []
 
     return app
+
+
+def edit_cell(app, row_index, column, value):
+    """Inject and apply one edited cell."""
+    return edit_cells(app, {row_index: {column: value}})
 
 
 def build_workbook(overview_df):
@@ -148,10 +166,23 @@ def test_the_editor_is_offered_as_its_own_section():
     subheaders = [element.value for element in app.subheader]
 
     assert any("Edit Metadata" in subheader for subheader in subheaders)
-    # Renumbered around the new section, and still behind the active-job guard
     assert any("5. 📦 Merge HDF5 Files" == subheader for subheader in subheaders)
     assert any("6. 💾 Download Dataset" == subheader for subheader in subheaders)
     assert METADATA_EDITOR_REVISION_KEY in app.session_state
+
+
+def test_the_editor_comes_before_the_reprocessing_section():
+    # Load-bearing, not cosmetic: applying an edit makes the reprocessing
+    # warning appear, and anything appearing above the grid pushes the grid
+    # down by its own height.
+    subheaders = [element.value for element in run_page().subheader]
+
+    editor = next(index for index, text in enumerate(subheaders) if "Edit Metadata" in text)
+    reprocessing = next(index for index, text in enumerate(subheaders) if "Reprocess" in text)
+
+    assert editor < reprocessing
+    assert subheaders[editor].startswith("3.")
+    assert subheaders[reprocessing].startswith("4.")
 
 
 def test_a_dataset_without_declarations_gets_an_explanation_instead():
@@ -172,16 +203,19 @@ def test_editing_a_processing_column_flags_the_experiment():
     assert dataset.overview_df["Processed"].tolist() == ["False", "True"]
     assert dataset.experiments["Exp_001"].metadata["Irradiance [mW/cm2]"] == 55.0
 
-    # The editor reports it straight away, from inside its own fragment.
-    warnings = [element.value for element in app.warning]
-    assert sum("Exp_001" in warning for warning in warnings) == 1
+    # The editor reports it straight away, from inside its own fragment — as a
+    # caption, so the fragment keeps the same height and nothing below it moves.
+    # Two captions name it: what was stored, and what now needs reprocessing.
+    captions = [element.value for element in app.caption]
+    assert sum("Exp_001" in caption for caption in captions) == 2
+    assert any("Saved 1 change(s)" in caption for caption in captions)
+    assert any("need reprocessing" in caption for caption in captions)
 
-    # Section 3 sits above the editor and had already rendered when the edit
-    # was saved, so its standing warning joins on the next page run. That lag
-    # is the price of not re-running the page on every keystroke.
-    app.run(timeout=60)
-    warnings = [element.value for element in app.warning]
-    assert sum("Exp_001" in warning for warning in warnings) == 2
+    # Section 4 is drawn by the page body, so applying ends in an app-scoped
+    # rerun to bring it up to date on the same press rather than leaving it
+    # stale until the next page interaction. It sits below the editor, so its
+    # warning appearing does not push the grid down.
+    assert sum("Exp_001" in element.value for element in app.warning) == 1
 
     # The widget key is untouched: changing it would reset the grid's scroll
     # position, and there is no stale delta to escape from.
@@ -201,9 +235,7 @@ def test_editing_a_free_column_leaves_the_flag_alone():
 def test_the_reprocessing_shortcut_offers_exactly_the_flagged_experiments():
     app = edit_cell(run_page(), 0, "Irradiance [mW/cm2]", 55.0)
 
-    # Section 3 renders above the editor, so it picks the flag up one run later
-    app.run(timeout=60)
-
+    # Selectable on the same press: the app-scoped rerun redraws section 4.
     shortcut = next(checkbox for checkbox in app.checkbox
                     if "Only experiments needing reprocessing" in checkbox.label)
 
@@ -274,3 +306,41 @@ def test_a_fraction_survives_a_whole_number_column():
 
     # int64 from Excel; the column is widened rather than rounding to 42
     assert overview.loc["Exp_001", "Irradiance [mW/cm2]"] == 42.5
+
+
+def test_a_drag_fill_down_several_rows_is_applied_to_all_of_them():
+    app = upload_workbook(run_page())
+
+    # What the grid sends after dragging one value down: one delta, many rows.
+    edit_cells(app, {0: {"Comment": "checked"}, 1: {"Comment": "checked"}})
+
+    overview = app.session_state["experimental_dataset"].overview_df.set_index("Experiment")
+
+    assert overview["Comment"].tolist() == ["checked", "checked"]
+
+
+def test_pressing_the_button_with_nothing_changed_says_so():
+    app = upload_workbook(run_page())
+
+    apply_button = next(button for button in app.button if "Apply metadata" in button.label)
+    apply_button.click()
+    app.run(timeout=60)
+
+    assert [element.value for element in app.exception] == []
+    assert any("nothing was stored" in caption.value for caption in app.caption)
+
+
+def test_editing_pauses_while_a_processing_run_is_stepping_through():
+    app = upload_workbook(run_page())
+
+    next(button for button in app.button if "Reprocess" in button.label).click()
+    app.run(timeout=60)
+
+    assert [element.value for element in app.exception] == []
+
+    # The editor sits before the active-job guard now, so unlike the sections
+    # after it the grid would otherwise render while the run writes to the same
+    # overview table.
+    assert any("pauses while experiments are being processed" in element.value
+               for element in app.info)
+    assert not [button for button in app.button if "Apply metadata" in button.label]
