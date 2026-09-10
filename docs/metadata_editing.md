@@ -182,6 +182,11 @@ The sheet is merged **once per uploaded file**, tracked by the uploader's
 sheet wins" into "the sheet wins again one rerun after every edit". Clearing
 the widget lets the same workbook be uploaded again.
 
+Merging **HDF5 files** re-seeds the grid for the same reason and a sharper one:
+the merged sheet is a different table, with rows for experiments the dataset
+did not have before, and the grid addresses its rows by position — a delta
+still held client-side would land on another experiment's row.
+
 ---
 
 ## 4. The `Processed` flag, at every transition

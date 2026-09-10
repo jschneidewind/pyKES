@@ -80,7 +80,10 @@ Two things the sheet deliberately does not own:
 ``synchronize_experiment_metadata()`` resolves them in favour of the sheet.
 Values are compared by value, not by type: the same cell arrives as a NumPy
 scalar from a DataFrame and a plain float from JSON, and two missing values
-agree, so a round trip through HDF5 or Excel is not a divergence.
+agree, so a round trip through HDF5 or Excel is not a divergence. A key the
+metadata does not carry at all is a divergence only where the row has a value
+to impose — a blank cell replaces no value with no value, which is what a
+present key holding ``NaN`` already did.
 
 .. list-table::
    :header-rows: 1
@@ -255,9 +258,36 @@ Merging datasets:
    merged = ExperimentalDataset.merge_hdf5_files(['run_a.h5', 'run_b.h5'],
                                                  output_filename='merged.h5')
 
-Duplicate experiment names are reported and skipped rather than overwritten,
-and the merged dataset records which files it came from under
-``version['merged_from']``.
+Files earlier in the list take precedence: where two of them hold an experiment
+of the same name, the first one is kept and the later one is skipped rather than
+overwritten. The merged dataset records which files it came from under
+``version['merged_from']``, and what the merge decided under ``merge_report``:
+
+.. code-block:: python
+
+   merged.merge_report['skipped_experiments']   # {name: source it was skipped in}
+   merged.merge_report['metadata_corrected']    # what the merged sheet re-derived
+
+``skipped_experiments`` exists because a merge used to only *print* what it left
+out, so an app deployed in a browser dropped experiments without telling
+anybody. The Data Upload page shows both.
+
+The overview sheets are matched **by experiment name**, not by whole rows. Two
+files routinely list the same experiment with a different processed flag, or
+with a column one of the sheets does not have, and concatenating the sheets and
+dropping identical rows left every such pair behind as two rows describing one
+experiment. Where both files describe an experiment, the row from the file that
+contributed the stored experiment wins — otherwise the merged dataset would hold
+one file's measurements described by another file's sheet. A row naming no
+experiment cannot be a duplicate of one and is carried over as it is.
+
+A column only some of the sheets carry is completed from the stored metadata of
+the experiments themselves, since an empty cell there would otherwise overwrite
+a real measured value with ``NaN`` — the sheet is what stored metadata is
+re-derived from. And because a merged sheet can only be addressed by one
+column, files that name their experiments in different columns are refused
+rather than merged into a sheet whose rows are unreachable from half of its
+experiments.
 
 
 What HDF5 will store

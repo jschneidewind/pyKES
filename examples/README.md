@@ -216,8 +216,12 @@ Process a subset into one file and merge it into another:
 2. Load `example_dataset.h5` on the Home page.
 3. Section **5. 📦 Merge HDF5 Files** → upload `partial.h5` → **🚀 Merge**.
 
-*Look for:* the merged dataset reporting six experiments, duplicates skipped
-with a warning naming them.
+*Look for:* one line reporting what was merged into what — six experiments in
+six overview rows — and a warning naming `NB-316` as skipped, because the
+dataset already held it and a merge never overwrites what is already loaded.
+The counts are the point: the whole page follows the merge on the same press,
+so **💾 Download Dataset** below serves the merged file rather than the one it
+replaced, and the sheet has six rows rather than one per file per experiment.
 
 ## 11. Provenance
 
