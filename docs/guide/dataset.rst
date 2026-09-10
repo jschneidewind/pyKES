@@ -61,10 +61,23 @@ The dataset closes that off from four sides:
 * ``save_to_hdf5`` raises rather than writing a dataset where the two disagree,
   naming the experiments and columns. Every mutation path re-establishes the
   invariant, so reaching a save with it broken means something wrote to
-  ``Experiment.metadata`` behind the dataset's back.
+  ``Experiment.metadata`` behind the dataset's back. It also raises rather than
+  writing results that no longer follow from the metadata beside them — see
+  ``stale_processed_experiments`` below.
 * ``load_from_hdf5`` repairs a file written before the guarantee existed and
   records what it corrected in ``metadata_repair_report``, which the Streamlit
   Home page surfaces.
+
+A file is also not written while any experiment's results are **stale** —
+metadata changed after the experiment was processed, so its ``processed_data``
+was derived from a value the file no longer contains. ``save_to_hdf5`` refuses,
+``stale_processed_experiments()`` names them, and reprocessing clears it. Only
+experiments the dataset holds count: a row whose experiment has not been
+ingested has no stored results to be stale, so processing a sheet a few
+experiments at a time still works. A sheet with no ``Processed`` column has
+never had its processing state tracked and reports nothing.
+``save_to_hdf5(..., allow_stale_processed_data=True)`` writes it anyway, for a
+file that is not a deliverable.
 
 Two things the sheet deliberately does not own:
 

@@ -34,6 +34,7 @@ import pandas as pd
 import streamlit as st
 
 from pyKES.database.database_experiments import (ExperimentalDataset,
+                                                 describe_experiment_names,
                                                  describe_metadata_divergences,
                                                  describe_skipped_experiments)
 from pyKES.database.data_processing import (ingest_experiment,
@@ -717,8 +718,12 @@ def _merge_uploaded_hdf5_files(dataset: ExperimentalDataset, uploaded_files: lis
     """
 
     with tempfile.TemporaryDirectory() as tmp_dir:
+        # Staged for the merge, not delivered: refusing this file because an
+        # experiment awaits reprocessing would block merging altogether, and
+        # it is read back and discarded within this run.
         current_dataset_path = str(Path(tmp_dir) / "_current_dataset.h5")
-        dataset.save_to_hdf5(current_dataset_path, verbose=False)
+        dataset.save_to_hdf5(current_dataset_path, verbose=False,
+                             allow_stale_processed_data=True)
 
         merge_paths = [current_dataset_path]
 
@@ -815,11 +820,29 @@ def _render_download_section(
     ----------
     config : DataUploadConfig
     dataset : ExperimentalDataset
+
+    Returns
+    -------
+    None : None
+        Widgets are written to the current Streamlit container.
+
+    Notes
+    -----
+    The stale-results check has to happen here rather than being left to
+    `ExperimentalDataset.save_to_hdf5`: the file is serialized while the page
+    renders, because `st.download_button` needs the bytes up front, so the
+    refusal would reach the user as a traceback covering the rest of the page.
     """
     st.subheader("💾 Download Dataset")
 
     if not dataset.experiments:
         st.info("No experiments in dataset. Upload data first to enable downloads.")
+        return
+
+    stale_experiments = dataset.stale_processed_experiments()
+
+    if stale_experiments:
+        _render_stale_results_refusal(stale_experiments)
         return
 
     col1, col2 = st.columns([2, 1])
@@ -850,6 +873,39 @@ def _render_download_section(
             "storing large numerical datasets and metadata together. Files written "
             "by pyKES can be loaded back with ``ExperimentalDataset.load_from_hdf5``."
         )
+
+
+def _render_stale_results_refusal(stale_experiments: list) -> None:
+    """
+    Say why the dataset cannot be downloaded, and what clears the way.
+
+    Parameters
+    ----------
+    stale_experiments : list of str
+        Experiments whose stored results no longer follow from their metadata.
+
+    Returns
+    -------
+    None : None
+        Widgets are written to the current Streamlit container.
+
+    Notes
+    -----
+    The download is withheld rather than offered with a warning next to it,
+    because the file would look exactly like a correct one: nothing downstream
+    can tell results computed from metadata the file no longer contains from
+    results that follow from it.
+    """
+
+    st.warning(
+        f"⚠️ Download withheld: {len(stale_experiments)} experiment(s) hold results that no "
+        "longer follow from their metadata, because the metadata changed after they were "
+        f"processed — {describe_experiment_names(stale_experiments)}. The file would store "
+        "results derived from values it does not contain, and nothing reading it later could "
+        "tell. Reprocess them in section 4 above; its **Only experiments needing reprocessing** "
+        "shortcut selects exactly these."
+    )
+
 
 def _render_version_information(dataset: ExperimentalDataset) -> None:
     """

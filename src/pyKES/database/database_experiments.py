@@ -523,6 +523,172 @@ def decode_hdf5_text(attribute_value) -> str:
 # The overview sheet as the single source of experiment metadata
 # =============================================================================
 
+# ---------------------------------------------------------------------------
+# Declared metadata columns
+# ---------------------------------------------------------------------------
+
+# Keys under which a dataset declares which overview columns its pipeline
+# depends on. They live in `processing_parameters`, so they reach a dataset
+# from the file it was loaded from: a file written before the embedding app
+# declared them simply carries neither, which is the backward-compatibility
+# gate for everything built on them.
+METADATA_LOADING_KEY = 'metadata_used_for_raw_data_loading'
+METADATA_PROCESSING_KEY = 'metadata_used_for_processing'
+
+
+def declared_columns(dataset: 'ExperimentalDataset', declaration_key: str) -> List[str]:
+    """
+    Read one of the two declaration lists off a dataset.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset whose ``processing_parameters`` hold the declarations.
+    declaration_key : str
+        `METADATA_LOADING_KEY` or `METADATA_PROCESSING_KEY`.
+
+    Returns
+    -------
+    list of str
+        Declared column names, empty when the key is absent.
+    """
+
+    return list(dataset.processing_parameters.get(declaration_key, []))
+
+
+def metadata_editing_available(dataset: 'ExperimentalDataset') -> bool:
+    """
+    Report whether a dataset declares enough for its metadata to be edited.
+
+    This is the backward-compatibility gate. ``processing_parameters`` reaches
+    a dataset from the file it was loaded from, so a file written before the
+    embedding app declared these lists simply carries neither, and its
+    metadata stays read-only. Requiring *both* keys means a dataset that
+    declares nothing locked can never expose a raw-data-loading column as
+    editable by omission.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset to inspect.
+
+    Returns
+    -------
+    bool
+        True when both declaration lists are present.
+    """
+
+    return (METADATA_LOADING_KEY in dataset.processing_parameters
+            and METADATA_PROCESSING_KEY in dataset.processing_parameters)
+
+
+def columns_invalidating_processing(dataset: 'ExperimentalDataset') -> Optional[List[str]]:
+    """
+    List the columns whose change makes stored processed data obsolete.
+
+    Both declared groups count: a changed processing parameter changes what
+    the processing function computes, and a changed filename or well number
+    means the raw data behind the results is a different measurement
+    altogether.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset holding the declarations.
+
+    Returns
+    -------
+    list of str or None
+        The declared columns, or None for a dataset that declares nothing —
+        the sentinel `ExperimentalDataset.update_overview_df` reads as "treat
+        every difference as invalidating", which is how datasets behaved
+        before the declarations existed.
+    """
+
+    if not metadata_editing_available(dataset):
+        return None
+
+    return (declared_columns(dataset, METADATA_LOADING_KEY)
+            + declared_columns(dataset, METADATA_PROCESSING_KEY))
+
+
+# ---------------------------------------------------------------------------
+# Processing state
+# ---------------------------------------------------------------------------
+
+def experiments_with_stale_results(overview_df: pd.DataFrame,
+                                   experiment_column: str,
+                                   experiment_names) -> List[str]:
+    """
+    List experiments whose stored results no longer follow from their metadata.
+
+    Parameters
+    ----------
+    overview_df : pandas.DataFrame
+        Overview sheet carrying the processed flag.
+    experiment_column : str
+        Column naming the experiments.
+    experiment_names : container of str
+        Experiments the dataset actually holds.
+
+    Returns
+    -------
+    list of str
+        Experiments that are held *and* whose row is not flagged
+        `PROCESSED_TRUE`. Being held is what separates a stale result from an
+        experiment that has simply not been ingested yet: a row with no
+        experiment behind it has no stored results that could be stale, and
+        processing a sheet a few experiments at a time is a normal way to work.
+
+    Notes
+    -----
+    A sheet without a `PROCESSED_FLAG_COLUMN` makes no claim about processing —
+    nothing has been tracking it — and so reports nothing rather than declaring
+    every experiment stale. Read-only, unlike
+    `pyKES.database.data_processing.ensure_processed_column`: a save must not
+    change the dataset it is writing.
+    """
+
+    if (overview_df.empty
+            or PROCESSED_FLAG_COLUMN not in overview_df.columns
+            or experiment_column not in overview_df.columns):
+        return []
+
+    held_names = {str(experiment_name) for experiment_name in experiment_names}
+
+    stale = (overview_df[PROCESSED_FLAG_COLUMN].ne(PROCESSED_TRUE)
+             & overview_df[experiment_column].astype(str).isin(held_names))
+
+    return overview_df.loc[stale, experiment_column].astype(str).tolist()
+
+
+def describe_experiment_names(experiment_names: List[str], maximum_reported: int = 5) -> str:
+    """
+    Render experiment names as one line, summarising a long tail.
+
+    Parameters
+    ----------
+    experiment_names : list of str
+        Names to render.
+    maximum_reported : int, optional
+        How many to name before counting the rest, so a dataset-wide problem
+        does not produce a wall of text.
+
+    Returns
+    -------
+    str
+        Human-readable list, empty when there are no names.
+    """
+
+    if not experiment_names:
+        return ''
+
+    reported_names = sorted(experiment_names)[:maximum_reported]
+    remaining = len(experiment_names) - len(reported_names)
+
+    return ', '.join(reported_names) + (f", and {remaining} more" if remaining else '')
+
+
 # Columns of the overview sheet that are not metadata. The processed flag is a
 # derived, pipeline-owned value: it changes when an experiment is processed,
 # without anything about the experiment's metadata changing, so policing it as
@@ -1153,6 +1319,68 @@ class ExperimentalDataset:
 
         return divergences
 
+    def flag_repaired_results_unprocessed(self, repairs: Dict[str, Any]) -> List[str]:
+        """
+        Clear the processed flag where a repair changed metadata results rest on.
+
+        Parameters
+        ----------
+        repairs : dict
+            What was re-derived from the sheet, in the shape
+            `metadata_divergences` returns.
+
+        Returns
+        -------
+        list of str
+            Experiments whose flag was cleared, empty when no repair touched a
+            column the pipeline depends on.
+
+        Notes
+        -----
+        A repair rewrites stored metadata to match the sheet, which leaves the
+        experiment's ``processed_data`` derived from the value that was
+        replaced — stale results, arrived at without anything editing
+        anything. The processed flag has to say so, or the file saves as
+        though its results still followed from its metadata.
+
+        Only the declared columns count, so a corrected comment does not cost
+        a reprocessing run; a dataset that declares nothing has every
+        difference count, as it did before the declarations existed.
+        """
+
+        invalidating_columns = columns_invalidating_processing(self)
+
+        repaired_experiments = [
+            experiment_name for experiment_name, repaired_columns in repairs.items()
+            if invalidating_columns is None
+            or set(repaired_columns) & set(invalidating_columns)]
+
+        if (not repaired_experiments
+                or PROCESSED_FLAG_COLUMN not in self.overview_df.columns
+                or self.experiment_column not in self.overview_df.columns):
+            return []
+
+        self.overview_df.loc[
+            self.overview_df[self.experiment_column].astype(str).isin(repaired_experiments),
+            PROCESSED_FLAG_COLUMN] = PROCESSED_FALSE
+
+        return repaired_experiments
+
+    def stale_processed_experiments(self) -> List[str]:
+        """
+        Experiments whose stored results no longer follow from their metadata.
+
+        Returns
+        -------
+        list of str
+            Names of the experiments the dataset holds whose overview row is
+            not flagged as processed. Empty for a dataset whose results are
+            all current, and for one whose sheet does not track the flag.
+        """
+
+        return experiments_with_stale_results(self.overview_df, self.experiment_column,
+                                              self.experiments)
+
     # -----------------------------------------------------------------
     # Version / provenance handling
     # -----------------------------------------------------------------
@@ -1273,6 +1501,12 @@ class ExperimentalDataset:
         existing_only = existing_df.drop(index=overlapping_keys)
         incoming_only = incoming_df.drop(index=overlapping_keys)
 
+        # A row the sheet adds names an experiment nothing has processed yet.
+        # Left to the concat below, its flag came back as NaN — which the
+        # selectors read as unprocessed only by accident, and which a save now
+        # has to interpret. The overlapping rows already decide it explicitly.
+        incoming_only[PROCESSED_FLAG_COLUMN] = PROCESSED_FALSE
+
         merged_rows = []
         for key in overlapping_keys:
             merged_row = merge_overview_row(existing_df.loc[key],
@@ -1293,7 +1527,7 @@ class ExperimentalDataset:
         self.synchronize_experiment_metadata()
 
     def save_to_hdf5(self, filename: str, compression: Optional[str] = None,
-                     verbose: bool = True):
+                     verbose: bool = True, allow_stale_processed_data: bool = False):
         """
         Write the whole dataset to an HDF5 file.
 
@@ -1316,6 +1550,11 @@ class ExperimentalDataset:
             Print one line per experiment written. Set ``False`` when writing
             one file per experiment in a loop, where the per-experiment print
             is noise rather than progress.
+        allow_stale_processed_data : bool, optional
+            Write the file even though some experiments await reprocessing.
+            For a file that is not a deliverable — the Streamlit page stages
+            the loaded dataset in a temporary file to merge it, and refusing
+            that would make a pending reprocessing run block merging.
 
         Returns
         -------
@@ -1331,6 +1570,15 @@ class ExperimentalDataset:
             contradiction on disk, where it has already cost users their
             edits. `synchronize_experiment_metadata` resolves it in favour of
             the sheet.
+        ValueError
+            If any experiment the dataset holds awaits reprocessing, unless
+            `allow_stale_processed_data`. Its metadata changed after it was
+            processed, so its stored ``processed_data`` was derived from values
+            the file no longer contains — a contradiction nothing downstream
+            can detect, since the results look like every other result. A row
+            for an experiment that has not been ingested is not affected:
+            there are no stored results behind it to be stale, and processing
+            a sheet a few experiments at a time is a normal way to work.
         """
         divergences = self.metadata_divergences()
 
@@ -1341,6 +1589,18 @@ class ExperimentalDataset:
                 f"{describe_metadata_divergences(divergences)} "
                 "Call synchronize_experiment_metadata() to adopt the overview "
                 "values, or correct overview_df.")
+
+        stale_experiments = [] if allow_stale_processed_data else self.stale_processed_experiments()
+
+        if stale_experiments:
+            raise ValueError(
+                f"Refusing to save: {len(stale_experiments)} experiment(s) hold results that no "
+                "longer follow from their metadata "
+                f"({describe_experiment_names(stale_experiments)}). Their metadata changed after "
+                "they were processed, so the file would store results derived from values it "
+                "does not contain. Reprocess them with "
+                "pyKES.database.data_processing.reprocess_experiments(), or pass "
+                "allow_stale_processed_data=True to write the file as it is.")
 
         with h5py.File(filename, 'w') as f:
             if not self.overview_df.empty:
@@ -1498,6 +1758,16 @@ class ExperimentalDataset:
             print("Stored metadata disagreed with overview_df and was re-derived from it. "
                   + describe_metadata_divergences(dataset.metadata_repair_report))
 
+            # The repaired values are not the ones the stored results were
+            # computed from, so those results need recomputing — nothing edited
+            # anything here, which is exactly why the flag has to be told.
+            reprocessing_needed = dataset.flag_repaired_results_unprocessed(
+                dataset.metadata_repair_report)
+
+            if reprocessing_needed:
+                print("Their stored results were derived from the replaced values and are "
+                      f"flagged for reprocessing: {describe_experiment_names(reprocessing_needed)}")
+
         return dataset
     
     def list_experiments(self) -> List[str]:
@@ -1617,6 +1887,8 @@ class ExperimentalDataset:
             source_external_version = (dataset.version or {}).get('external_version') or {}
             if source_external_version:
                 merged_dataset.stamp_version(external_version=source_external_version)
+
+        merged_dataset.flag_repaired_results_unprocessed(metadata_corrected)
 
         merged_dataset.merge_report = {
             'sources': source_labels,

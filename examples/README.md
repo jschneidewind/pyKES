@@ -137,7 +137,10 @@ undisturbed while you make them.
    reprocessing…" under the grid, **and** section 4 below it picking the same
    thing up on that press: its own warning appears and its "Only experiments
    needing reprocessing (1)" checkbox becomes selectable. Nothing moves — the
-   editor is above everything that changes.
+   editor is above everything that changes. Scroll to section 6: the download
+   button is **gone**, replaced by "⚠️ Download withheld…" naming `NB-316`.
+   Its stored quantum yield was computed from the irradiance you just
+   replaced, and a file storing it would look like any other file.
 3. **Edit several at once.** Drag the small handle at the bottom-right of a
    corrected cell down a few rows, or paste a column straight out of Excel,
    then press the button once.
@@ -159,9 +162,9 @@ Pick the **💧 Liquid phase** pipeline, tick the checkbox, leave **Refresh
 metadata from the overview table** on, and press **♻️ Reprocess**.
 
 *Look for:* "✓ Reprocessed 1 experiment(s) successfully", the warning gone,
-`Processed` back to `True`, and — on the Results Table — a changed AQY for
-`NB-316`, because the quantum yield is computed from the irradiance you
-edited.
+`Processed` back to `True`, the download button back in section 6, and — on the
+Results Table — a changed AQY for `NB-316`, because the quantum yield is
+computed from the irradiance you edited.
 
 ## 7. Uploading a sheet overrides in-app edits
 
@@ -212,7 +215,9 @@ float `nan` and silently bypassed the documented `black` default.
 Process a subset into one file and merge it into another:
 
 1. Start a fresh dataset, upload the sheet, upload only `NB-316`'s two raw
-   files, process, and download as `partial.h5`.
+   files, process, and download as `partial.h5`. The five rows still waiting
+   for their raw files do not withhold the download: they carry no results
+   that could be stale.
 2. Load `example_dataset.h5` on the Home page.
 3. Section **5. 📦 Merge HDF5 Files** → upload `partial.h5` → **🚀 Merge**.
 
