@@ -23,6 +23,7 @@ Date: 27 August 2026
 import streamlit as st
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 
 from pyKES.utilities.resolve_attributes import resolve_experiment_attributes
 from pyKES.utilities.unit_handler import Quantity
@@ -38,8 +39,9 @@ INSTRUCTION_KEY = 'results_table_instructions'
 # Header of the left-most column listing the experiment names
 EXPERIMENT_NAME_COLUMN = 'Experiment'
 
-# Shown whenever a result cannot be resolved for a given experiment
-MISSING_VALUE_PLACEHOLDER = '—'
+# Suffix of the column holding an instruction's uncertainty. A column of its
+# own rather than a 'value ± error' string, so both stay sortable numbers.
+ERROR_COLUMN_SUFFIX = ' (±)'
 
 # Format spec applied when an instruction does not define its own 'format'
 DEFAULT_VALUE_FORMAT = '.4g'
@@ -50,6 +52,10 @@ CHECKBOX_KEY_PREFIX = 'results_table_checkbox_'
 
 # Key of the multiselect mirroring the checkbox selection
 MULTISELECT_KEY = 'results_table_selected_experiments'
+
+# Keys of the two column selectors above the table
+RESULTS_SELECTION_KEY = 'results_table_selected_results'
+METADATA_SELECTION_KEY = 'results_table_selected_metadata'
 
 
 # =============================================================================
@@ -176,69 +182,129 @@ def convert_quantity(value, unit: str):
     return value.unit[unit] if unit else value.supplied_value
 
 
-def format_result_value(value, format_spec: str) -> str:
+def resolve_result_number(experiment, path: str, unit=None):
     """
-    Render a single value with the requested format spec.
-
-    Parameters
-    ----------
-    value : float or str
-        Value to render.
-    format_spec : str
-        Python format spec (e.g. ``'.3f'``); ignored for non-numeric values.
-
-    Returns
-    -------
-    text : str
-        Formatted value.
-    """
-    if isinstance(value, str):
-        return value
-
-    return format(value, format_spec)
-
-
-def build_cell_text(experiment, result_config: dict) -> str:
-    """
-    Build the table cell for one analysis result of one experiment.
+    Resolve one result path on one experiment to a value fit for a table cell.
 
     Parameters
     ----------
     experiment : Experiment
-        Experiment the result is read from.
-    result_config : dict
-        Instruction entry with the required key ``'result'`` and the optional
-        keys ``'unit'`` (target unit for Quantity values), ``'format'``
-        (Python format spec) and ``'error'`` (path to an uncertainty, rendered
-        as ``value ± error``).
+        Experiment the path is resolved against.
+    path : str
+        Slash-separated attribute path, e.g. ``'processed_data/max_rate'``.
+    unit : str or None, optional
+        Target unit, applied to Quantity values.
 
     Returns
     -------
-    text : str
-        Formatted cell content, or the missing-value placeholder.
+    value : float or str or None
+        The number, the string where the result genuinely is one, or None
+        when the path cannot be resolved. Deliberately *not* formatted: the
+        DataFrame keeps numbers so the table sorts by magnitude, and the
+        formatting happens in the column configuration at render time.
     """
-    value = coerce_to_scalar(resolve_result_value(experiment, result_config['result']))
+    value = coerce_to_scalar(resolve_result_value(experiment, path))
 
     if value is None:
-        return MISSING_VALUE_PLACEHOLDER
+        return None
 
-    unit = result_config.get('unit', None)
-    format_spec = result_config.get('format', DEFAULT_VALUE_FORMAT)
-    cell_text = format_result_value(convert_quantity(value, unit), format_spec)
+    return convert_quantity(value, unit)
 
-    error_path = result_config.get('error', None)
-    if error_path:
-        error_value = coerce_to_scalar(resolve_result_value(experiment, error_path))
-        if error_value is not None:
-            error_text = format_result_value(convert_quantity(error_value, unit), format_spec)
-            cell_text = f"{cell_text} ± {error_text}"
 
-    # A unit is only appended for plain numbers; Quantity values were already
-    # converted into that unit above, so the label applies in both cases.
-    if unit:
-        cell_text = f"{cell_text} {unit}"
+def error_column_name(label: str) -> str:
+    """
+    Name the column holding an instruction's uncertainty.
 
-    return cell_text
+    Parameters
+    ----------
+    label : str
+        Display name of the instruction.
+
+    Returns
+    -------
+    str
+        Column name of the matching uncertainty.
+    """
+    return f"{label}{ERROR_COLUMN_SUFFIX}"
+
+
+def select_instructions(results_table_instructions: dict, selected_results: list) -> dict:
+    """
+    Keep the requested instructions, in the order the app declared them.
+
+    Parameters
+    ----------
+    results_table_instructions : dict
+        Mapping of display name to instruction entry.
+    selected_results : list of str
+        Instruction names the user asked for.
+
+    Returns
+    -------
+    dict
+        The requested subset of the instructions.
+    """
+    return {label: result_config
+            for label, result_config in results_table_instructions.items()
+            if label in selected_results}
+
+
+def result_column_names(results_table_instructions: dict) -> list:
+    """
+    List the table columns a set of instructions produces.
+
+    Parameters
+    ----------
+    results_table_instructions : dict
+        Mapping of display name to instruction entry.
+
+    Returns
+    -------
+    list of str
+        One column per instruction, each followed by its uncertainty column
+        where the instruction defines an ``'error'`` path.
+    """
+    column_names = []
+
+    for label, result_config in results_table_instructions.items():
+        column_names.append(label)
+
+        if result_config.get('error', None):
+            column_names.append(error_column_name(label))
+
+    return column_names
+
+
+def build_row_values(experiment, results_table_instructions: dict) -> list:
+    """
+    Resolve one experiment's row of the results table.
+
+    Parameters
+    ----------
+    experiment : Experiment
+        Experiment the results are read from.
+    results_table_instructions : dict
+        Instruction entries with the required key ``'result'`` and the
+        optional keys ``'unit'`` (target unit for Quantity values),
+        ``'format'`` (Python format spec, applied at render time) and
+        ``'error'`` (path to an uncertainty, given a column of its own).
+
+    Returns
+    -------
+    list
+        Values matching `result_column_names`, None where unresolvable.
+    """
+    row_values = []
+
+    for result_config in results_table_instructions.values():
+        unit = result_config.get('unit', None)
+        row_values.append(resolve_result_number(experiment, result_config['result'], unit))
+
+        error_path = result_config.get('error', None)
+        if error_path:
+            row_values.append(resolve_result_number(experiment, error_path, unit))
+
+    return row_values
 
 
 def build_results_table(
@@ -249,8 +315,8 @@ def build_results_table(
     """
     Assemble the results table for the selected experiments.
 
-    Every instruction key becomes a column so that the table keeps its shape
-    across experiments; cells that cannot be resolved show a placeholder.
+    Every instruction becomes a column so that the table keeps its shape
+    across experiments; cells that cannot be resolved stay empty.
 
     Parameters
     ----------
@@ -259,18 +325,16 @@ def build_results_table(
     experiments : dict
         Mapping of experiment name to experiment object.
     results_table_instructions : dict
-        Mapping of display name to instruction entry (see `build_cell_text`).
+        Mapping of display name to instruction entry (see `build_row_values`).
 
     Returns
     -------
     table : pandas.DataFrame
-        Table indexed by experiment name with one column per analysis result.
+        Table indexed by experiment name, holding numbers rather than
+        formatted text so that sorting a column compares magnitudes.
     """
     table_rows = {
-        exp_name: [
-            build_cell_text(experiments[exp_name], result_config)
-            for result_config in results_table_instructions.values()
-        ]
+        exp_name: build_row_values(experiments[exp_name], results_table_instructions)
         for exp_name in selected_experiments
         if exp_name in experiments
     }
@@ -279,7 +343,120 @@ def build_results_table(
     # table shape even when no experiment is selected.
     return pd.DataFrame.from_dict(table_rows,
                                   orient='index',
-                                  columns=list(results_table_instructions.keys()))
+                                  columns=result_column_names(results_table_instructions))
+
+
+def available_metadata_columns(overview_df: pd.DataFrame) -> list:
+    """
+    List the overview columns that can be shown beside the results.
+
+    Parameters
+    ----------
+    overview_df : pandas.DataFrame
+        Overview sheet of the dataset.
+
+    Returns
+    -------
+    list of str
+        Every column but the one naming the experiments, which is already the
+        table's index. Empty when the sheet is missing that column, since
+        there is then nothing to join the metadata on.
+    """
+    if overview_df.empty or EXPERIMENT_NAME_COLUMN not in overview_df.columns:
+        return []
+
+    return [column for column in overview_df.columns if column != EXPERIMENT_NAME_COLUMN]
+
+
+def join_metadata_columns(table: pd.DataFrame,
+                          overview_df: pd.DataFrame,
+                          metadata_columns: list) -> pd.DataFrame:
+    """
+    Put the requested metadata columns to the left of the results.
+
+    Parameters
+    ----------
+    table : pandas.DataFrame
+        Results table, indexed by experiment name.
+    overview_df : pandas.DataFrame
+        Overview sheet the metadata is taken from.
+    metadata_columns : list of str
+        Overview columns to show.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The table with the metadata joined on. The columns are taken from
+        ``overview_df`` unchanged, so each keeps its own dtype and therefore
+        sorts correctly without further handling.
+    """
+    if not metadata_columns:
+        return table
+
+    metadata = overview_df.set_index(EXPERIMENT_NAME_COLUMN)[metadata_columns]
+
+    return metadata.join(table, how='right')
+
+
+def build_number_format(format_spec: str, unit) -> str:
+    """
+    Translate an instruction's Python format spec into a printf spec.
+
+    ``st.column_config.NumberColumn`` formats printf-style, which is what
+    keeps the displayed digits identical to the previous string cells while
+    the underlying value stays a number.
+
+    Parameters
+    ----------
+    format_spec : str
+        Python format spec, e.g. ``'.2f'``.
+    unit : str or None
+        Unit appended to every cell.
+
+    Returns
+    -------
+    str
+        printf-style format string, e.g. ``'%.2f mmol / h'``.
+    """
+    printf_spec = f"%{format_spec}"
+
+    if not unit:
+        return printf_spec
+
+    # A literal '%' — a unit such as '%' or 'wt%' — would otherwise start a
+    # conversion of its own in a printf-style spec.
+    return f"{printf_spec} {unit.replace('%', '%%')}"
+
+
+def build_column_config(table: pd.DataFrame, results_table_instructions: dict) -> dict:
+    """
+    Build the per-column display configuration of the results table.
+
+    Parameters
+    ----------
+    table : pandas.DataFrame
+        Assembled results table.
+    results_table_instructions : dict
+        Instructions the result columns were built from.
+
+    Returns
+    -------
+    dict
+        Mapping of column name to ``st.column_config`` entry, covering the
+        numeric result columns only. A result that resolves to a string keeps
+        a plain text column instead of being handed a number format.
+    """
+    column_config = {}
+
+    for label, result_config in results_table_instructions.items():
+        number_format = build_number_format(result_config.get('format', DEFAULT_VALUE_FORMAT),
+                                            result_config.get('unit', None))
+
+        for column in (label, error_column_name(label)):
+            if column in table.columns and is_numeric_dtype(table[column]):
+                column_config[column] = st.column_config.NumberColumn(format=number_format)
+
+    return column_config
 
 
 # =============================================================================
@@ -406,6 +583,53 @@ def render_experiment_multiselect(all_experiment_names: list) -> None:
     )
 
 
+def render_column_selection(results_table_instructions: dict,
+                            overview_df: pd.DataFrame) -> dict:
+    """
+    Render the two column selectors above the table.
+
+    Parameters
+    ----------
+    results_table_instructions : dict
+        Every analysis result the dataset defines.
+    overview_df : pandas.DataFrame
+        Overview sheet supplying the metadata columns on offer.
+
+    Returns
+    -------
+    selected_instructions : dict
+        The instructions the user asked for.
+    selected_metadata : list of str
+        The overview columns the user asked for.
+    """
+    selection_columns = st.columns(2)
+
+    with selection_columns[0]:
+        selected_results = st.multiselect(
+            "Results to show",
+            options=list(results_table_instructions.keys()),
+            default=list(results_table_instructions.keys()),
+            key=RESULTS_SELECTION_KEY,
+        )
+
+    metadata_options = available_metadata_columns(overview_df)
+
+    with selection_columns[1]:
+        selected_metadata = st.multiselect(
+            "Metadata to show",
+            options=metadata_options,
+            default=[],
+            key=METADATA_SELECTION_KEY,
+            help="Overview-sheet columns shown to the left of the results.",
+        )
+
+        if not metadata_options:
+            st.caption("No metadata on offer: the dataset carries no overview sheet "
+                       f"with an '{EXPERIMENT_NAME_COLUMN}' column to join it on.")
+
+    return select_instructions(results_table_instructions, selected_results), selected_metadata
+
+
 def render_help_section() -> None:
     """
     Render the explanatory section at the bottom of the page.
@@ -433,10 +657,12 @@ def render_help_section() -> None:
 
         #### 2. Results Table (Right Panel)
         - **Selected Experiments**: shows and allows manual selection/deselection
+        - **Results to show**: which analysis results become columns
+        - **Metadata to show**: overview-sheet columns joined to the left of the results
         - Each selected experiment becomes one row, labelled with its name
-        - Each analysis result becomes one column
-        - Cells reading `{MISSING_VALUE_PLACEHOLDER}` mean that result is not available
-          for that experiment
+        - Empty cells mean that result is not available for that experiment
+        - Click a column header to sort by it — the cells hold numbers, so the
+          order follows the magnitude rather than the leading digit
 
         #### 3. Which results are shown
         The columns are defined by the upstream app through the
@@ -453,7 +679,8 @@ def render_help_section() -> None:
         Besides the required `'result'` path, each entry may define
         `'unit'` (target unit, used to convert `Quantity` values),
         `'format'` (Python format spec, default `'{DEFAULT_VALUE_FORMAT}'`) and
-        `'error'` (path to an uncertainty, rendered as `value ± error`).
+        `'error'` (path to an uncertainty, which becomes its own
+        `label{ERROR_COLUMN_SUFFIX}` column).
 
         #### Tips
         - The experiment selection is shared with the Time-Series page
@@ -518,6 +745,9 @@ def render_results_table() -> None:
 
         render_experiment_multiselect(sorted(experimental_dataset.experiments.keys()))
 
+        selected_instructions, selected_metadata = render_column_selection(
+            results_table_instructions, experimental_dataset.overview_df)
+
         if not st.session_state.selected_experiments:
             st.info("Select one or more experiments to display their analysis results.")
             return
@@ -525,11 +755,17 @@ def render_results_table() -> None:
         results_table = build_results_table(
             st.session_state.selected_experiments,
             experimental_dataset.experiments,
-            results_table_instructions
+            selected_instructions
         )
         results_table.index.name = EXPERIMENT_NAME_COLUMN
 
-        st.dataframe(results_table, width='stretch')
+        results_table = join_metadata_columns(results_table,
+                                              experimental_dataset.overview_df,
+                                              selected_metadata)
+
+        st.dataframe(results_table,
+                     column_config=build_column_config(results_table, selected_instructions),
+                     width='stretch')
 
         st.download_button(
             label="📥 Download Table as CSV",
