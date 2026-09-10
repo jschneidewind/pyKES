@@ -4,9 +4,10 @@ Tests for the metadata editor as it is wired into the Data Upload page.
 `AppTest` runs a Streamlit script in-process, so the grid and the save that
 follows a committed cell can be driven without a browser. The edits themselves
 are injected the way the frontend sends them — as the ``edited_rows`` delta
-`st.data_editor` keeps in session state — and there is no submit button: the
-grid autosaves, which is what keeps the page from re-running and moving under
-the user.
+`st.data_editor` keeps in session state — and applied with the form's own
+submit button, which is what a form does: nothing reaches Python until it is
+pressed, so a drag-fill or a pasted block is left undisturbed while it is
+being made.
 
 `test_an_edit_survives_the_workbook_staying_in_the_uploader` is the regression
 that matters most here. The uploader keeps its file for the whole session, and
@@ -102,20 +103,32 @@ def run_page(declarations=DECLARATIONS):
     return app
 
 
-def edit_cell(app, row_index, column, value):
-    """Inject an edit the way the data editor's frontend sends one."""
+def edit_cells(app, edited_rows):
+    """
+    Inject edits the way the data editor's frontend sends them, and apply them.
+
+    ``edited_rows`` is the delta itself — ``{row_index: {column: value}}`` —
+    so one call can stand in for a drag-fill down several rows, which is what
+    the grid sends as a single delta on submit.
+    """
     revision = app.session_state[METADATA_EDITOR_REVISION_KEY]
 
-    app.session_state[f"metadata_editor_{revision}"] = {"edited_rows": {row_index: {column: value}},
+    app.session_state[f"metadata_editor_{revision}"] = {"edited_rows": edited_rows,
                                                         "added_rows": [],
                                                         "deleted_rows": []}
 
-    # No submit button: committing a cell is what triggers the rerun that saves it.
+    apply_button = next(button for button in app.button if "Apply metadata" in button.label)
+    apply_button.click()
     app.run(timeout=60)
 
     assert [element.value for element in app.exception] == []
 
     return app
+
+
+def edit_cell(app, row_index, column, value):
+    """Inject and apply one edited cell."""
+    return edit_cells(app, {row_index: {column: value}})
 
 
 def build_workbook(overview_df):
@@ -172,16 +185,19 @@ def test_editing_a_processing_column_flags_the_experiment():
     assert dataset.overview_df["Processed"].tolist() == ["False", "True"]
     assert dataset.experiments["Exp_001"].metadata["Irradiance [mW/cm2]"] == 55.0
 
-    # The editor reports it straight away, from inside its own fragment.
-    warnings = [element.value for element in app.warning]
-    assert sum("Exp_001" in warning for warning in warnings) == 1
+    # The editor reports it straight away, from inside its own fragment — as a
+    # caption, so the fragment keeps the same height and nothing below it moves.
+    # Two captions name it: what was stored, and what now needs reprocessing.
+    captions = [element.value for element in app.caption]
+    assert sum("Exp_001" in caption for caption in captions) == 2
+    assert any("Saved 1 change(s)" in caption for caption in captions)
+    assert any("need reprocessing" in caption for caption in captions)
 
     # Section 3 sits above the editor and had already rendered when the edit
-    # was saved, so its standing warning joins on the next page run. That lag
-    # is the price of not re-running the page on every keystroke.
+    # was stored, so its standing warning joins on the next page run. That lag
+    # is the price of not re-running the page to save an edit.
     app.run(timeout=60)
-    warnings = [element.value for element in app.warning]
-    assert sum("Exp_001" in warning for warning in warnings) == 2
+    assert sum("Exp_001" in element.value for element in app.warning) == 1
 
     # The widget key is untouched: changing it would reset the grid's scroll
     # position, and there is no stale delta to escape from.
@@ -274,3 +290,25 @@ def test_a_fraction_survives_a_whole_number_column():
 
     # int64 from Excel; the column is widened rather than rounding to 42
     assert overview.loc["Exp_001", "Irradiance [mW/cm2]"] == 42.5
+
+
+def test_a_drag_fill_down_several_rows_is_applied_to_all_of_them():
+    app = upload_workbook(run_page())
+
+    # What the grid sends after dragging one value down: one delta, many rows.
+    edit_cells(app, {0: {"Comment": "checked"}, 1: {"Comment": "checked"}})
+
+    overview = app.session_state["experimental_dataset"].overview_df.set_index("Experiment")
+
+    assert overview["Comment"].tolist() == ["checked", "checked"]
+
+
+def test_pressing_the_button_with_nothing_changed_says_so():
+    app = upload_workbook(run_page())
+
+    apply_button = next(button for button in app.button if "Apply metadata" in button.label)
+    apply_button.click()
+    app.run(timeout=60)
+
+    assert [element.value for element in app.exception] == []
+    assert any("nothing was stored" in caption.value for caption in app.caption)
