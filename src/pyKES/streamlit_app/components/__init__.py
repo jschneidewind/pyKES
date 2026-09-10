@@ -12,6 +12,7 @@ Available Components
 - render_analysis_results: Analysis results visualization page
 - render_time_series: Time-series data visualization page
 - render_results_table: Tabular view of numerical analysis results
+- render_metadata_editor: Spreadsheet-style editor for a dataset's metadata
 
 Example Usage
 -------------
@@ -28,6 +29,7 @@ from .data_upload_component import render_data_upload
 from .analysis_results_component import render_analysis_results
 from .time_series_component import render_time_series
 from .results_table_component import render_results_table
+from .metadata_editor import render_metadata_editor
 
 __all__ = [
     'render_home',
@@ -35,4 +37,5 @@ __all__ = [
     'render_analysis_results',
     'render_time_series',
     'render_results_table',
+    'render_metadata_editor',
 ]

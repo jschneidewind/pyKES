@@ -10,7 +10,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pyKES.database.data_processing import reprocess_experiments, reprocess_single_experiment
+from pyKES.database.data_processing import (mark_experiments_unprocessed, reprocess_experiments,
+                                            reprocess_single_experiment,
+                                            select_experiments_needing_reprocessing)
 from pyKES.database.database_experiments import Experiment, ExperimentalDataset
 from pyKES.utilities.version_information import LAST_PROCESSED_KEY, PYKES_VERSION_KEY
 
@@ -130,6 +132,49 @@ def test_reprocessing_stamps_the_version_information(dataset):
     assert experiment_version[PYKES_VERSION_KEY]
     # The dataset's external version is inherited without repeating it
     assert experiment_version['external_version'] == {'version': '0.3.0'}
+
+
+def test_successful_reprocessing_flags_the_experiments_as_processed(dataset):
+    reprocess_experiments(dataset, process_raw_data)
+
+    assert dataset.overview_df['Processed'].tolist() == ['True', 'True']
+
+
+def test_a_failing_reprocessing_leaves_the_flag_down(dataset):
+    # The state a metadata edit leaves behind, and the reason to reprocess
+    dataset.overview_df['Processed'] = ['False', 'False']
+
+    reprocess_experiments(dataset, failing_processing)
+
+    # The failing experiment keeps its previous results, so its flag has to
+    # keep saying that those results do not follow from the current metadata.
+    assert dataset.overview_df['Processed'].tolist() == ['True', 'False']
+    assert dataset.experiments[FAILING_EXPERIMENT].processed_data == {'maximum': -1.0}
+
+
+def test_a_failing_reprocessing_does_not_invalidate_an_up_to_date_experiment(dataset):
+    # Reprocessing everything after an algorithm change: the failure keeps the
+    # previous results, which still follow from the unchanged metadata, so the
+    # flag is left alone rather than cleared.
+    dataset.overview_df['Processed'] = ['True', 'True']
+
+    reprocess_experiments(dataset, failing_processing)
+
+    assert dataset.overview_df['Processed'].tolist() == ['True', 'True']
+
+
+def test_reprocessing_clears_the_flag_a_metadata_edit_set(dataset):
+    """The round trip the Data Upload page drives: edit, then reprocess."""
+    dataset.overview_df['Processed'] = ['True', 'True']
+
+    mark_experiments_unprocessed(dataset, ['Exp_001'])
+
+    assert select_experiments_needing_reprocessing(dataset) == ['Exp_001']
+
+    reprocess_experiments(dataset, process_raw_data, experiment_names=['Exp_001'])
+
+    assert dataset.overview_df['Processed'].tolist() == ['True', 'True']
+    assert select_experiments_needing_reprocessing(dataset) == []
 
 
 def test_color_and_group_follow_the_refreshed_metadata(dataset):

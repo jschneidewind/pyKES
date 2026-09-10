@@ -1,0 +1,374 @@
+"""Edit the metadata of a dataset in place, and record what that invalidates.
+
+``overview_df`` is the single source of every experiment's metadata, and until
+now the only way to correct a value in it was to upload a new Excel sheet. The
+functions here let a caller write single cells instead, and — more importantly
+— decide what each edit means for the data already derived from them.
+
+Which columns may be edited is declared by the dataset itself, through two
+lists in ``processing_parameters``::
+
+    'metadata_used_for_raw_data_loading': ['Experiment',
+                                           'File name O2',
+                                           'Well or set-up number'],
+    'metadata_used_for_processing': ['Irradiance A [mW/cm2]',
+                                     'Liquid phase volume [mL]',
+                                     'Offset'],
+
+The policy those two lists express:
+
+* **Raw-data-loading columns are locked.** A filename or a well number selects
+  which measurement the experiment *is*; changing it does not correct the
+  dataset, it describes a different one. That needs the corrected sheet and
+  the raw files uploaded again.
+* **Processing columns invalidate the results.** Editing one leaves
+  ``processed_data`` describing metadata that is no longer there, so the
+  experiment's ``Processed`` flag is cleared and the Data Upload page asks for
+  a reprocessing run.
+* **Every other column is free.** A comment or a label is read by nobody but
+  the reader, so editing one changes nothing about the results.
+
+A dataset that declares neither list gets no editor at all — see
+`metadata_editing_available`, which is what keeps files written before the
+declarations existed working exactly as before.
+"""
+
+from typing import List, Optional
+
+import pandas as pd
+
+from pyKES.database.data_processing import mark_experiments_unprocessed
+from pyKES.database.database_experiments import ExperimentalDataset, PROCESSED_FLAG_COLUMN
+
+
+# Keys of the two declaration lists inside ``dataset.processing_parameters``.
+# Both must be present for the editor to be offered.
+METADATA_LOADING_KEY = 'metadata_used_for_raw_data_loading'
+METADATA_PROCESSING_KEY = 'metadata_used_for_processing'
+
+
+def declared_columns(dataset: ExperimentalDataset, declaration_key: str) -> List[str]:
+    """
+    Read one of the two declaration lists off a dataset.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset whose ``processing_parameters`` hold the declarations.
+    declaration_key : str
+        `METADATA_LOADING_KEY` or `METADATA_PROCESSING_KEY`.
+
+    Returns
+    -------
+    list of str
+        Declared column names, empty when the key is absent.
+    """
+
+    return list(dataset.processing_parameters.get(declaration_key, []))
+
+
+def metadata_editing_available(dataset: ExperimentalDataset) -> bool:
+    """
+    Report whether a dataset declares enough for its metadata to be edited.
+
+    This is the backward-compatibility gate. ``processing_parameters`` reaches
+    a dataset from the file it was loaded from, so a file written before the
+    embedding app declared these lists simply carries neither, and its
+    metadata stays read-only. Requiring *both* keys means a dataset that
+    declares nothing locked can never expose a raw-data-loading column as
+    editable by omission.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset to inspect.
+
+    Returns
+    -------
+    bool
+        True when both declaration lists are present.
+    """
+
+    return (METADATA_LOADING_KEY in dataset.processing_parameters
+            and METADATA_PROCESSING_KEY in dataset.processing_parameters)
+
+
+def locked_metadata_columns(dataset: ExperimentalDataset,
+                            experiment_column: str) -> List[str]:
+    """
+    List the columns shown in the editor but never writable.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset holding the declarations and the overview sheet.
+    experiment_column : str
+        Column naming the experiments, which the editor uses as its index.
+
+    Returns
+    -------
+    list of str
+        Declared raw-data-loading columns present in ``overview_df``, plus the
+        processed flag — a derived value the pipeline owns, not a metadatum.
+    """
+
+    candidates = declared_columns(dataset, METADATA_LOADING_KEY) + [PROCESSED_FLAG_COLUMN]
+
+    return [column for column in dict.fromkeys(candidates)
+            if column in dataset.overview_df.columns and column != experiment_column]
+
+
+def processing_relevant_metadata_columns(dataset: ExperimentalDataset) -> List[str]:
+    """
+    List the editable columns whose change invalidates the processed data.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset holding the declarations and the overview sheet.
+
+    Returns
+    -------
+    list of str
+        Declared processing columns present in ``overview_df``.
+    """
+
+    return [column for column in declared_columns(dataset, METADATA_PROCESSING_KEY)
+            if column in dataset.overview_df.columns]
+
+
+def columns_invalidating_processing(dataset: ExperimentalDataset) -> Optional[List[str]]:
+    """
+    List the columns whose change makes stored processed data obsolete.
+
+    Both declared groups count: a changed processing parameter changes what
+    the processing function computes, and a changed filename or well number
+    means the raw data behind the results is a different measurement
+    altogether.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset holding the declarations.
+
+    Returns
+    -------
+    list of str or None
+        The declared columns, or None for a dataset that declares nothing —
+        the sentinel `ExperimentalDataset.update_overview_df` reads as "treat
+        every difference as invalidating", which is how datasets behaved
+        before the declarations existed.
+    """
+
+    if not metadata_editing_available(dataset):
+        return None
+
+    return (declared_columns(dataset, METADATA_LOADING_KEY)
+            + declared_columns(dataset, METADATA_PROCESSING_KEY))
+
+
+def missing_declared_columns(dataset: ExperimentalDataset) -> List[str]:
+    """
+    List declared columns the overview sheet does not actually have.
+
+    A declaration naming a column the sheet lacks is a mismatch between the
+    app's configuration and the uploaded metadata: the column is neither
+    locked nor invalidating, because it is not there to be edited. Surfaced so
+    the mismatch is visible rather than silent.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset holding the declarations and the overview sheet.
+
+    Returns
+    -------
+    list of str
+        Declared names absent from ``overview_df``.
+    """
+
+    declared = (declared_columns(dataset, METADATA_LOADING_KEY)
+                + declared_columns(dataset, METADATA_PROCESSING_KEY))
+
+    return [column for column in dict.fromkeys(declared)
+            if column not in dataset.overview_df.columns]
+
+
+def editable_metadata_columns(dataset: ExperimentalDataset,
+                              experiment_column: str) -> List[str]:
+    """
+    List the columns of the overview sheet a user may write to.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset holding the declarations and the overview sheet.
+    experiment_column : str
+        Column naming the experiments, which the editor uses as its index.
+
+    Returns
+    -------
+    list of str
+        Every overview column that is neither locked nor the experiment name.
+    """
+
+    locked = set(locked_metadata_columns(dataset, experiment_column))
+
+    return [column for column in dataset.overview_df.columns
+            if column != experiment_column and column not in locked]
+
+
+def metadata_editor_view(dataset: ExperimentalDataset,
+                         experiment_column: str) -> pd.DataFrame:
+    """
+    Build the table the editor shows: the overview sheet, ordered for editing.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset whose ``overview_df`` is displayed.
+    experiment_column : str
+        Column naming the experiments; becomes the index.
+
+    Returns
+    -------
+    view : pandas.DataFrame
+        Copy of ``overview_df`` indexed by experiment name, with the locked
+        columns first and the declared processing columns next, so the two
+        kinds of edit are not scattered through the sheet's own column order.
+    """
+
+    ordered_columns = (locked_metadata_columns(dataset, experiment_column)
+                       + processing_relevant_metadata_columns(dataset)
+                       + list(dataset.overview_df.columns))
+
+    # dict.fromkeys keeps the first occurrence of each name, so the two
+    # declared groups lead and the remaining columns follow in sheet order.
+    unique_columns = [column for column in dict.fromkeys(ordered_columns)
+                      if column != experiment_column]
+
+    return dataset.overview_df.set_index(experiment_column)[unique_columns]
+
+
+def changed_metadata_cells(original_df: pd.DataFrame,
+                           edited_df: pd.DataFrame,
+                           editable_columns: List[str]) -> dict:
+    """
+    Find the cells an editing widget changed.
+
+    Parameters
+    ----------
+    original_df, edited_df : pandas.DataFrame
+        The table handed to the widget and the table it returned, both indexed
+        by experiment name.
+    editable_columns : List[str]
+        Columns a change is accepted from. Restricting the comparison here
+        means a locked column can never be written, whatever the widget hands
+        back.
+
+    Returns
+    -------
+    changed_cells : dict
+        ``{experiment_name: {column: new_value}}``, holding only the cells
+        that actually differ.
+    """
+
+    changed_cells = {}
+
+    for column in editable_columns:
+        original_values = original_df[column]
+        edited_values = edited_df[column]
+
+        # `eq` is False for NaN against NaN, so the both-null case has to be
+        # excluded explicitly. DataFrame.compare would not do: it cannot tell
+        # an unchanged cell from one the user cleared.
+        changed = ~(original_values.eq(edited_values)
+                    | (original_values.isna() & edited_values.isna()))
+
+        # to_dict boxes NumPy scalars into the native Python types the
+        # metadata dict of an ingested experiment already holds.
+        for experiment_name, value in edited_values[changed].to_dict().items():
+            changed_cells.setdefault(experiment_name, {})[column] = value
+
+    return changed_cells
+
+
+def update_experiment_metadata(experiment, edited_values: dict) -> None:
+    """
+    Mirror one experiment's edited overview cells into its stored metadata.
+
+    Parameters
+    ----------
+    experiment : Experiment
+        Experiment mutated in place.
+    edited_values : dict
+        ``{column: new_value}`` for this experiment.
+
+    Returns
+    -------
+    None : None
+
+    Notes
+    -----
+    Only the changed keys are written, rather than the whole overview row: a
+    ``metadata_retrival_function`` is free to add keys of its own (the
+    reference one adds ``'experiment_name'``), and replacing the dict wholesale
+    would drop them. ``color`` and ``group`` are re-derived exactly as
+    `pyKES.database.data_processing.reprocess_single_experiment` does, so a
+    corrected colour takes effect without waiting for a reprocessing run.
+    """
+
+    experiment.metadata.update(edited_values)
+    experiment.color = experiment.metadata.get('color', experiment.color)
+    experiment.group = experiment.metadata.get('group', experiment.group)
+
+
+def apply_metadata_edits(database: ExperimentalDataset,
+                         changed_cells: dict,
+                         experiment_column: str,
+                         processing_relevant_columns: Optional[List[str]] = None) -> List[str]:
+    """
+    Write edited cells into a dataset and clear the flags they invalidate.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset mutated in place: ``overview_df``, the affected experiments'
+        ``metadata``, and their processed flags.
+    changed_cells : dict
+        ``{experiment_name: {column: new_value}}``, as returned by
+        `changed_metadata_cells`.
+    experiment_column : str
+        Column of ``overview_df`` naming the experiments.
+    processing_relevant_columns : list of str, optional
+        Columns whose change invalidates the processed data. Defaults to the
+        dataset's own declaration.
+
+    Returns
+    -------
+    invalidated_experiments : list of str
+        Experiments now flagged as needing reprocessing, sorted by name.
+    """
+
+    if processing_relevant_columns is None:
+        processing_relevant_columns = processing_relevant_metadata_columns(database)
+
+    for experiment_name, edited_values in changed_cells.items():
+        overview_row = database.overview_df[experiment_column].eq(experiment_name)
+
+        for column, value in edited_values.items():
+            database.overview_df.loc[overview_row, column] = value
+
+        # An overview row without an experiment is the normal state of one
+        # that has not been ingested yet; there is no stored metadata to keep
+        # in step with the sheet.
+        if experiment_name in database.experiments:
+            update_experiment_metadata(database.experiments[experiment_name], edited_values)
+
+    invalidated_experiments = sorted(
+        experiment_name for experiment_name, edited_values in changed_cells.items()
+        if not set(edited_values).isdisjoint(processing_relevant_columns))
+
+    mark_experiments_unprocessed(database, invalidated_experiments, experiment_column)
+
+    return invalidated_experiments
