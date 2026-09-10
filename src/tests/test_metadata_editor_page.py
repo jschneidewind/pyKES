@@ -1,19 +1,31 @@
 """
 Tests for the metadata editor as it is wired into the Data Upload page.
 
-`AppTest` runs a Streamlit script in-process, so the grid, its form and the
-rerun that follows an applied edit can be driven without a browser. The edits
-themselves are injected the way the frontend sends them — as the
-``edited_rows`` delta `st.data_editor` keeps in session state — which is also
-what makes the revision counter in the widget key worth pinning: a stale delta
-would otherwise be replayed over the applied values.
+`AppTest` runs a Streamlit script in-process, so the grid and the save that
+follows a committed cell can be driven without a browser. The edits themselves
+are injected the way the frontend sends them — as the ``edited_rows`` delta
+`st.data_editor` keeps in session state — and there is no submit button: the
+grid autosaves, which is what keeps the page from re-running and moving under
+the user.
+
+`test_an_edit_survives_the_workbook_staying_in_the_uploader` is the regression
+that matters most here. The uploader keeps its file for the whole session, and
+re-merging the sheet on every rerun silently reverted every edit one rerun
+after it was made — while leaving the experiment's own metadata holding it, so
+`overview_df` and the stored metadata disagreed. The suite missed it because
+no test had ever put a file in the uploader.
 """
 
+import io
+
+import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 from pyKES.streamlit_app.components.metadata_editor import (METADATA_EDITOR_REVISION_KEY,
                                                             METADATA_LOADING_KEY,
                                                             METADATA_PROCESSING_KEY)
+
+XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
 
 # Streamlit script rendering the real Data Upload page over a dataset that
@@ -90,14 +102,39 @@ def run_page(declarations=DECLARATIONS):
     return app
 
 
-def edit_cell(app, row_index, column, value, revision=0):
+def edit_cell(app, row_index, column, value):
     """Inject an edit the way the data editor's frontend sends one."""
+    revision = app.session_state[METADATA_EDITOR_REVISION_KEY]
+
     app.session_state[f"metadata_editor_{revision}"] = {"edited_rows": {row_index: {column: value}},
                                                         "added_rows": [],
                                                         "deleted_rows": []}
 
-    apply_button = next(button for button in app.button if "Apply metadata" in button.label)
-    apply_button.click()
+    # No submit button: committing a cell is what triggers the rerun that saves it.
+    app.run(timeout=60)
+
+    assert [element.value for element in app.exception] == []
+
+    return app
+
+
+def build_workbook(overview_df):
+    """Serialize an overview table as the bytes of an uploaded workbook."""
+    buffer = io.BytesIO()
+    overview_df.to_excel(buffer, sheet_name='Sheet1', index=False)
+
+    return buffer.getvalue()
+
+
+SHEET = pd.DataFrame({"Experiment": ["Exp_001", "Exp_002"],
+                      "File name O2": ["one.csv", "two.csv"],
+                      "Irradiance [mW/cm2]": [40, 80],
+                      "Comment": ["first", "second"]})
+
+
+def upload_workbook(app, overview_df=SHEET):
+    """Put a metadata workbook in the uploader, as a user would."""
+    app.file_uploader[0].set_value(('metadata.xlsx', build_workbook(overview_df), XLSX_MIME))
     app.run(timeout=60)
 
     assert [element.value for element in app.exception] == []
@@ -135,12 +172,20 @@ def test_editing_a_processing_column_flags_the_experiment():
     assert dataset.overview_df["Processed"].tolist() == ["False", "True"]
     assert dataset.experiments["Exp_001"].metadata["Irradiance [mW/cm2]"] == 55.0
 
-    # Both the editor's own report and the standing warning above section 3
+    # The editor reports it straight away, from inside its own fragment.
+    warnings = [element.value for element in app.warning]
+    assert sum("Exp_001" in warning for warning in warnings) == 1
+
+    # Section 3 sits above the editor and had already rendered when the edit
+    # was saved, so its standing warning joins on the next page run. That lag
+    # is the price of not re-running the page on every keystroke.
+    app.run(timeout=60)
     warnings = [element.value for element in app.warning]
     assert sum("Exp_001" in warning for warning in warnings) == 2
 
-    # A fresh widget key, so the applied delta cannot be replayed
-    assert app.session_state[METADATA_EDITOR_REVISION_KEY] == 1
+    # The widget key is untouched: changing it would reset the grid's scroll
+    # position, and there is no stale delta to escape from.
+    assert app.session_state[METADATA_EDITOR_REVISION_KEY] == 0
 
 
 def test_editing_a_free_column_leaves_the_flag_alone():
@@ -155,6 +200,9 @@ def test_editing_a_free_column_leaves_the_flag_alone():
 
 def test_the_reprocessing_shortcut_offers_exactly_the_flagged_experiments():
     app = edit_cell(run_page(), 0, "Irradiance [mW/cm2]", 55.0)
+
+    # Section 3 renders above the editor, so it picks the flag up one run later
+    app.run(timeout=60)
 
     shortcut = next(checkbox for checkbox in app.checkbox
                     if "Only experiments needing reprocessing" in checkbox.label)
@@ -171,3 +219,58 @@ def test_the_reprocessing_shortcut_is_disabled_while_nothing_needs_it():
 
     assert "(0)" in shortcut.label
     assert shortcut.disabled
+
+
+def test_an_edit_survives_the_workbook_staying_in_the_uploader():
+    app = upload_workbook(run_page())
+
+    edit_cell(app, 0, "Irradiance [mW/cm2]", 55.0)
+    app.run(timeout=60)                      # an unrelated rerun must not revert it
+
+    dataset = app.session_state["experimental_dataset"]
+    overview = dataset.overview_df.set_index("Experiment")
+
+    assert overview.loc["Exp_001", "Irradiance [mW/cm2]"] == 55.0
+    assert dataset.experiments["Exp_001"].metadata["Irradiance [mW/cm2]"] == 55.0
+    assert dataset.metadata_divergences() == {}
+
+
+def test_the_workbook_is_merged_once_per_upload():
+    app = upload_workbook(run_page())
+
+    edit_cell(app, 1, "Comment", "corrected")
+    app.run(timeout=60)
+
+    overview = app.session_state["experimental_dataset"].overview_df.set_index("Experiment")
+
+    assert overview.loc["Exp_002", "Comment"] == "corrected"
+
+
+def test_uploading_a_sheet_overrides_edits_made_in_the_app():
+    app = upload_workbook(run_page())
+    edit_cell(app, 0, "Irradiance [mW/cm2]", 55.0)
+
+    # Clearing and re-adding the workbook is a new upload, so it merges again.
+    app.file_uploader[0].set_value(None)
+    app.run(timeout=60)
+    upload_workbook(app)
+
+    dataset = app.session_state["experimental_dataset"]
+    overview = dataset.overview_df.set_index("Experiment")
+
+    assert overview.loc["Exp_001", "Irradiance [mW/cm2]"] == 40
+    assert dataset.experiments["Exp_001"].metadata["Irradiance [mW/cm2]"] == 40
+    # A fresh grid per merged workbook, so a client-side delta from before an
+    # upload cannot reassert itself over the sheet. Two uploads, two bumps.
+    assert app.session_state[METADATA_EDITOR_REVISION_KEY] == 2
+
+
+def test_a_fraction_survives_a_whole_number_column():
+    app = upload_workbook(run_page())
+
+    edit_cell(app, 0, "Irradiance [mW/cm2]", 42.5)
+
+    overview = app.session_state["experimental_dataset"].overview_df.set_index("Experiment")
+
+    # int64 from Excel; the column is widened rather than rounding to 42
+    assert overview.loc["Exp_001", "Irradiance [mW/cm2]"] == 42.5

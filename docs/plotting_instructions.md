@@ -129,20 +129,31 @@ arrays have no meaningful cell representation and are treated as missing.
 
 ### Cells hold numbers, not text
 
-The table's cells are the resolved **numbers**; `format` and `unit` are applied
-at render time through `st.column_config.NumberColumn`, which shows the same
-digits and the same unit suffix as before. This is what makes the header sort
-work: sorting a column of pre-formatted strings compares them lexicographically,
-so an apparent quantum yield of `9` sorted above one of `18`. Sorting the
-underlying numbers compares magnitudes.
+The table's cells are the resolved **numbers**, and `format` and `unit` are
+applied on the display side of a `pandas.Styler`. This is what makes the header
+sort work: sorting a column of pre-formatted strings compares them
+lexicographically, so an apparent quantum yield of `9` sorted above one of `18`.
+Sorting the underlying numbers compares magnitudes, while the cells read exactly
+what `format(value, format_spec)` writes.
+
+`format` is therefore a **Python** format spec, honoured in full — `'.2f'`,
+`'.4g'`, `'.3e'`, `'.4G'`. The first attempt formatted through
+`st.column_config.NumberColumn` instead, which is printf-style and has no `g`
+conversion: the default `'.4g'` turned `1.2345e-5` into `0.00001234` and
+`12960000` into `1296000`, and an uppercase `'.4G'` was rejected outright.
 
 The consequence for an instruction that defines `error`: the uncertainty is its
 own sortable column rather than part of a `value ± error` string. A result that
-genuinely resolves to a string keeps a plain text column and is left unformatted.
+genuinely resolves to a string is passed through unformatted.
 
-`format` is translated into the printf spec the column configuration expects —
-`'.2f'` becomes `'%.2f'` — so any spec printf also understands works. A `%` in a
-unit is escaped automatically.
+```{note}
+A cell whose value could not be resolved renders as **`None`**, not as a blank
+and not as a placeholder. That is Streamlit's rendering for a missing value in
+a numeric column, and it cannot be overridden from a Styler — `na_rep` and a
+callable formatter were both tried and both ignored. It matches every other
+table in the app, where a blank overview cell reads `None` too. The CSV export
+leaves the cell empty.
+```
 
 ### Choosing what the table shows
 

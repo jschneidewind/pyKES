@@ -38,7 +38,8 @@ from typing import List, Optional
 import pandas as pd
 
 from pyKES.database.data_processing import mark_experiments_unprocessed
-from pyKES.database.database_experiments import ExperimentalDataset, PROCESSED_FLAG_COLUMN
+from pyKES.database.database_experiments import (ExperimentalDataset,
+                                                 NON_METADATA_OVERVIEW_COLUMNS)
 
 
 # Keys of the two declaration lists inside ``dataset.processing_parameters``.
@@ -108,14 +109,13 @@ def locked_metadata_columns(dataset: ExperimentalDataset,
     Returns
     -------
     list of str
-        Declared raw-data-loading columns present in ``overview_df``, plus the
-        processed flag — a derived value the pipeline owns, not a metadatum.
+        Declared raw-data-loading columns present in ``overview_df``.
     """
 
-    candidates = declared_columns(dataset, METADATA_LOADING_KEY) + [PROCESSED_FLAG_COLUMN]
+    candidates = declared_columns(dataset, METADATA_LOADING_KEY)
 
     return [column for column in dict.fromkeys(candidates)
-            if column in dataset.overview_df.columns and column != experiment_column]
+            if column in editor_columns(dataset, experiment_column)]
 
 
 def processing_relevant_metadata_columns(dataset: ExperimentalDataset) -> List[str]:
@@ -134,7 +134,8 @@ def processing_relevant_metadata_columns(dataset: ExperimentalDataset) -> List[s
     """
 
     return [column for column in declared_columns(dataset, METADATA_PROCESSING_KEY)
-            if column in dataset.overview_df.columns]
+            if column in dataset.overview_df.columns
+            and column not in NON_METADATA_OVERVIEW_COLUMNS]
 
 
 def columns_invalidating_processing(dataset: ExperimentalDataset) -> Optional[List[str]]:
@@ -214,8 +215,37 @@ def editable_metadata_columns(dataset: ExperimentalDataset,
 
     locked = set(locked_metadata_columns(dataset, experiment_column))
 
+    return [column for column in editor_columns(dataset, experiment_column)
+            if column not in locked]
+
+
+def editor_columns(dataset: ExperimentalDataset, experiment_column: str) -> List[str]:
+    """
+    List the overview columns the editor deals with at all.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset holding the overview sheet.
+    experiment_column : str
+        Column naming the experiments, which becomes the editor's index.
+
+    Returns
+    -------
+    list of str
+        Every overview column but the experiment name and the derived ones.
+
+    Notes
+    -----
+    The processed flag is left out rather than shown read-only. It is owned by
+    the processing pipeline, and an edit changes it *after* the grid for this
+    run has already been drawn — so showing it put a stale ``True`` on screen
+    directly above the warning saying the experiment needs reprocessing. The
+    Dataset Overview table further down the page shows the flag.
+    """
+
     return [column for column in dataset.overview_df.columns
-            if column != experiment_column and column not in locked]
+            if column != experiment_column and column not in NON_METADATA_OVERVIEW_COLUMNS]
 
 
 def metadata_editor_view(dataset: ExperimentalDataset,
@@ -240,14 +270,50 @@ def metadata_editor_view(dataset: ExperimentalDataset,
 
     ordered_columns = (locked_metadata_columns(dataset, experiment_column)
                        + processing_relevant_metadata_columns(dataset)
-                       + list(dataset.overview_df.columns))
+                       + editor_columns(dataset, experiment_column))
 
     # dict.fromkeys keeps the first occurrence of each name, so the two
     # declared groups lead and the remaining columns follow in sheet order.
-    unique_columns = [column for column in dict.fromkeys(ordered_columns)
-                      if column != experiment_column]
+    unique_columns = list(dict.fromkeys(ordered_columns))
 
-    return dataset.overview_df.set_index(experiment_column)[unique_columns]
+    view = dataset.overview_df.set_index(experiment_column)[unique_columns]
+
+    return widen_integer_columns(view, editable_metadata_columns(dataset, experiment_column))
+
+
+def widen_integer_columns(view: pd.DataFrame, editable_columns: List[str]) -> pd.DataFrame:
+    """
+    Offer whole-number editable columns as fractional fields.
+
+    Parameters
+    ----------
+    view : pandas.DataFrame
+        Table about to be handed to the editing widget.
+    editable_columns : list of str
+        Columns the user may write to.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The view with its editable integer columns held as floats.
+
+    Notes
+    -----
+    An overview column holding only whole numbers arrives from Excel as
+    ``int64``, and `st.data_editor` takes the field type from the dtype: it
+    quietly rounds anything typed into such a column, so an offset corrected
+    to 62.5 was stored as 62 with nothing to show that it had been changed.
+    Neither an explicit fractional ``step`` nor a decimal format changes that
+    — only the dtype does.
+    """
+
+    integer_columns = [column for column in editable_columns
+                       if column in view.columns and pd.api.types.is_integer_dtype(view[column])]
+
+    if not integer_columns:
+        return view
+
+    return view.astype({column: 'float64' for column in integer_columns})
 
 
 def changed_metadata_cells(original_df: pd.DataFrame,
@@ -293,16 +359,23 @@ def changed_metadata_cells(original_df: pd.DataFrame,
     return changed_cells
 
 
-def update_experiment_metadata(experiment, edited_values: dict) -> None:
+def assign_overview_value(overview_df: pd.DataFrame,
+                          row_mask,
+                          column: str,
+                          value) -> None:
     """
-    Mirror one experiment's edited overview cells into its stored metadata.
+    Write one edited value into the overview sheet, widening the column if need be.
 
     Parameters
     ----------
-    experiment : Experiment
-        Experiment mutated in place.
-    edited_values : dict
-        ``{column: new_value}`` for this experiment.
+    overview_df : pandas.DataFrame
+        Overview sheet, mutated in place.
+    row_mask : pandas.Series
+        Boolean mask selecting the experiment's row.
+    column : str
+        Column to write.
+    value : Any
+        New value.
 
     Returns
     -------
@@ -310,17 +383,17 @@ def update_experiment_metadata(experiment, edited_values: dict) -> None:
 
     Notes
     -----
-    Only the changed keys are written, rather than the whole overview row: a
-    ``metadata_retrival_function`` is free to add keys of its own (the
-    reference one adds ``'experiment_name'``), and replacing the dict wholesale
-    would drop them. ``color`` and ``group`` are re-derived exactly as
-    `pyKES.database.data_processing.reprocess_single_experiment` does, so a
-    corrected colour takes effect without waiting for a reprocessing run.
+    A sheet column holding only whole numbers arrives as ``int64``, and pandas
+    refuses to store a fraction in one — so an offset of 62.5 would either
+    raise or land as 62. The column is widened to float first, which is also
+    what lets `metadata_editor_view` offer it as a fractional field.
     """
 
-    experiment.metadata.update(edited_values)
-    experiment.color = experiment.metadata.get('color', experiment.color)
-    experiment.group = experiment.metadata.get('group', experiment.group)
+    if isinstance(value, float) and not float(value).is_integer():
+        if pd.api.types.is_integer_dtype(overview_df[column]):
+            overview_df[column] = overview_df[column].astype('float64')
+
+    overview_df.loc[row_mask, column] = value
 
 
 def apply_metadata_edits(database: ExperimentalDataset,
@@ -348,22 +421,26 @@ def apply_metadata_edits(database: ExperimentalDataset,
     -------
     invalidated_experiments : list of str
         Experiments now flagged as needing reprocessing, sorted by name.
+
+    Notes
+    -----
+    Only ``overview_df`` is written here. The stored metadata of the affected
+    experiments then follows from it through
+    `ExperimentalDataset.synchronize_experiment_metadata`, so an edit cannot
+    reach one of the two and miss the other.
     """
 
     if processing_relevant_columns is None:
         processing_relevant_columns = processing_relevant_metadata_columns(database)
 
     for experiment_name, edited_values in changed_cells.items():
-        overview_row = database.overview_df[experiment_column].eq(experiment_name)
+        row_mask = database.overview_df[experiment_column].eq(experiment_name)
 
         for column, value in edited_values.items():
-            database.overview_df.loc[overview_row, column] = value
+            assign_overview_value(database.overview_df, row_mask, column, value)
 
-        # An overview row without an experiment is the normal state of one
-        # that has not been ingested yet; there is no stored metadata to keep
-        # in step with the sheet.
-        if experiment_name in database.experiments:
-            update_experiment_metadata(database.experiments[experiment_name], edited_values)
+    database.synchronize_experiment_metadata(
+        [name for name in changed_cells if name in database.experiments])
 
     invalidated_experiments = sorted(
         experiment_name for experiment_name, edited_values in changed_cells.items()

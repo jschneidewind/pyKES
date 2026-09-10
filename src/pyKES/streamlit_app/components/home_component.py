@@ -12,7 +12,8 @@ import tempfile
 import streamlit as st
 from typing import Optional
 
-from pyKES.database.database_experiments import ExperimentalDataset
+from pyKES.database.database_experiments import (ExperimentalDataset,
+                                                 describe_metadata_divergences)
 from pyKES.streamlit_app.config_interface import HomeConfig
 from pyKES.utilities.version_information import describe_version_information
 
@@ -67,6 +68,7 @@ def render_home(config: Optional[HomeConfig] = None) -> None:
                 st.success(
                     "File uploaded successfully! You can now navigate to other pages to analyze this data."
                 )
+                render_metadata_repair_report(st.session_state.experimental_dataset)
             finally:
                 # Clean up the temporary file
                 try:
@@ -91,3 +93,39 @@ def render_home(config: Optional[HomeConfig] = None) -> None:
 
     st.markdown(config.intro_markdown)
 
+
+
+def render_metadata_repair_report(dataset: ExperimentalDataset) -> None:
+    """
+    Tell the user if the file just loaded held metadata the overview contradicted.
+
+    Files written before ``overview_df`` became the single source of every
+    experiment's metadata can hold the two out of step — a metadata edit that
+    reached one and not the other. `ExperimentalDataset.load_from_hdf5`
+    resolves it in favour of the sheet; this says so, because the corrected
+    values are the ones the analysis pages will now use.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset just loaded, carrying its ``metadata_repair_report``.
+
+    Returns
+    -------
+    None : None
+        Widgets are written to the current Streamlit container.
+    """
+
+    if not dataset.metadata_repair_report:
+        return
+
+    st.warning(
+        f"⚠️ {len(dataset.metadata_repair_report)} experiment(s) in this file held metadata "
+        "that disagreed with the overview table. The overview values have been adopted, "
+        "and are what the analysis pages now use. Download the dataset again to store the "
+        "corrected file."
+    )
+
+    with st.expander("What was corrected"):
+        st.code(describe_metadata_divergences(dataset.metadata_repair_report,
+                                              maximum_reported=len(dataset.metadata_repair_report)))

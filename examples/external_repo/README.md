@@ -1,83 +1,118 @@
-# External Repository Example
+# The example app: how an external repository configures pyKES
 
-A minimal Streamlit app built on top of pyKES. It customizes only what is
-domain-specific (file types, parsing functions, branding) and uses the pyKES
-components verbatim for the rest.
+pyKES ships **components, not an application**. This directory is what an
+embedding repository looks like: an entry script, one config object, and the
+domain-specific callables that turn *this lab's* files into results. Nothing
+under `src/pyKES/streamlit_app/` is forked or edited.
 
-## Layout
-
-```
-external_repo/
-├── Home.py                 # Entry point — renders the configurable home page
-├── config.py               # The single config object (PYKES_CONFIG)
-├── data_processing.py      # Domain-specific metadata / raw / processing fns
-└── pages/
-    ├── 01_Data_Upload.py
-    ├── 02_Analysis_Results.py
-    └── 03_Time_Series.py
-```
-
-## How it fits together
-
-1. `data_processing.py` exposes three callables with the signatures that
-   `FileUploadHandler` expects:
-   - `get_metadata_from_excel(file_name, overview_df) -> Dict[str, Any]`
-   - `read_raw_data_from_csv(file_name, metadata_dict) -> Dict[str, Any]`
-   - `process_photocatalysis_data(raw_data_dict, metadata_dict) -> Dict[str, Any]`
-
-   Because ingestion runs in `ProcessPoolExecutor`, these must be importable
-   at module top level (no closures, no lambdas).
-
-2. `config.py` builds a `PyKESStreamlitConfig` containing one `HomeConfig` and
-   one `DataUploadConfig`. The processing callables are attached to the
-   `FileUploadHandler` that owns them — there are no top-level processing
-   functions on `DataUploadConfig` itself.
-
-3. `Home.py` and the `pages/*.py` files are one-line delegations to the
-   reusable pyKES components (`render_home`, `render_data_upload`,
-   `render_analysis_results`, `render_time_series`, `render_results_table`).
-
-## Run
+For a walkthrough that drives the app end to end with the data in
+`examples/example_data`, see [../README.md](../README.md).
 
 ```bash
-pip install -e /path/to/pyKES
 streamlit run examples/external_repo/Home.py
 ```
 
-## Adapting to your data
+## The four layers
 
-- Update the column names / parsing logic in `data_processing.py`.
-- Adjust the `FileUploadHandler` entries in `config.py` (file types, labels,
-  whether multiple files are accepted, which handler owns the processing
-  pipeline).
-- For ingestion driven by an overview spreadsheet, set
-  `read_in_experiments_kwargs={"overview_df_based_processing": True,
-  "overview_df_experiment_column": "<column>"}` on the data handler. The
-  upload component stages files in a temp directory and resolves bare
-  filenames in that column against it, so processing functions receive
-  absolute paths.
-- Customize titles, icons, and the home-page intro through `HomeConfig` and
-  `PyKESStreamlitConfig`.
-- Set `external_version` on `DataUploadConfig` (see `EXTERNAL_VERSION` in
-  `config.py`) so the version declared in the `pyproject.toml` of *this*
-  repository is stored in every dataset processed by the app. See
-  [docs/versioning_and_reprocessing.md](../../docs/versioning_and_reprocessing.md).
+| File | Job |
+| --- | --- |
+| `Home.py`, `pages/*.py` | one-line delegations to `render_home`, `render_data_upload`, `render_analysis_results`, `render_time_series`, `render_results_table` |
+| `config.py` | builds the single `PyKESStreamlitConfig` the pages are given |
+| `parameters.py` | what this app declares about its own science: which metadata columns the pipeline reads, the analysis settings, and the plotting instructions |
+| `metadata_functions.py`, `raw_data_functions.py`, `processing_functions.py` | the three callables `FileUploadHandler` expects |
 
-## Reprocessing existing files
+## The three callables
 
-Section "3. ♻️ Reprocess Existing Experiments" of the Data Upload page reruns a
-handler's `processing_function` against the metadata and raw data already in the
-loaded HDF5 file — no raw-data files needed. Use it to apply an updated
-processing pipeline to finished datasets; remember to download the dataset
-afterwards to persist the result.
+A `FileUploadHandler` is "processing-enabled" only when it has all three:
 
-## Notes / gaps
+```python
+metadata_retrival_function(experiment_name, overview_df) -> metadata_dict
+raw_data_reading_function(directory, metadata_dict)      -> raw_data_dict
+processing_function(raw_data_dict, metadata_dict)        -> processed_data_dict
+```
 
-- The Excel handler in this example is a placeholder — it accepts uploads
-  but has no processing pipeline, so it does not populate
-  `dataset.overview_df` on its own. The `overview_df_based_processing=True`
-  flag on the CSV handler therefore assumes the overview is already present
-  (e.g. loaded from an HDF5 file on the Home page). To drive the entire
-  flow from a fresh dataset you would either pre-populate `overview_df` via
-  the Excel handler's own pipeline, or switch the CSV handler to
-  keyword-based ingestion.
+`directory` is where the upload page staged the files the user just submitted,
+so the reader resolves the filenames in the metadata row against it. All three
+must be importable at module top level — no closures, no lambdas — because the
+non-Streamlit ingestion path runs them in a `ProcessPoolExecutor`.
+
+Only `'experiment_name'` is required of the metadata dictionary. `'color'` and
+`'group'` are used by the plotting pages when present.
+
+## Two handlers, not two layers
+
+`config.py` declares a liquid-phase and a gas-phase pipeline because an app
+usually owns more than one instrument setup. They are **alternatives**: an
+experiment is ingested by whichever pipeline matches it, and the upload page
+skips experiments already flagged `Processed`, so a second handler does not add
+to an experiment the first one produced. Both appear in the reprocessing
+pipeline selector.
+
+## The metadata contract
+
+`overview_df` is the single source of every experiment's metadata. For every
+column of the sheet, `Experiment.metadata` holds exactly what that
+experiment's row holds — the dataset re-establishes it whenever either side
+changes, and refuses to save a file where the two disagree. Two consequences
+for an app:
+
+- **A key that is not an overview column is yours.** `metadata_retrival_function`
+  here adds `'experiment_name'`, and such keys are never touched.
+- **A transformed overview column will be put back.** If the pipeline needs a
+  column in another form, derive it under a new key rather than overwriting
+  the column's own.
+
+## Declaring what the editor may change
+
+Two lists in `processing_parameters` — see `parameters.py` — decide what the
+metadata editor on the Data Upload page allows:
+
+| Declaration | In the grid | Effect of an edit |
+| --- | --- | --- |
+| `metadata_used_for_raw_data_loading` | shown, read-only | — |
+| `metadata_used_for_processing` | editable | clears `Processed`, lists the experiment for reprocessing |
+| anything else (`color`, `Notes`, …) | editable | none |
+
+Both keys must be present for the editor to be offered. That is the
+backward-compatibility gate — `processing_parameters` reaches a dataset from
+the file it was loaded from, so an older file carries neither and its metadata
+stays read-only — and the safety rule: a dataset declaring nothing locked can
+never expose a filename column as editable by omission.
+
+See [docs/metadata_editing.md](../../docs/metadata_editing.md).
+
+## What the pages show
+
+`plotting_instruction` carries one entry per page, all in `parameters.py`:
+
+- `time_series_instructions` — one curve per entry, with `unit_x` / `unit_y`
+  giving curves their own axes
+- `kinetic_results_instructions` — one scalar per entry for the Analysis
+  Results page
+- `results_table_instructions` — one column per entry, with optional `unit`,
+  `format` (a Python format spec) and `error`
+
+See [docs/plotting_instructions.md](../../docs/plotting_instructions.md).
+
+## Provenance
+
+`external_version` on `DataUploadConfig` records the version declared in the
+nearest `pyproject.toml` above `config.py` — for a real external repository,
+its own — in every dataset the app processes. Bump it when the processing
+behaviour changes, or the stamp says nothing. See
+[docs/versioning_and_reprocessing.md](../../docs/versioning_and_reprocessing.md).
+
+## Adapting it to your data
+
+1. Rewrite the readers in `raw_data_functions.py` for your instruments.
+2. Rewrite `processing_functions.py`; `pyKES.utilities` has the analysis
+   building blocks (`max_rate`, `calculate_efficiency`, `offset_correction`,
+   `time_series_resampling`, `calculate_absorption`).
+3. Point the declarations and instructions in `parameters.py` at your own
+   column names and result keys.
+4. Declare one `FileUploadHandler` per instrument setup in `config.py`, and
+   set `external_version` to your repository's own.
+
+Long-running page work has to be chunked across reruns rather than looped
+inline, or it delivers nothing to the screen in the stlite browser build —
+see [docs/browser_deployment.md](../../docs/browser_deployment.md).

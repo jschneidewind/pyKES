@@ -44,11 +44,20 @@ from pyKES.database.metadata_editing import columns_invalidating_processing
 from pyKES.streamlit_app.chunked_processing import (active_job, any_active_job,
                                                     collect_job_results, render_chunked_job,
                                                     start_chunked_job)
-from pyKES.streamlit_app.components.metadata_editor import render_metadata_editor
+from pyKES.streamlit_app.components.metadata_editor import (discard_metadata_editor_state,
+                                                             render_metadata_editor)
 from pyKES.streamlit_app.config_interface import DataUploadConfig, FileUploadHandler
 from pyKES.database.database_experiments import import_overview_excel
 from pyKES.utilities.version_information import describe_version_information
 
+
+# Session-state key holding the file_id of the metadata workbook already
+# merged into overview_df. `st.file_uploader` keeps its file for the whole
+# session, so without this the sheet was re-read and re-merged on *every*
+# rerun — and since an uploaded sheet takes precedence over stored values,
+# that silently reverted every metadata edit one rerun after it was applied,
+# while leaving the experiment's own metadata holding the edit.
+MERGED_METADATA_FILE_KEY = "merged_metadata_excel_file_id"
 
 # Session-state key of the experiment multiselect on the reprocessing form
 REPROCESS_SELECTION_KEY = "reprocess_selected_experiments"
@@ -215,12 +224,19 @@ def _render_metadata_uploader(
     uploaded = st.file_uploader(
         label = '📋 Upload Metadata (Excel)',
         type = ['xlsx', 'xls'],
-        help = 'Excel sheet listing experiments. Uploading merges into the dataset overview by experiment name.',
+        help = 'Excel sheet listing experiments. Uploading merges into the dataset overview by '
+               'experiment name, and takes precedence over metadata edited in section 4.',
         accept_multiple_files=False,
         key="metadata_excel_uploader",
         )
-    
+
     if uploaded is None:
+        # Clearing the widget lets the same workbook be uploaded again.
+        st.session_state.pop(MERGED_METADATA_FILE_KEY, None)
+        return
+
+    if st.session_state.get(MERGED_METADATA_FILE_KEY) == uploaded.file_id:
+        st.success("✅ Metadata merged successfully")
         return
 
     incoming_df = import_overview_excel(uploaded, 
@@ -231,6 +247,12 @@ def _render_metadata_uploader(
     dataset.update_overview_df(incoming_df,
                                config.metadata_excel_experiment_column,
                                columns_invalidating_processing(dataset))
+
+    st.session_state[MERGED_METADATA_FILE_KEY] = uploaded.file_id
+
+    # The sheet has just overridden whatever was edited, so the grid must not
+    # replay its client-side edits back over it.
+    discard_metadata_editor_state()
 
     st.success(
         f"✅ Metadata merged successfully")

@@ -6,7 +6,9 @@ rendering itself requires a script run context and is not tested here.
 
 The table holds numbers rather than formatted text, which is what makes the
 header sort compare magnitudes; `test_columns_sort_by_magnitude` is the
-regression that pins it.
+regression that pins it. The formatting happens on the display side of a
+Styler, so `test_cells_are_formatted_as_python_does` pins the digits that
+reach the screen.
 """
 
 import numpy as np
@@ -14,15 +16,17 @@ import pandas as pd
 import pytest
 
 from pyKES.streamlit_app.components.results_table_component import (
-    build_column_config,
-    build_number_format,
+    MISSING_VALUE_PLACEHOLDER,
     build_results_table,
     coerce_to_scalar,
     error_column_name,
+    format_result_cell,
     group_experiments,
     join_metadata_columns,
     resolve_result_number,
+    result_cell_formatters,
     select_instructions,
+    style_results_table,
 )
 from pyKES.utilities.unit_handler import Quantity
 
@@ -130,22 +134,48 @@ def test_multi_element_arrays_are_not_representable():
     assert coerce_to_scalar(np.array([1.0, 2.0])) is None
 
 
-def test_number_format_translates_the_python_spec():
-    assert build_number_format('.2f', None) == '%.2f'
-    assert build_number_format('.4g', 'mmol / h') == '%.4g mmol / h'
-    # A literal '%' would otherwise start a conversion of its own
-    assert build_number_format('.1f', '%') == '%.1f %%'
+def test_cells_are_formatted_as_python_does():
+    # st.column_config.NumberColumn has no 'g' conversion and rendered these
+    # as '0.00001234' and '12960000'; the default spec exists for exactly the
+    # range of magnitudes a rate spans.
+    assert format_result_cell(1.2345e-5) == '1.234e-05'
+    assert format_result_cell(12960000.0) == '1.296e+07'
+    assert format_result_cell(3.14159, '.2f') == '3.14'
+    assert format_result_cell(3.14159, '.2f', 'mmol / h') == '3.14 mmol / h'
 
 
-def test_only_numeric_columns_are_given_a_number_format(experiments):
-    experiments['Exp_004'] = SyntheticExperiment('Reference',
-                                                 {'apparent_quantum_yield': 'not measured'})
-    table = build_results_table(list(experiments), experiments, INSTRUCTIONS)
+def test_unresolvable_cells_get_the_placeholder():
+    assert format_result_cell(None) == MISSING_VALUE_PLACEHOLDER
+    assert format_result_cell(np.nan) == MISSING_VALUE_PLACEHOLDER
 
-    column_config = build_column_config(table, INSTRUCTIONS)
 
-    assert QUANTUM_YIELD_COLUMN not in column_config
-    assert MAX_RATE_COLUMN in column_config
+def test_string_results_pass_through_unformatted():
+    assert format_result_cell('not measured', '.2f') == 'not measured'
+
+
+def test_every_result_column_gets_a_formatter():
+    formatters = result_cell_formatters(INSTRUCTIONS)
+
+    assert set(formatters) == {MAX_RATE_COLUMN, error_column_name(MAX_RATE_COLUMN),
+                               QUANTUM_YIELD_COLUMN, error_column_name(QUANTUM_YIELD_COLUMN)}
+
+
+def test_styling_keeps_the_numbers_and_formats_the_display(experiments):
+    table = build_results_table(['Exp_001'], experiments, INSTRUCTIONS)
+
+    styled = style_results_table(table, INSTRUCTIONS)
+
+    # The frame the sort runs against is untouched...
+    assert styled.data.loc['Exp_001', MAX_RATE_COLUMN] == 12.345
+    # ...while the display carries the instruction's own format spec.
+    assert '12.35' in styled.to_html()
+
+
+def test_styling_ignores_columns_the_table_does_not_have(experiments):
+    table = build_results_table(['Exp_001'], experiments,
+                                select_instructions(INSTRUCTIONS, [QUANTUM_YIELD_COLUMN]))
+
+    assert '9' in style_results_table(table, INSTRUCTIONS).to_html()
 
 
 def test_metadata_columns_join_to_the_left(experiments):

@@ -64,17 +64,21 @@ or merge it into one.
 | Kind of column | In the grid | Effect of an edit |
 | --- | --- | --- |
 | Declared under `metadata_used_for_raw_data_loading` | shown, **read-only** | — |
-| The `Processed` flag | shown, **read-only** | — |
 | Declared under `metadata_used_for_processing` | editable | clears `Processed`; the experiment is listed for reprocessing |
 | Anything else (comments, labels, `color`, `group`) | editable | none |
+| The `Processed` flag | not shown | — |
 
 Raw-data-loading columns are locked because changing one does not correct the
 experiment, it describes a different one: a new filename means different raw
 data, which the stored `raw_data` no longer is. Correcting one means uploading
 the corrected sheet **and the raw-data files** again.
 
-The `Processed` flag is read-only for the same reason a thermometer is not
-adjustable: it is derived, and the pipeline owns it.
+The `Processed` flag is not a column of the grid at all. It is derived and the
+pipeline owns it, for the same reason a thermometer is not adjustable — and an
+edit changes it *after* the grid for that run has been drawn, so showing it put
+a stale `True` on screen directly above the warning saying the experiment
+needed reprocessing. The **Dataset Overview** table further down the page
+shows the flag.
 
 Everything not named in either list is editable and costs nothing, which is
 the common case — a comment, a label, a colour. `color` and `group` are
@@ -95,12 +99,50 @@ selection, fill down from a cell's corner, and paste a block copied straight
 out of Excel. Correcting one column across forty experiments is a paste, not
 forty edits.
 
-Nothing is written until **Apply metadata changes** is pressed. Until then the
-grid is a scratch copy; navigating away discards it. On apply, the page reports
-how many cells changed and names the experiments that now need reprocessing.
+**Edits save themselves.** There is no submit button: committing a cell writes
+it, and the editor reports what it saved and what that invalidated. Whole-number
+columns are widened rather than rounded, so an irradiation start corrected to
+`605.5` stays `605.5` — Streamlit's editor takes its field type from the column
+dtype, and an Excel column of whole numbers arrives as `int64`.
+
+The grid lives in an `st.fragment`, which is what makes autosaving affordable:
+a committed cell reruns the fragment alone, so saving costs neither a re-read of
+the uploaded workbook nor a rewrite of the whole HDF5 file for the download
+button, and nothing on the page moves. The cost is that the page body does not
+re-run either, so section 3's standing warning and its shortcut count catch up
+on the next page interaction — which is why the editor repeats that information
+inside its own fragment, where it is live.
+
+```{note}
+An earlier version of this page had an **Apply metadata changes** button, and
+all three of its faults are worth not reintroducing. The submit button ended in
+an app-scoped `st.rerun`, which re-focuses the button it was clicked on and
+moved Streamlit's scroll container by ~300 px. The grid's widget key carried a
+revision counter that was bumped on every apply, and changing the key resets the
+grid's horizontal scroll to the first columns — scroll survives a fragment rerun
+and an app-scoped rerun alike, and is lost only to a new key. And the page
+re-merged the uploaded workbook on every rerun, so the rerun that followed an
+apply reverted the edit it had just made.
+```
 
 Rows cannot be added or deleted here. New experiments come from the metadata
 sheet, which is also what keeps the sheet and the dataset in step.
+
+---
+
+## 3a. An uploaded sheet wins
+
+Uploading a metadata workbook overrides anything edited in the app: for every
+row both sides hold, the sheet's values replace the stored ones. That is what
+makes re-uploading a corrected workbook the way to undo an editing session,
+and it is why the grid is re-seeded on a merge — its client-side edits must not
+replay over the sheet that just replaced them.
+
+The sheet is merged **once per uploaded file**, tracked by the uploader's
+`file_id`. It used to be re-read and re-merged on every rerun, because
+`st.file_uploader` keeps its file for the whole session — which turned "the
+sheet wins" into "the sheet wins again one rerun after every edit". Clearing
+the widget lets the same workbook be uploaded again.
 
 ---
 
@@ -141,6 +183,30 @@ Two of these are new, and both were wrong before:
 processes every file its keywords match, regardless. That predates this work
 and is unchanged by it. The Streamlit page does not use that entry point.
 ```
+
+---
+
+## 4a. The two places metadata lives cannot disagree
+
+An edit has to reach both `overview_df` and the `Experiment` it belongs to. It
+used not to: an edit reverted in the overview table could survive in the
+experiment's own metadata, so the grid and the Dataset Overview showed one
+number while the time-series and results pages showed another — and a
+reprocessing run with metadata refresh then resolved it by pulling the reverted
+value back over the stored one.
+
+The sheet now owns those columns. The editor writes only `overview_df`, and the
+stored metadata follows from it through
+`ExperimentalDataset.synchronize_experiment_metadata`, so an edit cannot reach
+one and miss the other. `save_to_hdf5` refuses to write a dataset where the two
+disagree, and `load_from_hdf5` repairs files written before the guarantee
+existed and reports what it corrected — which the Home page shows, since the
+corrected values are the ones the analysis pages use. See
+{doc}`guide/dataset`.
+
+Keys a `metadata_retrival_function` adds that are not overview columns are the
+app's own and are untouched; a transformed overview column, on the other hand,
+is put back.
 
 ---
 

@@ -39,6 +39,49 @@ improved processing algorithm over a finished dataset without going back to the
 original instrument files — often years later, on a machine that no longer has
 them. See :doc:`/versioning_and_reprocessing`.
 
+The arrow from ``overview_df`` to ``metadata`` is the other one:
+**the overview sheet owns every experiment's metadata.**
+
+The overview sheet owns the metadata
+------------------------------------
+
+For every column of ``overview_df``, an experiment's ``metadata`` holds exactly
+what that experiment's row holds. The two could disagree before, and did in
+real files: half of an edit would land, and the grid and the plotting pages
+then described the same run differently.
+
+The dataset closes that off from four sides:
+
+* ``add_experiment`` aligns the experiment it is given with its overview row.
+  Every experiment enters through it — ingestion, reprocessing, a load, a merge
+  — so a pipeline that transformed an overview column on its way in gets that
+  column put back.
+* ``update_overview_df`` pushes a merged sheet into the experiments, and adopts
+  the key column it was given as the dataset's ``experiment_column``.
+* ``save_to_hdf5`` raises rather than writing a dataset where the two disagree,
+  naming the experiments and columns. Every mutation path re-establishes the
+  invariant, so reaching a save with it broken means something wrote to
+  ``Experiment.metadata`` behind the dataset's back.
+* ``load_from_hdf5`` repairs a file written before the guarantee existed and
+  records what it corrected in ``metadata_repair_report``, which the Streamlit
+  Home page surfaces.
+
+Two things the sheet deliberately does not own:
+
+* **The** ``Processed`` **flag.** Derived and pipeline-owned: it changes when an
+  experiment is processed, without any metadata changing.
+* **Keys that are not overview columns.** A ``metadata_retrival_function`` is
+  free to add its own — the reference one adds ``'experiment_name'`` — and
+  those are left alone. A pipeline that needs an overview column in another
+  form should derive it under a new key rather than overwriting the column's
+  own.
+
+``ExperimentalDataset.metadata_divergences()`` reports disagreements and
+``synchronize_experiment_metadata()`` resolves them in favour of the sheet.
+Values are compared by value, not by type: the same cell arrives as a NumPy
+scalar from a DataFrame and a plain float from JSON, and two missing values
+agree, so a round trip through HDF5 or Excel is not a divergence.
+
 .. list-table::
    :header-rows: 1
    :widths: 30 70
