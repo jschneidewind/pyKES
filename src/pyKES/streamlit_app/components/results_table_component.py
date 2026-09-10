@@ -20,10 +20,11 @@ Author: pyKES Development Team
 Date: 27 August 2026
 """
 
+from functools import partial
+
 import streamlit as st
 import numpy as np
 import pandas as pd
-from pandas.api.types import is_numeric_dtype
 
 from pyKES.utilities.resolve_attributes import resolve_experiment_attributes
 from pyKES.utilities.unit_handler import Quantity
@@ -45,6 +46,13 @@ ERROR_COLUMN_SUFFIX = ' (±)'
 
 # Format spec applied when an instruction does not define its own 'format'
 DEFAULT_VALUE_FORMAT = '.4g'
+
+# Stands in for a result that cannot be resolved. Reached by the formatter,
+# and so by the CSV export and the tests, but *not* by the rendered grid: a
+# cell whose underlying value is missing is drawn as "None" by Streamlit
+# whatever display value a Styler supplies — the same as every other table in
+# the app, where a blank overview cell reads "None" too.
+MISSING_VALUE_PLACEHOLDER = '—'
 
 # Prefix of the per-experiment checkbox widget keys (must not collide with
 # the checkbox keys of the time-series page, which shares the selection state)
@@ -398,65 +406,98 @@ def join_metadata_columns(table: pd.DataFrame,
     return metadata.join(table, how='right')
 
 
-def build_number_format(format_spec: str, unit) -> str:
+def format_result_cell(value, format_spec: str = DEFAULT_VALUE_FORMAT, unit=None) -> str:
     """
-    Translate an instruction's Python format spec into a printf spec.
-
-    ``st.column_config.NumberColumn`` formats printf-style, which is what
-    keeps the displayed digits identical to the previous string cells while
-    the underlying value stays a number.
+    Render one result value the way the instruction asks for.
 
     Parameters
     ----------
-    format_spec : str
-        Python format spec, e.g. ``'.2f'``.
-    unit : str or None
-        Unit appended to every cell.
+    value : float or str or None
+        Resolved value of the cell.
+    format_spec : str, optional
+        Python format spec from the instruction.
+    unit : str or None, optional
+        Unit appended to the formatted number.
 
     Returns
     -------
     str
-        printf-style format string, e.g. ``'%.2f mmol / h'``.
+        Formatted cell text.
+
+    Notes
+    -----
+    Formatting happens here, on the display side of a Styler, rather than
+    through ``st.column_config.NumberColumn``: that formats printf-style and
+    has no ``g`` conversion, so ``'.4g'`` — the default, and the spec that
+    earns its keep across the many orders of magnitude a rate spans — came
+    out as ``0.00001234`` where Python writes ``1.234e-05``. A Styler keeps
+    the frame numeric, so the header sort still compares magnitudes.
     """
-    printf_spec = f"%{format_spec}"
 
-    if not unit:
-        return printf_spec
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return MISSING_VALUE_PLACEHOLDER
 
-    # A literal '%' — a unit such as '%' or 'wt%' — would otherwise start a
-    # conversion of its own in a printf-style spec.
-    return f"{printf_spec} {unit.replace('%', '%%')}"
+    if isinstance(value, str):
+        return value
+
+    return f"{format(value, format_spec)} {unit}" if unit else format(value, format_spec)
 
 
-def build_column_config(table: pd.DataFrame, results_table_instructions: dict) -> dict:
+def result_cell_formatters(results_table_instructions: dict) -> dict:
     """
-    Build the per-column display configuration of the results table.
+    Build the per-column display formatters of the results table.
 
     Parameters
     ----------
-    table : pandas.DataFrame
-        Assembled results table.
     results_table_instructions : dict
         Instructions the result columns were built from.
 
     Returns
     -------
     dict
-        Mapping of column name to ``st.column_config`` entry, covering the
-        numeric result columns only. A result that resolves to a string keeps
-        a plain text column instead of being handed a number format.
+        Mapping of column name to a one-argument formatter, covering the
+        result columns and their uncertainty columns. Metadata columns are
+        left out so they render as the overview sheet holds them.
     """
-    column_config = {}
+
+    formatters = {}
 
     for label, result_config in results_table_instructions.items():
-        number_format = build_number_format(result_config.get('format', DEFAULT_VALUE_FORMAT),
-                                            result_config.get('unit', None))
+        format_spec = result_config.get('format', DEFAULT_VALUE_FORMAT)
+        unit = result_config.get('unit', None)
 
         for column in (label, error_column_name(label)):
-            if column in table.columns and is_numeric_dtype(table[column]):
-                column_config[column] = st.column_config.NumberColumn(format=number_format)
+            formatters[column] = partial(format_result_cell,
+                                         format_spec=format_spec,
+                                         unit=unit)
 
-    return column_config
+    return formatters
+
+
+def style_results_table(table: pd.DataFrame, results_table_instructions: dict):
+    """
+    Attach the display formatting to an assembled results table.
+
+    Parameters
+    ----------
+    table : pandas.DataFrame
+        Table of numbers, as `build_results_table` returns it.
+    results_table_instructions : dict
+        Instructions the result columns were built from.
+
+    Returns
+    -------
+    pandas.io.formats.style.Styler
+        The table with its result columns formatted. Handing this to
+        `st.dataframe` shows the formatted text while the header sort still
+        works on the numbers underneath.
+    """
+
+    formatters = {column: formatter
+                  for column, formatter in result_cell_formatters(results_table_instructions).items()
+                  if column in table.columns}
+
+    return table.style.format(formatter=formatters)
 
 
 # =============================================================================
@@ -763,8 +804,7 @@ def render_results_table() -> None:
                                               experimental_dataset.overview_df,
                                               selected_metadata)
 
-        st.dataframe(results_table,
-                     column_config=build_column_config(results_table, selected_instructions),
+        st.dataframe(style_results_table(results_table, selected_instructions),
                      width='stretch')
 
         st.download_button(
