@@ -30,13 +30,16 @@ repository, with the loaders in `analyse_all_examples.py` in that directory.
 | `MRG-059-Z-1-3` | same name, `.csv` | short hand-logged run |
 | `AE-855_B2` | `260901_AE_851_to_AE-855.h5` | well plate, `processed_data/{time_reaction_s, data_reaction_umol}` |
 | `AE-855_C2` | `260901_AE_851_to_AE-855.h5` | well plate, same group |
+| `AE-854_B2` | `260909_Calibration_Data_Plate1.h5` | well plate, blank well, same group |
+| `AE-867_B2` | `260909_Calibration_Data_Plate1.h5` | well plate, blank well, same group |
+| `AE-868_C2` | `260909_Calibration_Data_Plate1.h5` | well plate, blank well, same group |
 
 The PyroScience and UniAmp traces keep the `dt (s)` / `Time since start (s)`
 column and the main measurement channel; the well-plate traces are the
 offset-corrected reaction arrays the upstream processing writes, which is
 exactly what the pipeline is handed in production.
 
-## Why these eleven
+## Why these eleven reaction traces
 
 The seven logger traces and two hand-logged runs are one of each format the
 group records in, at the two extremes of length (~70 to ~12 000 points) and
@@ -53,3 +56,34 @@ characterization on real data: a correlated component resolved above the floor
 (most of them), one clamped to the floor (`AE-855_B2`), and one folded into the
 white noise because the variogram is too short to support the model
 (`MRG-059-*`).
+
+## Why these three blanks
+
+`AE-854_B2`, `AE-867_B2` and `AE-868_C2` are the three wells of a 176-well
+calibration plate (160 reaction wells, 16 blanks) on which the kinetic length
+scale collapsed onto the sensor oscillation every well on that plate carries -- a
+quasi-periodic wander with a 270-320 s period. The rate curve then oscillated
+about zero instead of decaying, and the reported maximum was a crest of it:
+
+| well | collapsed | at the noise floor | the plate for comparison |
+| --- | --- | --- | --- |
+| `AE-854_B2` | 4.00e-6 | 9.4e-7 | smallest of the 160 reaction wells: 2.58e-6 |
+| `AE-867_B2` | 1.18e-6 | -3.9e-8 | 5th percentile: 5.42e-6 |
+| `AE-868_C2` | 6.46e-7 | 3.4e-7 | median: 1.06e-5 |
+
+`AE-854_B2` is the reason they are here: at 4.00e-6 umol/s it out-performed the
+weakest real catalyst on its own plate. The other 13 blanks were never affected
+and came out at or below 1.3e-7, so these three are the failing half of a
+boundary that the plate itself supplies -- the same shape of evidence as the
+`AE-855_B2` / `AE-855_C2` pair above.
+
+They are also the reason the blanks are tested separately from the eleven in
+`REAL_TRACES`: `AE-854_B2` masks 18 % of its samples as outliers, because its
+first ~800 s genuinely are spiky, so the "residual equals the fitted noise" and
+"fewer than 5 % masked" properties that every reaction trace has to satisfy are
+the wrong questions to ask of it.
+
+The source HDF5 is not committed -- it is 24 MB. The fixtures were written from
+its `processed_data/{time_reaction_s, data_reaction_umol}` arrays with
+`DataFrame.to_csv(index=False, float_format='%g')`, which is what gives them the
+same six-significant-figure layout as the rest of the directory.

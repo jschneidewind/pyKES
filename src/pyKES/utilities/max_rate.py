@@ -109,6 +109,11 @@ NUISANCE_LENGTHSCALE_MAX_FRACTION = 0.02
 # --- Gaussian-process model --------------------------------------------------
 KINETIC_SEPARATION_FACTOR = 2.0      # kinetic length scale floor, in nuisance correlation times
 NUISANCE_AMPLITUDE_FRACTION = 0.5    # nuisance std may not exceed this fraction of the trace's robust spread
+# A wigglier kinetic component always fits a little better, so the likelihood on its own never
+# prefers the smooth explanation. It has to earn this much per fitted point before it is believed;
+# below that the two explanations are a tie the data cannot settle, and the smooth one wins.
+KINETIC_PARSIMONY_MARGIN = 0.01      # nats per fitted point a wigglier fit must gain to be preferred
+KINETIC_SMOOTH_FRACTION = 0.5        # the smooth refit is confined above this fraction of the upper bound
 LENGTHSCALE_MIN_STEPS = 20           # length scale floor in median time steps (guards against noise fitting)
 LENGTHSCALE_MIN_SPAN_FRACTION = 0.002
 LENGTHSCALE_MAX_SPAN_FRACTION = 0.5
@@ -900,6 +905,81 @@ def negative_log_likelihood(log_parameters, time_steps, values_centered, weights
     return -log_likelihood
 
 
+def fit_from_starting_lengthscale(lengthscale_initial, lengthscale_bounds, bounds,
+                                  signal_std_initial, noise_std_initial, likelihood_arguments):
+    """
+    Run one marginal-likelihood optimization from a given starting length scale.
+
+    Parameters
+    ----------
+    lengthscale_initial : float
+        Length scale to start from, in seconds. Clipped into `lengthscale_bounds`.
+    lengthscale_bounds : tuple of float
+        (lower, upper) bounds the start is clipped into, in seconds.
+    bounds : list of ndarray
+        Log-space box bounds of the three free parameters.
+    signal_std_initial : float
+        Starting kinetic amplitude.
+    noise_std_initial : float
+        Starting white-noise standard deviation.
+    likelihood_arguments : tuple
+        Extra arguments of `negative_log_likelihood`.
+
+    Returns
+    -------
+    OptimizeResult
+        The finished Nelder-Mead result, in log space.
+    """
+    initial_guess = np.log([np.clip(lengthscale_initial, *lengthscale_bounds),
+                            signal_std_initial, noise_std_initial])
+
+    return minimize(negative_log_likelihood, np.clip(initial_guess, *np.transpose(bounds)),
+                    args=likelihood_arguments,
+                    method='Nelder-Mead', bounds=bounds,
+                    options={'xatol': 0.02, 'fatol': 0.1, 'maxiter': 400})
+
+
+def fit_smooth_alternative(lengthscale_bounds, bounds, signal_std_initial,
+                           noise_std_initial, likelihood_arguments):
+    """
+    Refit with the kinetic length scale confined to the smooth end of its range.
+
+    This is a restricted refit rather than a third starting point: started from
+    a long length scale but left free, Nelder-Mead walks straight back down to
+    the wiggly optimum, so an extra start changes nothing. Confining the bound
+    is what produces an alternative to compare against.
+
+    Parameters
+    ----------
+    lengthscale_bounds : tuple of float
+        (lower, upper) bounds of the unrestricted fit, in seconds.
+    bounds : list of ndarray
+        Log-space box bounds of the three free parameters.
+    signal_std_initial : float
+        Starting kinetic amplitude.
+    noise_std_initial : float
+        Starting white-noise standard deviation.
+    likelihood_arguments : tuple
+        Extra arguments of `negative_log_likelihood`.
+
+    Returns
+    -------
+    OptimizeResult or None
+        The finished fit, or None when the smooth sub-range is empty because the
+        length-scale floor already sits inside it and there is nothing to compare.
+    """
+    smooth_lower = max(lengthscale_bounds[0], KINETIC_SMOOTH_FRACTION * lengthscale_bounds[1])
+    if smooth_lower >= lengthscale_bounds[1]:
+        return None
+
+    smooth_bounds = [np.log((smooth_lower, lengthscale_bounds[1]))] + list(bounds[1:])
+
+    return fit_from_starting_lengthscale(0.5 * (smooth_lower + lengthscale_bounds[1]),
+                                         (smooth_lower, lengthscale_bounds[1]), smooth_bounds,
+                                         signal_std_initial, noise_std_initial,
+                                         likelihood_arguments)
+
+
 def fit_hyperparameters(time, values_centered, weights, lengthscale_bounds,
                         noise_structure, max_fit_points, previous_fit=None):
     """
@@ -911,6 +991,19 @@ def fit_hyperparameters(time, values_centered, weights, lengthscale_bounds,
     avoid local optima. The nuisance correlation time is not fitted here --
     it is measured directly from the variogram, which keeps it identifiable
     even on traces where the correlated component is weak.
+
+    The likelihood is then asked a second question, with the length scale
+    confined to the smooth end of its range, and the smooth answer is kept
+    unless the free one is better by more than `KINETIC_PARSIMONY_MARGIN` per
+    fitted point. A kinetic component that tracks the scatter always fits
+    marginally better, so on a trace where the variogram has under-measured
+    the correlated noise the likelihood alone will shorten the length scale
+    onto an instrument oscillation for a gain of a few thousandths of a nat
+    per point -- and the reported maximum then comes off a crest of that
+    oscillation rather than off a reaction. Requiring a wigglier curve to
+    earn its flexibility is what stops that, and it costs the traces that
+    genuinely need one nothing: across the measured fixtures the gains fall
+    into two clear groups either side of the margin, none of them close to it.
 
     Parameters
     ----------
@@ -930,7 +1023,8 @@ def fit_hyperparameters(time, values_centered, weights, lengthscale_bounds,
     previous_fit : dict of float, optional
         Hyperparameters of an earlier fit of the same series. When given the
         optimizer restarts from them alone, which is what makes the refit
-        after artifact detection cost a fraction of the first fit.
+        after artifact detection cost a fraction of the first fit. The
+        parsimony comparison is made either way.
 
     Returns
     -------
@@ -957,6 +1051,7 @@ def fit_hyperparameters(time, values_centered, weights, lengthscale_bounds,
     bounds = [np.log(lengthscale_bounds),
               np.log((1e-3 * signal_std_initial, 1e3 * signal_std_initial)),
               np.log((1e-2 * noise_std_initial, 1e3 * noise_std_initial))]
+    likelihood_arguments = (fit_time_steps, fit_values, fit_weights, nuisance)
 
     if previous_fit is None:
         starting_lengthscales = (duration / 100.0, duration / 10.0)
@@ -965,16 +1060,22 @@ def fit_hyperparameters(time, values_centered, weights, lengthscale_bounds,
 
     best_fit = None
     for lengthscale_initial in starting_lengthscales:
-        initial_guess = np.log([np.clip(lengthscale_initial, *lengthscale_bounds),
-                                signal_std_initial, noise_std_initial])
-
-        fit = minimize(negative_log_likelihood, np.clip(initial_guess, *np.transpose(bounds)),
-                       args=(fit_time_steps, fit_values, fit_weights, nuisance),
-                       method='Nelder-Mead', bounds=bounds,
-                       options={'xatol': 0.02, 'fatol': 0.1, 'maxiter': 400})
+        fit = fit_from_starting_lengthscale(lengthscale_initial, lengthscale_bounds, bounds,
+                                            signal_std_initial, noise_std_initial,
+                                            likelihood_arguments)
 
         if best_fit is None or fit.fun < best_fit.fun:
             best_fit = fit
+
+    smooth_fit = fit_smooth_alternative(lengthscale_bounds, bounds, signal_std_initial,
+                                        noise_std_initial, likelihood_arguments)
+
+    # A tie goes to the smooth explanation. Both fits have the same three free
+    # parameters, so this is parsimony in the length scale rather than a
+    # likelihood-ratio test: it can only act where the likelihood is flat.
+    if smooth_fit is not None \
+            and smooth_fit.fun - best_fit.fun <= KINETIC_PARSIMONY_MARGIN * len(fit_values):
+        best_fit = smooth_fit
 
     return unpack_hyperparameters(best_fit.x, nuisance)
 

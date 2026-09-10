@@ -281,6 +281,62 @@ them — that is the fit working, not failing. `plot_max_rate` also draws
 trace, and it is the one that should hug the data. Where the two separate, the
 fit has decided that structure was instrumental.
 
+### When the data cannot decide: parsimony in the length scale
+
+The split above rests on the variogram measuring the correlated noise
+correctly, and there is one situation where it cannot. The variogram only looks
+at lags up to 5 % of the run. If an instrument oscillation is slower than that
+window — a stirring or temperature-control wander with a period of several
+minutes on an hour-long run — its structure function is still *rising* at the
+longest lag the variogram sees. Rising is also what a reaction curve's own
+curvature looks like, and the variogram has a term for exactly that, so the
+oscillation is booked as chemistry and the nuisance component comes back too
+short and too small to hold it.
+
+The likelihood then has one component left that can explain the wiggles, and it
+uses it: the kinetic length scale shortens onto the oscillation. On three blank
+wells of a 176-well calibration plate this is what happened, and it is not a
+subtle effect on the answer — the rate curve oscillated between ±4e-6 µmol/s
+instead of decaying, and the reported maximum was a crest of it, putting a well
+with no catalyst in it above the weakest real experiment on the same plate.
+
+What makes this fixable is *how narrowly* the likelihood preferred the wiggly
+explanation. On two of the three wells it was ahead by **0.0059 and 0.0065 nats
+per point** — about 6 nats spread over a thousand samples. The data were not
+saying "the kinetics wiggle"; they were saying nothing, and a wigglier curve
+always fits slightly better, so nothing is enough to win.
+
+So the likelihood is asked twice. The second fit is the same three parameters
+with the kinetic length scale confined to the smooth end of its allowed range,
+and the smooth answer is kept **unless the free one earns
+`KINETIC_PARSIMONY_MARGIN` nats per fitted point**. The two fits have the same
+number of free parameters, so this is not a likelihood-ratio test; it is a
+tie-break, and it can only act where the likelihood is flat.
+
+Two details matter for anyone changing this:
+
+- It has to be a *restricted refit*, not an extra starting point. Started long
+  but left free, Nelder-Mead walks straight back down to the wiggly optimum and
+  nothing changes.
+- Traces that genuinely need a flexible kinetic component are not near the
+  margin: across the fourteen measured fixtures the gains fall into two clean
+  groups, ten at or below 0.0065 nats per point and four at or above 0.0132,
+  with the margin of 0.01 in the gap. That is why the measured reaction traces
+  move by at most a few percent while the blanks fall by factors of two to
+  thirty.
+- The comparison is made at both fitting stages, and on `AE-854_B2` that
+  matters: its spiky opening genuinely justifies a flexible curve until the
+  artifact pass downweights it, so the first fit keeps the wiggly answer and the
+  refit is where the length scale goes from 118 s to 738 s. The rule and the
+  artifact rejection work in the same direction rather than against each other.
+
+The alternative fixes that look obvious here do not work, and the test suite is
+what says so: widening the variogram's lag window lets the nuisance eat real
+kinetics on a low-signal hydrogen trace (−23 %), and raising the kinetic floor
+directly (`KINETIC_SEPARATION_FACTOR`) pins the *first* fit at its bound, which
+destroys the reference curve the artifact test depends on and lets a bubble
+through as a fivefold overestimate.
+
 ## 4. Rejecting artifacts without cutting out the chemistry
 
 ### The problem with the obvious approaches
@@ -480,11 +536,20 @@ rests on a handful of points and is correspondingly noisier.
 ### Blanks and control wells
 
 On a well that produces nothing, the honest answer is "no significant rate",
-and that is now what comes back: the reported maximum is at or below zero
-rather than a positive number manufactured from a noise crest, and
+and that is now what comes back: the reported maximum is at or below the noise
+floor rather than a positive number manufactured from a noise crest, and
 `max_rate_not_significant` is flagged whenever the maximum is less than three
 standard deviations above zero. Filtering on that flag is a reliable way to
-separate active wells from blanks downstream.
+separate active wells from blanks downstream — on the calibration plate above,
+every blank is flagged and no reaction well is, with the nearest reaction trace
+still eleven standard deviations clear.
+
+Getting the *number* down as well as the flag right is what the parsimony
+tie-break in [section 3](#when-the-data-cannot-decide-parsimony-in-the-length-scale)
+is for: a blank is precisely the case where nothing in the data prefers a
+wiggly kinetic component, so nothing is what the reported rate should reflect.
+Three blanks of that plate are committed as test fixtures
+(`src/tests/data/max_rate_real/AE-854_B2.csv` and its two neighbours).
 
 ## 7. Cross-check and quality flags
 
