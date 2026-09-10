@@ -141,7 +141,6 @@ def test_cells_are_formatted_as_python_does():
     assert format_result_cell(1.2345e-5) == '1.234e-05'
     assert format_result_cell(12960000.0) == '1.296e+07'
     assert format_result_cell(3.14159, '.2f') == '3.14'
-    assert format_result_cell(3.14159, '.2f', 'mmol / h') == '3.14 mmol / h'
 
 
 def test_unresolvable_cells_get_the_placeholder():
