@@ -7,7 +7,7 @@ to correct one was to edit the Excel sheet and upload it again — and nothing i
 the dataset recorded that the results sitting beside the corrected value had
 been computed from the old one.
 
-Section **4. ✏️ Edit Metadata** of the Data Upload page makes the overview
+Section **3. ✏️ Edit Metadata** of the Data Upload page makes the overview
 sheet editable in place, and makes the consequence of each edit explicit.
 
 ---
@@ -120,9 +120,9 @@ from the column dtype, and an Excel column of whole numbers arrives as
 
 ### The page refreshes, and does not move
 
-Applying an edit changes something section 3 shows — its standing warning and
-its **"Only experiments needing reprocessing (n)"** checkbox — and section 3 is
-drawn by the page body, above the editor. So applying ends in
+Applying an edit changes something section 4 shows — its standing warning and
+its **"Only experiments needing reprocessing (n)"** checkbox — and section 4 is
+drawn by the page body. So applying ends in
 `st.rerun(scope="app")`: the warning appears and the checkbox becomes
 selectable on the same press, rather than staying stale until the next page
 interaction.
@@ -134,9 +134,8 @@ truth about its own state.
 
 What it does *not* cost is the scroll position. Measured in headless Chromium
 with the button already in view: 686 → 686 px in an isolated layout, and
-1492 → 1499 px on the real page, where the 7 px is the reprocessing warning
-appearing in section 3 and pushing what follows down by its own height. Two
-things are what keep it still, and neither is the scope of the rerun:
+1492 → 1492 px on the real page. Three things are what keep it still, and none
+of them is the scope of the rerun:
 
 * **The grid's widget key does not change on submit.** Horizontal scroll
   survives a rerun of either scope (1200 → 1200 px) and is lost only to a new
@@ -144,6 +143,12 @@ things are what keep it still, and neither is the scope of the rerun:
 * **The status area is always the same two captions.** An `st.success` box that
   comes and goes changes the height of the section and shifts everything below
   it, which reads as the page moving under the reader.
+* **The editor sits above the reprocessing section.** Anything appearing
+  *above* the grid pushes the grid down by its own height, and the
+  reprocessing warning is exactly something that appears when an edit is
+  applied. Below the grid, it costs the editor nothing — which is why the
+  editor is section 3 and reprocessing is section 4, rather than the other way
+  round.
 
 Because the applying run ends in a rerun, everything it drew is discarded — so
 what was stored is parked in session state under `METADATA_EDIT_SUMMARY_KEY`
@@ -245,7 +250,7 @@ is put back.
 
 ## 5. Reprocessing what the editor invalidated
 
-Section **3. ♻️ Reprocess Existing Experiments** carries the other half:
+Section **4. ♻️ Reprocess Existing Experiments** carries the other half:
 
 * a standing warning naming every experiment whose results no longer match its
   metadata. It sits above the section, so it stays visible while a job runs;

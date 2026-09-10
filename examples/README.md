@@ -121,7 +121,7 @@ experiments.
 
 ## 5. Edit metadata
 
-Section **4. ✏️ Edit Metadata** is a spreadsheet grid over the overview sheet.
+Section **3. ✏️ Edit Metadata** is a spreadsheet grid over the overview sheet.
 
 Correct as many cells as you like, then press **💾 Apply metadata changes** —
 nothing is stored until you do, which is what leaves the spreadsheet gestures
@@ -134,10 +134,10 @@ undisturbed while you make them.
 2. **Edit a processing column.** Change `Irradiance [mW/cm2]` for `NB-316`
    from `50` to `40`, press Enter, then press the button.
    *Look for:* "✅ Saved 1 change(s)…" and "⚠️ 1 experiment(s) need
-   reprocessing…" under the grid, **and** section 3 above it picking the same
+   reprocessing…" under the grid, **and** section 4 below it picking the same
    thing up on that press: its own warning appears and its "Only experiments
-   needing reprocessing (1)" checkbox becomes selectable. The grid stays
-   scrolled where it was.
+   needing reprocessing (1)" checkbox becomes selectable. Nothing moves — the
+   editor is above everything that changes.
 3. **Edit several at once.** Drag the small handle at the bottom-right of a
    corrected cell down a few rows, or paste a column straight out of Excel,
    then press the button once.
@@ -152,7 +152,7 @@ undisturbed while you make them.
 
 ## 6. Reprocess
 
-Section **3. ♻️ Reprocess Existing Experiments** shows the standing warning
+Section **4. ♻️ Reprocess Existing Experiments** shows the standing warning
 and a **"Only experiments needing reprocessing (n)"** checkbox.
 
 Pick the **💧 Liquid phase** pipeline, tick the checkbox, leave **Refresh
@@ -239,5 +239,5 @@ against; download the dataset again to store the corrected file.
 Datasets whose `processing_parameters` declare neither
 `metadata_used_for_raw_data_loading` nor `metadata_used_for_processing` — every
 file written before those declarations existed — get an explanatory note in
-section 4 instead of a grid. Their metadata is corrected by editing the Excel
+section 3 instead of a grid. Their metadata is corrected by editing the Excel
 sheet and uploading it.

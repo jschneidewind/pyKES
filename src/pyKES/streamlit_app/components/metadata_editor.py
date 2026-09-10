@@ -167,7 +167,7 @@ def render_editing_policy(dataset: ExperimentalDataset, locked_columns: list) ->
         "spreadsheet, so several experiments can be corrected in one go — nothing is "
         "stored until the button is pressed, which is what leaves those gestures "
         "undisturbed. Editing a column the processing function reads clears the "
-        "experiment's `Processed` flag and lists it for reprocessing in section 3. "
+        "experiment's `Processed` flag and lists it for reprocessing in section 4 below. "
         "Uploading a metadata sheet above replaces whatever is edited here."
     )
 
@@ -209,10 +209,10 @@ def render_metadata_grid(dataset: ExperimentalDataset, experiment_column: str) -
     Notes
     -----
     A fragment, so the submit reruns this function and nothing else. The page
-    body not re-running is what keeps the page still, and it means section 3's
-    standing warning and its shortcut count catch up on the next page
-    interaction — which is why the same information is repeated here, where it
-    is live.
+    body not re-running would leave section 4's standing warning and its
+    shortcut count stale, so an applied edit ends in an app-scoped rerun. That
+    section sits *below* this one, which is what keeps its warning from pushing
+    the grid down when it appears.
     """
 
     parked_summary = st.session_state.pop(METADATA_EDIT_SUMMARY_KEY, None)
@@ -239,13 +239,14 @@ def render_metadata_grid(dataset: ExperimentalDataset, experiment_column: str) -
         apply_metadata_edits(dataset, changed_cells, experiment_column)
         st.session_state[METADATA_EDIT_SUMMARY_KEY] = describe_saved_edits(changed_cells)
 
-        # Section 3's warning and its "only experiments needing reprocessing"
+        # Section 4's warning and its "only experiments needing reprocessing"
         # checkbox are drawn by the page body, so a fragment-scoped rerun
         # cannot refresh them — they would stay stale until the next page
         # interaction. An app-scoped rerun refreshes them without moving the
         # page: measured at 686 -> 686 px with the button in view, because
         # what moved the page was the widget key changing and the status box
-        # changing height, not the scope of the rerun.
+        # changing height, not the scope of the rerun. The section is below
+        # this one, so its warning appearing costs the grid no movement.
         st.rerun(scope="app")
 
     render_editor_status(dataset, experiment_column, submitted, parked_summary)
@@ -326,7 +327,7 @@ def render_editor_status(dataset: ExperimentalDataset,
     Always exactly two captions, whatever the state. An `st.success` box that
     comes and goes changes the height of the fragment and shifts everything
     below it on the page, which reads as the page moving under the reader —
-    the complaint this section is meant to have stopped. Section 3 carries the
+    the complaint this section is meant to have stopped. Section 4 carries the
     same reprocessing list as a proper warning, where it has room to be loud.
     """
 
@@ -338,7 +339,7 @@ def render_editor_status(dataset: ExperimentalDataset,
         st.caption(
             f"⚠️ {len(stale_experiments)} experiment(s) need reprocessing before their "
             "results can be used: " + ", ".join(stale_experiments)
-            + " — use section 3 above."
+            + " — use section 4 below."
         )
         return
 

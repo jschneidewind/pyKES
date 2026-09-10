@@ -9,8 +9,8 @@ submit button, which is what a form does: nothing reaches Python until it is
 pressed, so a drag-fill or a pasted block is left undisturbed while it is
 being made.
 
-Applying ends in an app-scoped rerun, so section 3 — drawn by the page body,
-above the editor — shows the reprocessing warning and enables its shortcut on
+Applying ends in an app-scoped rerun, so section 4 — drawn by the page body,
+below the editor — shows the reprocessing warning and enables its shortcut on
 the same press. `test_the_reprocessing_shortcut_offers_exactly_the_flagged_experiments`
 is what pins that: it asserts on the press itself, with no extra run.
 
@@ -166,10 +166,23 @@ def test_the_editor_is_offered_as_its_own_section():
     subheaders = [element.value for element in app.subheader]
 
     assert any("Edit Metadata" in subheader for subheader in subheaders)
-    # Renumbered around the new section, and still behind the active-job guard
     assert any("5. 📦 Merge HDF5 Files" == subheader for subheader in subheaders)
     assert any("6. 💾 Download Dataset" == subheader for subheader in subheaders)
     assert METADATA_EDITOR_REVISION_KEY in app.session_state
+
+
+def test_the_editor_comes_before_the_reprocessing_section():
+    # Load-bearing, not cosmetic: applying an edit makes the reprocessing
+    # warning appear, and anything appearing above the grid pushes the grid
+    # down by its own height.
+    subheaders = [element.value for element in run_page().subheader]
+
+    editor = next(index for index, text in enumerate(subheaders) if "Edit Metadata" in text)
+    reprocessing = next(index for index, text in enumerate(subheaders) if "Reprocess" in text)
+
+    assert editor < reprocessing
+    assert subheaders[editor].startswith("3.")
+    assert subheaders[reprocessing].startswith("4.")
 
 
 def test_a_dataset_without_declarations_gets_an_explanation_instead():
@@ -198,9 +211,10 @@ def test_editing_a_processing_column_flags_the_experiment():
     assert any("Saved 1 change(s)" in caption for caption in captions)
     assert any("need reprocessing" in caption for caption in captions)
 
-    # Section 3 is drawn by the page body, above the editor, so applying ends
-    # in an app-scoped rerun to bring it up to date on the same press rather
-    # than leaving it stale until the next page interaction.
+    # Section 4 is drawn by the page body, so applying ends in an app-scoped
+    # rerun to bring it up to date on the same press rather than leaving it
+    # stale until the next page interaction. It sits below the editor, so its
+    # warning appearing does not push the grid down.
     assert sum("Exp_001" in element.value for element in app.warning) == 1
 
     # The widget key is untouched: changing it would reset the grid's scroll
@@ -221,7 +235,7 @@ def test_editing_a_free_column_leaves_the_flag_alone():
 def test_the_reprocessing_shortcut_offers_exactly_the_flagged_experiments():
     app = edit_cell(run_page(), 0, "Irradiance [mW/cm2]", 55.0)
 
-    # Selectable on the same press: the app-scoped rerun redraws section 3.
+    # Selectable on the same press: the app-scoped rerun redraws section 4.
     shortcut = next(checkbox for checkbox in app.checkbox
                     if "Only experiments needing reprocessing" in checkbox.label)
 
@@ -314,3 +328,19 @@ def test_pressing_the_button_with_nothing_changed_says_so():
 
     assert [element.value for element in app.exception] == []
     assert any("nothing was stored" in caption.value for caption in app.caption)
+
+
+def test_editing_pauses_while_a_processing_run_is_stepping_through():
+    app = upload_workbook(run_page())
+
+    next(button for button in app.button if "Reprocess" in button.label).click()
+    app.run(timeout=60)
+
+    assert [element.value for element in app.exception] == []
+
+    # The editor sits before the active-job guard now, so unlike the sections
+    # after it the grid would otherwise render while the run writes to the same
+    # overview table.
+    assert any("pauses while experiments are being processed" in element.value
+               for element in app.info)
+    assert not [button for button in app.button if "Apply metadata" in button.label]

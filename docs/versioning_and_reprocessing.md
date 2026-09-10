@@ -191,7 +191,7 @@ once before the loop with `(0, total, None)` and again after each experiment.
 
 ### From the Streamlit app
 
-Section **3. ♻️ Reprocess Existing Experiments** of the Data Upload page
+Section **4. ♻️ Reprocess Existing Experiments** of the Data Upload page
 exposes the same run:
 
 * **Processing pipeline** — which `FileUploadHandler`'s `processing_function`
