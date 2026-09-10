@@ -14,6 +14,8 @@ The fixtures in `data/max_rate_real/` are plain two-column CSVs (`time_s`,
 - two short hand-logged runs (~70 points at 3.3 s)
 - two wells of a pyKES well plate (1 031 points at 3.4 s), taken from the
   ``processed_data`` group of ``260901_AE_851_to_AE-855.h5``
+- three *blank* wells of a second plate, whose maximum rate has to come out at
+  the noise floor rather than looking like a reaction
 
 The logger and hand-logged traces measure a concentration and the well-plate
 traces an amount. `extract_max_rate` requires the dimension substance either
@@ -21,9 +23,11 @@ way, so everything is wrapped as ``umol`` and a concentration result is read
 per litre — which is what the upstream analysis script does too, and what makes
 the reference rates below directly comparable to it.
 
-Together the eleven fixtures exercise all three branches of the noise
+Together the eleven reaction fixtures exercise all three branches of the noise
 characterization on real data: a correlated component resolved above the floor,
-one clamped to it, and one folded into the white noise.
+one clamped to it, and one folded into the white noise. The three blanks cover
+the other half of the question the module has to answer -- whether there is a
+reaction at all -- on measured data rather than on a synthetic control.
 """
 
 from dataclasses import dataclass
@@ -64,7 +68,11 @@ REAL_TRACES = [
     RealTrace('2026-08-07_153007_MZ-443-Ch2-2', 'txt', 0.0207478),
     RealTrace('2026-08-19_112822_VSA-122-Ch2-2', 'txt', 0.0569028),
     RealTrace('2026-08-19_144524_VSA-124-Ch2-2', 'txt', 0.0489906),
-    RealTrace('EA-696-Logger-4', 'xlsx', 4.66284e-05),
+    # Moved -5.5 % when the kinetic parsimony margin was introduced; see the
+    # [Unreleased] CHANGELOG entry. The wigglier fit gains only 0.0037 nats per
+    # point here, against a margin of 0.01, so the smooth fit is taken -- the
+    # one reference value the margin was close enough to shift.
+    RealTrace('EA-696-Logger-4', 'xlsx', 4.404686e-05),
     RealTrace('EA-698-Logger-2', 'xlsx', 0.00573741),
     RealTrace('MRG-059-V-4-1', 'csv', 0.274135),
     RealTrace('MRG-059-Z-1-3', 'csv', 1.05046),
@@ -73,6 +81,55 @@ REAL_TRACES = [
 ]
 
 TRACES_BY_NAME = {trace.name: trace for trace in REAL_TRACES}
+
+# Blank wells are kept out of REAL_TRACES on purpose: two of the three
+# parametrized tests above are the wrong question for a trace with no reaction
+# in it. `AE-854_B2` legitimately masks 18 % of its samples, because its first
+# ~800 s really are spiky, which also puts its residual well above the fitted
+# white noise; and `estimator_disagreement` is trivially true once the maximum
+# is ~0, since the flag's relative test is `difference > 0.2 * |max_rate|`.
+# What a blank has to satisfy is a different list, below.
+
+# The smallest maximum rate any of the 160 reaction wells on the source plate
+# produces is 2.58e-6 umol/s. A blank that stays under this ceiling cannot be
+# read as the weakest catalyst on its own plate; the three below measure
+# 9.4e-7, -3.9e-8 and 3.4e-7.
+BLANK_RATE_CEILING = 1.5e-6
+
+# The pins are near zero, so a purely relative tolerance is meaningless on them.
+# This absolute band is still three times narrower than the smallest correction
+# the fix makes (3.1e-7, on AE-868_C2), so a silent return to the old behaviour
+# cannot hide inside it.
+BLANK_RATE_TOLERANCE = 1e-7
+
+# Pre-fix these three sat at 1.7, 3.3 and 5.2 times their length-scale floor,
+# having collapsed onto the sensor oscillation; they now sit at 10.8, 25.9 and
+# 13.0. Anything above this cleanly separates the two regimes.
+BLANK_LENGTHSCALE_MARGIN = 8.0
+
+# Fraction of its collapsed rate a blank must now come in under. AE-854_B2
+# falls by 4.3x and AE-867_B2 crosses to slightly below zero; the binding case
+# is AE-868_C2 at 1.9x, whose collapsed value was the least alarming of the
+# three to begin with.
+BLANK_COLLAPSE_FRACTION = 0.7
+
+
+@dataclass(frozen=True)
+class BlankTrace:
+    """One committed blank well and the near-zero maximum rate the pipeline extracts."""
+
+    name: str
+    max_rate: float
+    collapsed_max_rate: float
+
+
+BLANK_TRACES = [
+    BlankTrace('AE-854_B2', 9.410077e-07, 3.999919e-06),
+    BlankTrace('AE-867_B2', -3.863319e-08, 1.182378e-06),
+    BlankTrace('AE-868_C2', 3.379876e-07, 6.455497e-07),
+]
+
+BLANKS_BY_NAME = {trace.name: trace for trace in BLANK_TRACES}
 
 # The two wells either side of the nuisance resolution floor. B2's correlated
 # noise decorrelates just below it and C2's just above, on the same plate and
@@ -245,3 +302,71 @@ def test_short_hand_logged_trace_folds_its_nuisance(name):
         float(np.median(np.diff(time.unit['s']))))
     assert result.hyperparameters['nuisance_std'].unit[AMOUNT_UNIT] \
         < 0.01 * result.hyperparameters['noise_std'].unit[AMOUNT_UNIT]
+
+
+@pytest.mark.parametrize('name', sorted(BLANKS_BY_NAME), ids=str)
+def test_blank_well_reports_no_reaction(name):
+    """A blank well must not report a rate that reads as gas evolution.
+
+    These three are the only wells of a 176-well calibration plate whose kinetic
+    length scale collapsed onto the sensor oscillation they all carry (a
+    270-320 s quasi-periodic wander). The rate curve then oscillated about zero
+    and the reported maximum came off a crest of it, which put `AE-854_B2` at
+    4.0e-6 umol/s -- inside the range of the 160 real experiments beside it,
+    and above the weakest of them.
+
+    The other 13 blanks on the same plate never did this, so the number that
+    matters here is not "small" in the abstract: it is small compared with what
+    a reaction on this instrument produces.
+    """
+    time, values = load_real_trace(name)
+    result = analyse_real_trace(name)
+    blank = BLANKS_BY_NAME[name]
+
+    max_rate = result.max_rate.unit[RATE_UNIT]
+    assert max_rate < BLANK_RATE_CEILING
+    assert max_rate == pytest.approx(blank.max_rate, rel=REFERENCE_TOLERANCE,
+                                     abs=BLANK_RATE_TOLERANCE)
+
+    # The pipeline already reached the right verdict on these wells before the
+    # rate itself was fixed; it must keep reaching it.
+    assert 'max_rate_not_significant' in result.flags
+
+    assert np.isfinite(max_rate)
+    assert len(result.smooth.unit[AMOUNT_UNIT]) == len(time.unit['s'])
+
+
+@pytest.mark.parametrize('name', sorted(BLANKS_BY_NAME), ids=str)
+def test_blank_well_kinetics_do_not_track_the_oscillation(name):
+    """The guard on the mechanism, not just on the number.
+
+    A blank can come out near zero for the wrong reason -- two crests cancelling
+    inside the averaging window -- so the maximum alone does not show that the
+    kinetic component has stopped following the noise. Its length scale does:
+    while it was collapsed it sat at a small multiple of its own floor, which is
+    the same signature `test_well_below_the_nuisance_floor_keeps_its_correlated
+    _noise` checks on `AE-855_B2`.
+    """
+    result = analyse_real_trace(name)
+
+    assert result.hyperparameters['lengthscale'].unit['s'] \
+        > BLANK_LENGTHSCALE_MARGIN * result.diagnostics['lengthscale_lower_bound'].unit['s']
+
+    # The collapsed fits reported 25-35 turning points over ~1000 points.
+    rate = result.rate.unit[RATE_UNIT]
+    assert int((np.diff(np.sign(np.diff(rate))) != 0).sum()) < 25
+
+
+@pytest.mark.parametrize('name', sorted(BLANKS_BY_NAME), ids=str)
+def test_blank_well_is_far_below_its_collapsed_rate(name):
+    """The fix has to have moved these wells, not merely left them acceptable.
+
+    Pinning only the new value would still pass if a later change quietly
+    restored the old behaviour and the ceiling above happened to be loose enough.
+    This asserts the distance travelled instead.
+    """
+    result = analyse_real_trace(name)
+    blank = BLANKS_BY_NAME[name]
+
+    assert result.max_rate.unit[RATE_UNIT] \
+        < BLANK_COLLAPSE_FRACTION * blank.collapsed_max_rate
