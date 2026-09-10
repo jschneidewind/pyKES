@@ -121,7 +121,7 @@ def test_editing_is_unavailable_when_only_one_list_is_declared(dataset):
 
 def test_columns_are_classified_by_the_declarations(dataset):
     # The experiment name is the view's index, so it is not a locked column
-    assert locked_metadata_columns(dataset, EXPERIMENT_COLUMN) == [LOCKED_COLUMN, 'Processed']
+    assert locked_metadata_columns(dataset, EXPERIMENT_COLUMN) == [LOCKED_COLUMN]
     assert processing_relevant_metadata_columns(dataset) == [PROCESSING_COLUMN, 'Offset']
     assert missing_declared_columns(dataset) == [UNDECLARED_COLUMN]
 
@@ -134,7 +134,9 @@ def test_columns_are_classified_by_the_declarations(dataset):
 def test_the_view_leads_with_the_declared_columns(dataset):
     view = metadata_editor_view(dataset, EXPERIMENT_COLUMN)
 
-    assert list(view.columns)[:4] == [LOCKED_COLUMN, 'Processed', PROCESSING_COLUMN, 'Offset']
+    # The derived processed flag is not a column of the editor at all
+    assert 'Processed' not in view.columns
+    assert list(view.columns)[:3] == [LOCKED_COLUMN, PROCESSING_COLUMN, 'Offset']
     assert list(view.index) == ['Exp_001', 'Exp_002', NOT_INGESTED]
     assert EXPERIMENT_COLUMN not in view.columns
 

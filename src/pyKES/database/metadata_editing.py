@@ -38,7 +38,8 @@ from typing import List, Optional
 import pandas as pd
 
 from pyKES.database.data_processing import mark_experiments_unprocessed
-from pyKES.database.database_experiments import ExperimentalDataset, PROCESSED_FLAG_COLUMN
+from pyKES.database.database_experiments import (ExperimentalDataset,
+                                                 NON_METADATA_OVERVIEW_COLUMNS)
 
 
 # Keys of the two declaration lists inside ``dataset.processing_parameters``.
@@ -108,14 +109,13 @@ def locked_metadata_columns(dataset: ExperimentalDataset,
     Returns
     -------
     list of str
-        Declared raw-data-loading columns present in ``overview_df``, plus the
-        processed flag — a derived value the pipeline owns, not a metadatum.
+        Declared raw-data-loading columns present in ``overview_df``.
     """
 
-    candidates = declared_columns(dataset, METADATA_LOADING_KEY) + [PROCESSED_FLAG_COLUMN]
+    candidates = declared_columns(dataset, METADATA_LOADING_KEY)
 
     return [column for column in dict.fromkeys(candidates)
-            if column in dataset.overview_df.columns and column != experiment_column]
+            if column in editor_columns(dataset, experiment_column)]
 
 
 def processing_relevant_metadata_columns(dataset: ExperimentalDataset) -> List[str]:
@@ -134,7 +134,8 @@ def processing_relevant_metadata_columns(dataset: ExperimentalDataset) -> List[s
     """
 
     return [column for column in declared_columns(dataset, METADATA_PROCESSING_KEY)
-            if column in dataset.overview_df.columns]
+            if column in dataset.overview_df.columns
+            and column not in NON_METADATA_OVERVIEW_COLUMNS]
 
 
 def columns_invalidating_processing(dataset: ExperimentalDataset) -> Optional[List[str]]:
@@ -214,8 +215,37 @@ def editable_metadata_columns(dataset: ExperimentalDataset,
 
     locked = set(locked_metadata_columns(dataset, experiment_column))
 
+    return [column for column in editor_columns(dataset, experiment_column)
+            if column not in locked]
+
+
+def editor_columns(dataset: ExperimentalDataset, experiment_column: str) -> List[str]:
+    """
+    List the overview columns the editor deals with at all.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset holding the overview sheet.
+    experiment_column : str
+        Column naming the experiments, which becomes the editor's index.
+
+    Returns
+    -------
+    list of str
+        Every overview column but the experiment name and the derived ones.
+
+    Notes
+    -----
+    The processed flag is left out rather than shown read-only. It is owned by
+    the processing pipeline, and an edit changes it *after* the grid for this
+    run has already been drawn — so showing it put a stale ``True`` on screen
+    directly above the warning saying the experiment needs reprocessing. The
+    Dataset Overview table further down the page shows the flag.
+    """
+
     return [column for column in dataset.overview_df.columns
-            if column != experiment_column and column not in locked]
+            if column != experiment_column and column not in NON_METADATA_OVERVIEW_COLUMNS]
 
 
 def metadata_editor_view(dataset: ExperimentalDataset,
@@ -240,12 +270,11 @@ def metadata_editor_view(dataset: ExperimentalDataset,
 
     ordered_columns = (locked_metadata_columns(dataset, experiment_column)
                        + processing_relevant_metadata_columns(dataset)
-                       + list(dataset.overview_df.columns))
+                       + editor_columns(dataset, experiment_column))
 
     # dict.fromkeys keeps the first occurrence of each name, so the two
     # declared groups lead and the remaining columns follow in sheet order.
-    unique_columns = [column for column in dict.fromkeys(ordered_columns)
-                      if column != experiment_column]
+    unique_columns = list(dict.fromkeys(ordered_columns))
 
     view = dataset.overview_df.set_index(experiment_column)[unique_columns]
 
