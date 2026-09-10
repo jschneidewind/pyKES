@@ -178,7 +178,7 @@ the light stays visible next to one carrying a third.
 | | |
 |---|---|
 | **HDF5 datasets** | `ExperimentalDataset` keeps raw data, metadata and results in one file, with provenance stamps and parallel ingestion. Because the raw data stays in the file, an improved algorithm can be applied to a finished dataset years later — without the original instrument files. |
-| **Streamlit pages** | Five reusable pages an external repository *configures rather than forks*: dataset loading, upload and processing, analysis results, time series and a results table. Deployable to a server or, via stlite, straight into the browser as a static site. |
+| **Streamlit pages** | Five reusable pages an external repository *configures rather than forks*: dataset loading, upload and processing (with a spreadsheet-style metadata editor that tracks what each edit invalidates), analysis results, time series and a results table. Deployable to a server or, via stlite, straight into the browser as a static site. |
 | **Units** | A lightweight `Quantity` type so a rate in `mol/h` can be read as `umol/s` without a hand-written conversion factor — and so reading an O₂ rate as if it were H₂ raises instead of silently succeeding. |
 | **Efficiencies** | Apparent quantum yield and light-to-hydrogen efficiency, computed in explicit units from measured rates. |
 
@@ -200,6 +200,7 @@ Full documentation lives at **[pykes.readthedocs.io](https://pykes.readthedocs.i
 | [Maximum rates](https://pykes.readthedocs.io/en/latest/max_rate.html) | The algorithm stage by stage, with parameter guidance |
 | [Datasets](https://pykes.readthedocs.io/en/latest/guide/dataset.html) | Ingestion, storage, reprocessing, provenance |
 | [Streamlit app](https://pykes.readthedocs.io/en/latest/guide/streamlit_app.html) | Embedding and configuring the pages |
+| [Metadata editing](https://pykes.readthedocs.io/en/latest/metadata_editing.html) | Correcting metadata in the app, and what it invalidates |
 | [API reference](https://pykes.readthedocs.io/en/latest/api/index.html) | Generated from the docstrings |
 
 ---

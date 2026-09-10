@@ -18,3 +18,6 @@ Colour helpers
 
 .. automodule:: pyKES.plotting.lighten_colors
    :members:
+
+.. automodule:: pyKES.plotting.plot_colors
+   :members:

@@ -42,7 +42,9 @@ import traceback
 from typing import Callable, Optional
 from pathlib import Path
 
-from pyKES.database.database_experiments import ExperimentalDataset, Experiment, SCHEMA_VERSION
+from pyKES.database.database_experiments import (ExperimentalDataset, Experiment,
+                                                 PROCESSED_FALSE, PROCESSED_FLAG_COLUMN,
+                                                 PROCESSED_TRUE, SCHEMA_VERSION)
 from pyKES.utilities.version_information import stamp_version_information
 
 
@@ -239,8 +241,68 @@ def ensure_processed_column(database: ExperimentalDataset) -> None:
     # comes back as the strings this module compares against. Seeding it with a
     # bool gives the column bool dtype, which pandas then refuses to write
     # 'True' into once the first experiment succeeds.
-    if "Processed" not in database.overview_df.columns:
-        database.overview_df["Processed"] = "False"
+    if PROCESSED_FLAG_COLUMN not in database.overview_df.columns:
+        database.overview_df[PROCESSED_FLAG_COLUMN] = PROCESSED_FALSE
+
+
+def mark_experiment_processed(database: ExperimentalDataset,
+                              experiment_name: str,
+                              overview_df_experiment_column: Optional[str] = 'Experiment') -> None:
+    """
+    Flag one experiment's overview row as holding up-to-date processed data.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset whose ``overview_df`` is flagged in place.
+    experiment_name : str
+        Experiment to flag, as named in ``overview_df``.
+    overview_df_experiment_column : str, optional
+        Column of ``overview_df`` holding the experiment names.
+
+    Returns
+    -------
+    None : None
+    """
+
+    ensure_processed_column(database)
+
+    database.overview_df.loc[
+        database.overview_df[overview_df_experiment_column].eq(experiment_name),
+        PROCESSED_FLAG_COLUMN,
+    ] = PROCESSED_TRUE
+
+
+def mark_experiments_unprocessed(database: ExperimentalDataset,
+                                 experiment_names: list,
+                                 overview_df_experiment_column: Optional[str] = 'Experiment') -> None:
+    """
+    Flag experiments as needing (re)processing before their results can be used.
+
+    Called whenever something the processing function reads has changed — an
+    edited metadata cell, a re-uploaded sheet — so the stored
+    ``processed_data`` no longer follows from the metadata beside it.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset whose ``overview_df`` is flagged in place.
+    experiment_names : list of str
+        Experiments to flag, as named in ``overview_df``.
+    overview_df_experiment_column : str, optional
+        Column of ``overview_df`` holding the experiment names.
+
+    Returns
+    -------
+    None : None
+    """
+
+    ensure_processed_column(database)
+
+    database.overview_df.loc[
+        database.overview_df[overview_df_experiment_column].isin(experiment_names),
+        PROCESSED_FLAG_COLUMN,
+    ] = PROCESSED_FALSE
 
 
 def select_unprocessed_experiments(database: ExperimentalDataset,
@@ -266,7 +328,7 @@ def select_unprocessed_experiments(database: ExperimentalDataset,
     ensure_processed_column(database)
 
     unprocessed = (
-        database.overview_df["Processed"].ne('True')
+        database.overview_df[PROCESSED_FLAG_COLUMN].ne(PROCESSED_TRUE)
         | ~database.overview_df[overview_df_experiment_column].isin(database.experiments))
 
     return database.overview_df.loc[unprocessed,
@@ -334,10 +396,9 @@ def ingest_experiment(experiment_name: str,
 
     database.add_experiment(result['data'])
 
-    database.overview_df.loc[
-        database.overview_df[overview_df_experiment_column].eq(result['data'].experiment_name),
-            "Processed",
-        ] = 'True'
+    mark_experiment_processed(database,
+                              result['data'].experiment_name,
+                              overview_df_experiment_column)
 
     return result
 
@@ -606,7 +667,8 @@ def reprocess_experiment_by_name(experiment_name: str,
                                  database: ExperimentalDataset,
                                  processing_function: callable,
                                  metadata_retrival_function: Optional[callable] = None,
-                                 external_version: Optional[dict] = None) -> dict:
+                                 external_version: Optional[dict] = None,
+                                 overview_df_experiment_column: Optional[str] = 'Experiment') -> dict:
     """
     Reprocess one experiment of a dataset, addressed by name.
 
@@ -627,6 +689,9 @@ def reprocess_experiment_by_name(experiment_name: str,
         When given, metadata is refreshed from ``database.overview_df``.
     external_version : dict, optional
         Provenance of the external app, already resolved.
+    overview_df_experiment_column : str, optional
+        Column of ``overview_df`` holding the experiment names, used to flag
+        the row as processed again.
 
     Returns
     -------
@@ -634,13 +699,21 @@ def reprocess_experiment_by_name(experiment_name: str,
         Result of `reprocess_single_experiment`.
     """
 
-    return reprocess_single_experiment(
+    result = reprocess_single_experiment(
         experiment = database.experiments[experiment_name],
         processing_function = processing_function,
         metadata_retrival_function = metadata_retrival_function,
         overview_df = database.overview_df,
         external_version = external_version
     )
+
+    # Reprocessing is what clears the flag the metadata editor sets, so the
+    # name-addressed entry point is where the dataset learns the processed
+    # data follows from the current metadata again.
+    if result['success']:
+        mark_experiment_processed(database, experiment_name, overview_df_experiment_column)
+
+    return result
 
 
 def select_experiments_to_reprocess(database: ExperimentalDataset,
@@ -676,12 +749,44 @@ def select_experiments_to_reprocess(database: ExperimentalDataset,
     return list(experiment_names)
 
 
+def select_experiments_needing_reprocessing(database: ExperimentalDataset,
+                                            overview_df_experiment_column: Optional[str] = 'Experiment') -> list:
+    """
+    List the experiments whose stored results no longer match their metadata.
+
+    Parameters
+    ----------
+    database : ExperimentalDataset
+        Dataset holding the experiments. A missing ``Processed`` column is
+        added to ``overview_df`` in place.
+    overview_df_experiment_column : str, optional
+        Column of ``overview_df`` holding the experiment names.
+
+    Returns
+    -------
+    list of str
+        Experiments held by the dataset whose overview row is not flagged as
+        processed. Being held by the dataset is what separates these from the
+        experiments `select_unprocessed_experiments` returns: they already
+        carry raw data, so they can be reprocessed without the raw-data files.
+    """
+
+    ensure_processed_column(database)
+
+    stale = (database.overview_df[PROCESSED_FLAG_COLUMN].ne(PROCESSED_TRUE)
+             & database.overview_df[overview_df_experiment_column].isin(database.experiments))
+
+    return database.overview_df.loc[stale,
+                    overview_df_experiment_column].astype(str).tolist()
+
+
 def reprocess_experiments(database: ExperimentalDataset,
                           processing_function: callable,
                           metadata_retrival_function: Optional[callable] = None,
                           experiment_names: Optional[list] = None,
                           external_version: Optional[dict] = None,
-                          progress_callback: Optional[Callable[[int, int, Optional[str]], None]] = None):
+                          progress_callback: Optional[Callable[[int, int, Optional[str]], None]] = None,
+                          overview_df_experiment_column: Optional[str] = 'Experiment'):
     """
     Rerun the processing step for experiments already held by a dataset.
 
@@ -708,6 +813,9 @@ def reprocess_experiments(database: ExperimentalDataset,
         Called as ``(completed, total, experiment_name)``, once before the loop
         with ``(0, total, None)`` and again after each experiment — the same
         convention as `read_in_experiments_single_threaded`.
+    overview_df_experiment_column : str, optional
+        Column of ``overview_df`` holding the experiment names, used to flag
+        the reprocessed rows.
 
     Returns
     -------
@@ -732,7 +840,8 @@ def reprocess_experiments(database: ExperimentalDataset,
             database = database,
             processing_function = processing_function,
             metadata_retrival_function = metadata_retrival_function,
-            external_version = external_version
+            external_version = external_version,
+            overview_df_experiment_column = overview_df_experiment_column
         ))
 
         if progress_callback is not None:

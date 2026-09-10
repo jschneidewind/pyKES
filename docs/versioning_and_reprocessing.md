@@ -156,7 +156,9 @@ dataset.save_to_hdf5('experiments.h5')
 
 Uploading a corrected overview sheet on the Data Upload page merges it into
 `overview_df`; a reprocessing run with metadata refresh then propagates it into
-the experiments.
+the experiments. Single cells can also be corrected in the app itself — see
+[metadata_editing.md](metadata_editing.md), which is the other thing that marks
+experiments as needing a reprocessing run.
 
 ### Selecting experiments and handling failures
 
@@ -185,8 +187,13 @@ exposes the same run:
 * **Processing pipeline** — which `FileUploadHandler`'s `processing_function`
   to use (handlers without one are not offered).
 * **Experiments to reprocess** — empty means all of them.
+* **Only experiments needing reprocessing (n)** — overrides that selection with
+  exactly the experiments whose metadata changed since they were last
+  processed. Disabled when there are none. A standing warning above the section
+  names them.
 * **Refresh metadata from the overview table** — toggles the metadata
-  retrieval described above.
+  retrieval described above. Leave it checked after a metadata edit: unchecked,
+  the metadata stored in the file is reused and the edit is ignored.
 
 A progress bar names the experiment being processed; failures are reported
 individually with their traceback. The result lives in the session dataset, so
@@ -197,6 +204,14 @@ experiments one Streamlit rerun at a time, via
 `pyKES.streamlit_app.chunked_processing`, which is what keeps the progress bar
 visible in the browser deployment. See
 [browser_deployment.md](browser_deployment.md).
+
+### The processed flag
+
+A successful reprocessing run also sets the experiment's `Processed` flag back
+to `'True'`, which is what clears it from the "needs reprocessing" list. A
+failing one leaves the flag alone, along with the previous `processed_data`.
+The full table of flag transitions is in
+[metadata_editing.md](metadata_editing.md).
 
 ### What reprocessing writes
 

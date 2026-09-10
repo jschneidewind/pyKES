@@ -59,6 +59,13 @@ COMPRESSION_MINIMUM_ELEMENTS = 128
 # experiment and saves a third of the bytes.
 DEFAULT_COMPRESSION_LEVEL = 4
 
+# The processed flag lives in overview_df as text, not as a bool: it round-trips
+# through Excel and HDF5 and comes back as these strings (see
+# `pyKES.database.data_processing.ensure_processed_column`).
+PROCESSED_FLAG_COLUMN = 'Processed'
+PROCESSED_TRUE = 'True'
+PROCESSED_FALSE = 'False'
+
 
 def import_overview_excel(file_name, 
                           sheet_name,
@@ -408,6 +415,80 @@ def read_df_from_hdf(h5_file: h5py.File, key: str = 'overview_df') -> pd.DataFra
 
     return pd.read_json(StringIO(payload), orient='split')
 
+
+def processing_relevant_change(existing_row: pd.Series,
+                               incoming_row: pd.Series,
+                               processing_relevant_columns: List[str]) -> bool:
+    """
+    Report whether two overview rows disagree on any processing-relevant column.
+
+    Parameters
+    ----------
+    existing_row, incoming_row : pandas.Series
+        Rows of the stored and the incoming overview sheet, indexed by column.
+    processing_relevant_columns : list of str
+        Columns whose value the processing function depends on.
+
+    Returns
+    -------
+    bool
+        True when at least one declared column differs. A column the incoming
+        sheet adds counts as a change, since the processing function would
+        read a value where it previously read nothing; a column neither row
+        carries is ignored.
+    """
+
+    declared_columns = [column for column in processing_relevant_columns
+                        if column in existing_row.index or column in incoming_row.index]
+
+    return not existing_row.reindex(declared_columns).equals(
+        incoming_row.reindex(declared_columns))
+
+
+def merge_overview_row(existing_row: pd.Series,
+                       incoming_row: pd.Series,
+                       processing_relevant_columns: Optional[List[str]] = None) -> pd.Series:
+    """
+    Merge one overview row that both the stored and the incoming sheet hold.
+
+    Parameters
+    ----------
+    existing_row, incoming_row : pandas.Series
+        The two versions of the row, indexed by column.
+    processing_relevant_columns : list of str, optional
+        Columns whose change clears the processed flag; see
+        `ExperimentalDataset.update_overview_df`.
+
+    Returns
+    -------
+    merged_row : pandas.Series
+        The stored row extended by the sheet's new columns when the two agree,
+        otherwise the incoming row carrying an explicit processed flag.
+    """
+
+    shared_columns = existing_row.index.intersection(incoming_row.index)
+    shared_columns = shared_columns.drop(PROCESSED_FLAG_COLUMN, errors="ignore")
+
+    if existing_row[shared_columns].equals(incoming_row[shared_columns]):
+        return existing_row.combine_first(incoming_row)
+
+    # The incoming sheet is authoritative for the values but carries no
+    # processing history, so the flag has to be decided here. Left to
+    # `combine_first` it would come back as NaN, which
+    # `select_unprocessed_experiments` reads as unprocessed only by accident.
+    merged_row = incoming_row.copy()
+
+    if (processing_relevant_columns is None
+            or processing_relevant_change(existing_row, incoming_row,
+                                          processing_relevant_columns)):
+        merged_row[PROCESSED_FLAG_COLUMN] = PROCESSED_FALSE
+    else:
+        merged_row[PROCESSED_FLAG_COLUMN] = existing_row.get(PROCESSED_FLAG_COLUMN,
+                                                             PROCESSED_FALSE)
+
+    return merged_row
+
+
 @dataclass
 class ExperimentalDataset:
     """
@@ -530,7 +611,8 @@ class ExperimentalDataset:
 
     def update_overview_df(self,
                         incoming_df: pd.DataFrame,
-                        key_column: str) -> None:
+                        key_column: str,
+                        processing_relevant_columns: Optional[List[str]] = None) -> None:
         """
         Merge an incoming overview DataFrame into the existing overview_df.
 
@@ -540,6 +622,12 @@ class ExperimentalDataset:
             New overview data to merge in.
         key_column : str
             Column used to match experiments between the two DataFrames.
+        processing_relevant_columns : list of str, optional
+            Columns whose change invalidates the processed data. When given,
+            a row that differs only in other columns keeps its processed
+            flag, so re-uploading a sheet with a corrected comment does not
+            invalidate a processing run. Defaults to treating every
+            difference as processing-relevant.
 
         Returns
         -------
@@ -547,7 +635,7 @@ class ExperimentalDataset:
         """
         if self.overview_df.empty:
             self.overview_df = incoming_df.copy()
-            self.overview_df["Processed"] = "False"
+            self.overview_df[PROCESSED_FLAG_COLUMN] = PROCESSED_FALSE
             return
 
         existing_df = self.overview_df.copy().set_index(key_column)
@@ -558,22 +646,11 @@ class ExperimentalDataset:
         existing_only = existing_df.drop(index=overlapping_keys)
         incoming_only = incoming_df.drop(index=overlapping_keys)
 
-        # Looping over overlapping keys to check for differences and merge accordingly
         merged_rows = []
         for key in overlapping_keys:
-            existing_row = existing_df.loc[key]
-            incoming_row = incoming_df.loc[key]
-
-            shared_cols = existing_row.index.intersection(incoming_row.index)
-            shared_cols = shared_cols.drop("Processed", errors="ignore")
-
-            # If shared columns are identical, merge by taking existing values and filling in any new columns from incoming
-            if existing_row[shared_cols].equals(incoming_row[shared_cols]):
-                merged_row = existing_row.combine_first(incoming_row)
-            # If there are differences, use incoming row 
-            else:
-                merged_row = incoming_row
-
+            merged_row = merge_overview_row(existing_df.loc[key],
+                                            incoming_df.loc[key],
+                                            processing_relevant_columns)
             merged_row.name = key
             merged_rows.append(merged_row)
 

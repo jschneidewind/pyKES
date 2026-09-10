@@ -37,11 +37,14 @@ from pyKES.database.database_experiments import ExperimentalDataset
 from pyKES.database.data_processing import (ingest_experiment,
                                             reprocess_experiment_by_name,
                                             resolve_external_version,
+                                            select_experiments_needing_reprocessing,
                                             select_experiments_to_reprocess,
                                             select_unprocessed_experiments)
+from pyKES.database.metadata_editing import columns_invalidating_processing
 from pyKES.streamlit_app.chunked_processing import (active_job, any_active_job,
                                                     collect_job_results, render_chunked_job,
                                                     start_chunked_job)
+from pyKES.streamlit_app.components.metadata_editor import render_metadata_editor
 from pyKES.streamlit_app.config_interface import DataUploadConfig, FileUploadHandler
 from pyKES.database.database_experiments import import_overview_excel
 from pyKES.utilities.version_information import describe_version_information
@@ -49,6 +52,10 @@ from pyKES.utilities.version_information import describe_version_information
 
 # Session-state key of the experiment multiselect on the reprocessing form
 REPROCESS_SELECTION_KEY = "reprocess_selected_experiments"
+
+# Session-state key of the checkbox restricting reprocessing to the
+# experiments whose metadata has changed since they were processed
+REPROCESS_STALE_ONLY_KEY = "reprocess_only_stale_experiments"
 
 # Session-state keys of the two chunked processing jobs. The ingestion key is
 # suffixed with the handler's storage key, since a page can carry several
@@ -127,11 +134,15 @@ def render_data_upload(config: DataUploadConfig) -> None:
     if any_active_job(_page_job_keys(config)):
         return
 
-    st.subheader("4. 📦 Merge HDF5 Files")
+    st.subheader("4. ✏️ Edit Metadata")
+    render_metadata_editor(config, dataset)
+    st.divider()
+
+    st.subheader("5. 📦 Merge HDF5 Files")
     _render_HDF5_merging(config, dataset)
     st.divider()
 
-    st.subheader("5. 💾 Download Dataset")
+    st.subheader("6. 💾 Download Dataset")
     _render_download_section(config, dataset)
     st.divider()
 
@@ -215,8 +226,11 @@ def _render_metadata_uploader(
     incoming_df = import_overview_excel(uploaded, 
                 config.metadata_excel_sheet_name)
     
-    dataset.update_overview_df(incoming_df, 
-                               config.metadata_excel_experiment_column) 
+    # Without the declared columns every difference would clear the processed
+    # flag, so a corrected comment would cost a reprocessing run.
+    dataset.update_overview_df(incoming_df,
+                               config.metadata_excel_experiment_column,
+                               columns_invalidating_processing(dataset))
 
     st.success(
         f"✅ Metadata merged successfully")
@@ -404,6 +418,55 @@ def _processing_enabled_handlers(config: DataUploadConfig) -> list:
             if handler.processing_function is not None]
 
 
+def _handler_experiment_column(handler: FileUploadHandler, config: DataUploadConfig) -> str:
+    """
+    Resolve which overview column names the experiments for a handler.
+
+    Parameters
+    ----------
+    handler : FileUploadHandler
+        Handler whose pipeline is about to run.
+    config : DataUploadConfig
+        Page configuration, supplying the fallback used when the handler
+        leaves the column unset.
+
+    Returns
+    -------
+    str
+        Column of ``overview_df`` holding the experiment names.
+    """
+
+    return handler.overview_df_experiment_column or config.metadata_excel_experiment_column
+
+
+def _render_stale_experiment_warning(stale_experiments: list) -> None:
+    """
+    Warn about experiments whose results no longer match their metadata.
+
+    Rendered above the reprocessing form — and above the active-job guard, so
+    it stays visible while a job runs — because this is the control that
+    clears it.
+
+    Parameters
+    ----------
+    stale_experiments : list of str
+        Experiments flagged as needing reprocessing.
+
+    Returns
+    -------
+    None : None
+        Widgets are written to the current Streamlit container.
+    """
+
+    if not stale_experiments:
+        return
+
+    st.warning(
+        f"⚠️ {len(stale_experiments)} experiment(s) need reprocessing after a "
+        "metadata change: " + ", ".join(stale_experiments)
+    )
+
+
 def _render_reprocessing_section(config: DataUploadConfig, dataset: ExperimentalDataset) -> None:
     """
     Render the reprocessing form and rerun the processing step on submit.
@@ -440,6 +503,11 @@ def _render_reprocessing_section(config: DataUploadConfig, dataset: Experimental
         "rebuilt, and the dataset version information is updated accordingly."
     )
 
+    stale_experiments = select_experiments_needing_reprocessing(
+        dataset, config.metadata_excel_experiment_column)
+
+    _render_stale_experiment_warning(stale_experiments)
+
     with st.form(key="reprocess_experiments_form", clear_on_submit=False):
         handler_label = st.selectbox(
             "Processing pipeline",
@@ -450,6 +518,14 @@ def _render_reprocessing_section(config: DataUploadConfig, dataset: Experimental
             "Experiments to reprocess (all experiments when left empty)",
             options=sorted(dataset.experiments.keys()),
             key=REPROCESS_SELECTION_KEY,
+        )
+        only_stale_experiments = st.checkbox(
+            f"Only experiments needing reprocessing ({len(stale_experiments)})",
+            value=False,
+            key=REPROCESS_STALE_ONLY_KEY,
+            disabled=not stale_experiments,
+            help="Reprocess exactly the experiments whose metadata changed since "
+                 "they were last processed, overriding the selection above.",
         )
         refresh_metadata = st.checkbox(
             "Refresh metadata from the overview table",
@@ -483,14 +559,22 @@ def _render_reprocessing_section(config: DataUploadConfig, dataset: Experimental
         )
         return
 
+    # The shortcut stays checked once its list empties, and the widget is only
+    # disabled, not reset — so an empty list has to fall back to the
+    # multiselect rather than through it to "all experiments".
+    requested_experiments = (stale_experiments
+                             if only_stale_experiments and stale_experiments
+                             else selected_experiments)
+
     start_chunked_job(
         job_key = REPROCESS_JOB_KEY,
-        experiment_names = select_experiments_to_reprocess(dataset, selected_experiments or None),
+        experiment_names = select_experiments_to_reprocess(dataset, requested_experiments or None),
         context = {
             'database': dataset,
             'processing_function': handler.processing_function,
             'metadata_retrival_function': handler.metadata_retrival_function if refresh_metadata else None,
             'external_version': resolve_external_version(dataset, config.external_version),
+            'overview_df_experiment_column': _handler_experiment_column(handler, config),
         },
     )
 

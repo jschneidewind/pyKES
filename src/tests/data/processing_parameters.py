@@ -1,4 +1,26 @@
 PROCESSING_PARAMETERS = {
+    # Which overview columns the Data Upload page lets a user edit, and what
+    # each edit costs. Columns the raw-data reader depends on are shown but
+    # locked — correcting one means uploading the sheet and the raw files
+    # again — while editing a processing column clears the experiment's
+    # 'Processed' flag and lists it for reprocessing. Declaring neither list
+    # (as every file written before this existed does) turns the editor off.
+    # See docs/metadata_editing.md.
+    'metadata_used_for_raw_data_loading': ['Experiment',
+                                           'group',
+                                           'File name H2',
+                                           'File name O2'],
+    'metadata_used_for_processing': ['Unisense Irradiation start [s]',
+                                     'Unisense Irradiation end [s]',
+                                     'Pyroscience Irradiation start [s]',
+                                     'Pyroscience Irradiation end [s]',
+                                     'Irradiance [mW/cm2]',
+                                     'Catalyst concentration (g/L)',
+                                     'Catalyst loading [wt% Rh/Cr]',
+                                     'Temperature [°C]',
+                                     'Gas phase volume [mL]',
+                                     'Liquid phase volume [mL]',
+                                     'D2O'],
     'H2_processing_parameters': {
                         'offset': 60,
                         'savgol_window': 30,
@@ -357,6 +379,15 @@ PLOTTING_INSTRUCTIONS = {
                         'Unit': 'Rate / umol L^-1 s^-1'},
         'O2 max rate (flexible)': {'Value': 'processed_data/O2_flexible_fit_max_rate',
                         'Unit': 'Rate / umol L^-1 s^-1'},
+    },
+    # Columns of the Analysis Results Table. Cells hold numbers, not text, so
+    # the header sort compares magnitudes; 'format' is applied at render time
+    # and 'error' becomes a column of its own.
+    'results_table_instructions': {
+        'H2 produced': {'result': 'processed_data/H2_produced',
+                        'error': 'processed_data/H2_baseline_noise',
+                        'format': '.2f'},
+        'O2 produced': {'result': 'processed_data/O2_produced'},
     },
 }
 

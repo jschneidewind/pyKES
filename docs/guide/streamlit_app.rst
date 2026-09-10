@@ -22,8 +22,9 @@ The five pages
        dataset's provenance.
    * - :func:`~pyKES.streamlit_app.components.render_data_upload`
      - Uploads the metadata sheet and the raw data files, runs the processing
-       pipeline, reprocesses existing experiments, merges datasets, and
-       downloads the result.
+       pipeline, edits the metadata in place (see :doc:`/metadata_editing`),
+       reprocesses existing experiments, merges datasets, and downloads the
+       result.
    * - :func:`~pyKES.streamlit_app.components.render_analysis_results`
      - Plots derived results against a chosen metadata axis, with grouping and
        subset selection.
@@ -32,7 +33,8 @@ The five pages
        different units. See :doc:`/plotting_instructions`.
    * - :func:`~pyKES.streamlit_app.components.render_results_table`
      - Tabulates numerical results across experiments, in configurable units
-       and formats.
+       and formats, alongside any overview-sheet columns the user picks. See
+       :doc:`/plotting_instructions`.
 
 
 Wiring up an application

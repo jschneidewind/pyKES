@@ -34,6 +34,7 @@ from pprint import pprint
 
 from pyKES.reaction_ODE import solve_ode_system, parse_reactions, calculate_excitations_per_second_competing
 from pyKES.database.database_experiments import ExperimentalDataset
+from pyKES.plotting.plot_colors import resolve_plot_color
 from pyKES.utilities.resolve_attributes import resolve_experiment_attributes
 from pyKES.utilities.make_json_serializable import make_json_serializable
 
@@ -397,13 +398,15 @@ class Fitting_Model:
                                     experiment,
                                     mode = 'semi-strict')
             
+            plot_color = resolve_plot_color(experiment.color)
+
             for species, data in experimental_data.items():
                 model_data = model_results[experiment.experiment_name][species]
                 
-                ax.scatter(data['x'], data['y'], color = experiment.color,
+                ax.scatter(data['x'], data['y'], color = plot_color,
                            s = 2)
-                ax.plot(data['x'], model_data, color = experiment.color)
-                ax.plot([], [], color = experiment.color, 
+                ax.plot(data['x'], model_data, color = plot_color)
+                ax.plot([], [], color = plot_color, 
                         marker='o', linestyle='-', 
                         label=f'{species} - {experiment.experiment_name}')
                 

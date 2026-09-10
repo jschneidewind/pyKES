@@ -15,3 +15,12 @@ Ingestion and reprocessing
 
 .. automodule:: pyKES.database.data_processing
    :members:
+
+Metadata editing
+----------------
+
+Editing a dataset's metadata in place, and deciding what each edit
+invalidates. See :doc:`/metadata_editing`.
+
+.. automodule:: pyKES.database.metadata_editing
+   :members:
