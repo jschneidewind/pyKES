@@ -41,7 +41,11 @@ Wiring up an application
 ------------------------
 
 A complete embedding repository is four files. The full version is in
-:source:`examples/external_repo <examples/external_repo>`.
+:source:`examples/external_repo <examples/external_repo>`, together with a
+real six-experiment dataset in
+:source:`examples/example_data <examples/example_data>` and a step-by-step
+walkthrough that exercises every page, the metadata editor, reprocessing and
+the HDF5 round trip in :source:`examples/README.md <examples/README.md>`.
 
 **config.py** — everything the application customizes:
 

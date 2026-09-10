@@ -37,7 +37,7 @@ current.
 ```python
 {
     'pykes_version':    '0.1.7',
-    'schema_version':   '1.1',
+    'schema_version':   '1.2',
     'created':          '2026-08-31T14:03:57+02:00',
     'last_modified':    '2026-09-02T09:21:04+02:00',
     'last_processed':   '2026-09-02T09:20:11+02:00',
@@ -119,8 +119,11 @@ bump the version when the processing behaviour changes.
 `SCHEMA_VERSION` in `pyKES.database.database_experiments` describes the *file
 layout*, not the code. It is bumped only when older readers cannot ignore a
 change — renamed or removed groups, changed required attributes. Version `1.1`
-added the two optional `version` attributes described above, which older
-readers ignore; `1.0` files load unchanged.
+added the two optional `version` attributes described above; `1.2` added the
+dataset-level `experiment_column` attribute and the guarantee that
+per-experiment metadata mirrors the overview row. Every one of those is
+additive: older readers ignore the attributes, and `1.0` and `1.1` files load
+unchanged.
 
 ---
 
@@ -153,6 +156,13 @@ dataset.save_to_hdf5('experiments.h5')
 * **With** it, the metadata is rebuilt from `dataset.overview_df` first, so
   edits to the overview sheet (a corrected catalyst loading, a new group) take
   effect. `color` and `group` follow the refreshed metadata.
+
+Either way the run ends with the overview sheet imposed on the experiment
+again, since the sheet owns those columns — see the metadata invariant in
+[the dataset guide](guide/dataset.rst). A retrieval function that transforms an
+overview column will find it put back; a key of its own that is not an overview
+column survives untouched. On success the experiment's `Processed` flag is
+raised, which is what clears a flag the metadata editor lowered.
 
 Uploading a corrected overview sheet on the Data Upload page merges it into
 `overview_df`; a reprocessing run with metadata refresh then propagates it into
