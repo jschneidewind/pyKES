@@ -97,32 +97,56 @@ sheet is worth seeing rather than guessing at.
 The grid is `st.data_editor`, so the spreadsheet gestures work: drag a
 selection, fill down from a cell's corner, and paste a block copied straight
 out of Excel. Correcting one column across forty experiments is a paste, not
-forty edits.
+forty edits. Measured on the real page: dragging one corrected value down three
+rows arrived as one four-cell delta, and all four experiments were stored and
+flagged together.
 
-**Edits save themselves.** There is no submit button: committing a cell writes
-it, and the editor reports what it saved and what that invalidated. Whole-number
-columns are widened rather than rounded, so an irradiation start corrected to
-`605.5` stays `605.5` — Streamlit's editor takes its field type from the column
-dtype, and an Excel column of whole numbers arrives as `int64`.
+Nothing is stored until **Apply metadata changes** is pressed, and *that is
+what makes the spreadsheet gestures work*. The grid sits in an `st.form`, and
+inside one a committed cell sends nothing and triggers no rerun — so a
+drag-fill or a pasted block is left alone until the button is pressed, and
+arrives as a single delta covering every cell it touched.
 
-The grid lives in an `st.fragment`, which is what makes autosaving affordable:
-a committed cell reruns the fragment alone, so saving costs neither a re-read of
-the uploaded workbook nor a rewrite of the whole HDF5 file for the download
-button, and nothing on the page moves. The cost is that the page body does not
-re-run either, so section 3's standing warning and its shortcut count catch up
-on the next page interaction — which is why the editor repeats that information
-inside its own fragment, where it is live.
+Saving each cell as it was committed instead, with no form, is what an earlier
+version did, and it was measurably worse: the grid was re-rendered in the
+middle of the gesture, so a drag dropped rows and single edits went missing.
+There is no way to have both — either the editor reports every cell as it
+happens, or it leaves the gesture undisturbed and reports on submit.
+
+Whole-number columns are widened rather than rounded, so an irradiation start
+corrected to `605.5` stays `605.5` — Streamlit's editor takes its field type
+from the column dtype, and an Excel column of whole numbers arrives as
+`int64`.
+
+### Why the page stays still
+
+The form sits inside an `st.fragment`, so pressing the button reruns the
+fragment and nothing else. The page body does not execute: the uploaded
+workbook is not re-read, the whole HDF5 file is not rewritten for the download
+button, and the scroll position does not move — measured in headless Chromium
+at 537 → 537 px with the button below the grid and 70 → 70 px above it, and
+1492 → 1492 px on the real page.
+
+Two further details keep it still:
+
+* **The grid's widget key does not change on submit.** Horizontal scroll
+  survives a rerun of either scope (1200 → 1200 px) and is lost only to a new
+  key (1200 → 0), which is why only an uploaded workbook bumps it.
+* **The status area is always the same two captions.** An `st.success` box that
+  comes and goes changes the height of the fragment and shifts everything below
+  it, which reads as the page moving under the reader. Section 3 carries the
+  same reprocessing list as a proper warning, where it has room to be loud.
+
+The one cost of the fragment is that the page body not re-running means section
+3's standing warning and its shortcut count catch up on the next page
+interaction — which is why the editor repeats that information in its own
+caption, where it is live.
 
 ```{note}
-An earlier version of this page had an **Apply metadata changes** button, and
-all three of its faults are worth not reintroducing. The submit button ended in
-an app-scoped `st.rerun`, which re-focuses the button it was clicked on and
-moved Streamlit's scroll container by ~300 px. The grid's widget key carried a
-revision counter that was bumped on every apply, and changing the key resets the
-grid's horizontal scroll to the first columns — scroll survives a fragment rerun
-and an app-scoped rerun alike, and is lost only to a new key. And the page
-re-merged the uploaded workbook on every rerun, so the rerun that followed an
-apply reverted the edit it had just made.
+An earlier version reran at app scope after the submit, which re-focuses the
+button that was clicked and moved the page, and bumped the widget key on every
+apply, which sent the grid back to its first columns. Both look like
+reasonable things to write.
 ```
 
 Rows cannot be added or deleted here. New experiments come from the metadata

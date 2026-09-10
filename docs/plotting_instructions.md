@@ -118,9 +118,9 @@ experiment is one **row**:
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `result` | yes | path to the value |
-| `unit` | no | target unit; `Quantity` values are converted into it and the unit is appended to the displayed cell |
+| `unit` | no | target unit; `Quantity` values are converted into it and it is named in the column header |
 | `format` | no | Python format spec, default `.4g` |
-| `error` | no | path to an uncertainty, which gets a column of its own, `label (±)` |
+| `error` | no | path to an uncertainty, which gets a column of its own, `label ±` |
 
 Every instruction key becomes a column whether or not the value exists, so the
 table keeps its shape across experiments; cells that cannot be resolved stay
@@ -129,12 +129,20 @@ arrays have no meaningful cell representation and are treated as missing.
 
 ### Cells hold numbers, not text
 
-The table's cells are the resolved **numbers**, and `format` and `unit` are
-applied on the display side of a `pandas.Styler`. This is what makes the header
-sort work: sorting a column of pre-formatted strings compares them
-lexicographically, so an apparent quantum yield of `9` sorted above one of `18`.
-Sorting the underlying numbers compares magnitudes, while the cells read exactly
-what `format(value, format_spec)` writes.
+The table's cells are the resolved **numbers**, and `format` is applied on the
+display side of a `pandas.Styler`. This is what makes the header sort work:
+sorting a column of pre-formatted strings compares them lexicographically, so
+an apparent quantum yield of `9` sorted above one of `18`. Sorting the
+underlying numbers compares magnitudes, while the cells read exactly what
+`format(value, format_spec)` writes.
+
+**A cell holds the number alone.** `unit` names the column instead —
+`'H2 max. rate'` with `'umol / h'` becomes the header
+`H2 max. rate (umol / h)`, and its uncertainty
+`H2 max. rate ± (umol / h)`. Repeating a unit in every row costs width, makes
+the numbers harder to compare down the column, and puts text in a cell whose
+value is a number. `unit` keeps its other, load-bearing job of deciding what a
+`Quantity` is converted into.
 
 `format` is therefore a **Python** format spec, honoured in full — `'.2f'`,
 `'.4g'`, `'.3e'`, `'.4G'`. The first attempt formatted through
@@ -160,7 +168,7 @@ leaves the cell empty.
 Two selectors sit above the table:
 
 * **Results to show** — which instructions become columns. All of them by
-  default; an instruction's `(±)` column follows its value column.
+  default; an instruction's `±` column follows its value column.
 * **Metadata to show** — columns of `overview_df`, joined to the left of the
   results. Empty by default, so the table looks as it always did. The columns
   are taken from the overview sheet unchanged, keeping their own dtypes, so they
