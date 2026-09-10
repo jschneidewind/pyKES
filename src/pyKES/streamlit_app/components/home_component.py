@@ -13,6 +13,7 @@ import streamlit as st
 from typing import Optional
 
 from pyKES.database.database_experiments import (ExperimentalDataset,
+                                                 describe_experiment_names,
                                                  describe_metadata_divergences)
 from pyKES.streamlit_app.config_interface import HomeConfig
 from pyKES.utilities.version_information import describe_version_information
@@ -122,9 +123,19 @@ def render_metadata_repair_report(dataset: ExperimentalDataset) -> None:
     st.warning(
         f"⚠️ {len(dataset.metadata_repair_report)} experiment(s) in this file held metadata "
         "that disagreed with the overview table. The overview values have been adopted, "
-        "and are what the analysis pages now use. Download the dataset again to store the "
-        "corrected file."
+        "and are what the analysis pages now use."
     )
+
+    reprocessing_needed = dataset.stale_processed_experiments()
+
+    if reprocessing_needed:
+        st.warning(
+            f"⚠️ The stored results of {len(reprocessing_needed)} of them were computed from "
+            "the values that were replaced, so they are flagged for reprocessing — "
+            f"{describe_experiment_names(reprocessing_needed)}. Reprocess them on the Data "
+            "Upload page; the dataset cannot be downloaded until then, because the file would "
+            "store results derived from values it does not contain."
+        )
 
     with st.expander("What was corrected"):
         st.code(describe_metadata_divergences(dataset.metadata_repair_report,

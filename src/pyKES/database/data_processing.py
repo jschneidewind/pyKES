@@ -44,7 +44,8 @@ from pathlib import Path
 
 from pyKES.database.database_experiments import (ExperimentalDataset, Experiment,
                                                  PROCESSED_FALSE, PROCESSED_FLAG_COLUMN,
-                                                 PROCESSED_TRUE, SCHEMA_VERSION)
+                                                 PROCESSED_TRUE, SCHEMA_VERSION,
+                                                 experiments_with_stale_results)
 from pyKES.utilities.version_information import stamp_version_information
 
 
@@ -777,11 +778,8 @@ def select_experiments_needing_reprocessing(database: ExperimentalDataset,
 
     ensure_processed_column(database)
 
-    stale = (database.overview_df[PROCESSED_FLAG_COLUMN].ne(PROCESSED_TRUE)
-             & database.overview_df[overview_df_experiment_column].isin(database.experiments))
-
-    return database.overview_df.loc[stale,
-                    overview_df_experiment_column].astype(str).tolist()
+    return experiments_with_stale_results(database.overview_df, overview_df_experiment_column,
+                                          database.experiments)
 
 
 def reprocess_experiments(database: ExperimentalDataset,

@@ -214,8 +214,13 @@ def test_editing_a_processing_column_flags_the_experiment():
     # Section 4 is drawn by the page body, so applying ends in an app-scoped
     # rerun to bring it up to date on the same press rather than leaving it
     # stale until the next page interaction. It sits below the editor, so its
-    # warning appearing does not push the grid down.
-    assert sum("Exp_001" in element.value for element in app.warning) == 1
+    # warning appearing does not push the grid down. Section 6 names it too:
+    # the edit left the stored result derived from the previous value, so the
+    # download is withheld until the experiment is reprocessed.
+    warnings = [element.value for element in app.warning]
+    assert sum("Exp_001" in warning for warning in warnings) == 2
+    assert any("need reprocessing" in warning for warning in warnings)
+    assert any("Download withheld" in warning for warning in warnings)
 
     # The widget key is untouched: changing it would reset the grid's scroll
     # position, and there is no stale delta to escape from.

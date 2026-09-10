@@ -523,6 +523,172 @@ def decode_hdf5_text(attribute_value) -> str:
 # The overview sheet as the single source of experiment metadata
 # =============================================================================
 
+# ---------------------------------------------------------------------------
+# Declared metadata columns
+# ---------------------------------------------------------------------------
+
+# Keys under which a dataset declares which overview columns its pipeline
+# depends on. They live in `processing_parameters`, so they reach a dataset
+# from the file it was loaded from: a file written before the embedding app
+# declared them simply carries neither, which is the backward-compatibility
+# gate for everything built on them.
+METADATA_LOADING_KEY = 'metadata_used_for_raw_data_loading'
+METADATA_PROCESSING_KEY = 'metadata_used_for_processing'
+
+
+def declared_columns(dataset: 'ExperimentalDataset', declaration_key: str) -> List[str]:
+    """
+    Read one of the two declaration lists off a dataset.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset whose ``processing_parameters`` hold the declarations.
+    declaration_key : str
+        `METADATA_LOADING_KEY` or `METADATA_PROCESSING_KEY`.
+
+    Returns
+    -------
+    list of str
+        Declared column names, empty when the key is absent.
+    """
+
+    return list(dataset.processing_parameters.get(declaration_key, []))
+
+
+def metadata_editing_available(dataset: 'ExperimentalDataset') -> bool:
+    """
+    Report whether a dataset declares enough for its metadata to be edited.
+
+    This is the backward-compatibility gate. ``processing_parameters`` reaches
+    a dataset from the file it was loaded from, so a file written before the
+    embedding app declared these lists simply carries neither, and its
+    metadata stays read-only. Requiring *both* keys means a dataset that
+    declares nothing locked can never expose a raw-data-loading column as
+    editable by omission.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset to inspect.
+
+    Returns
+    -------
+    bool
+        True when both declaration lists are present.
+    """
+
+    return (METADATA_LOADING_KEY in dataset.processing_parameters
+            and METADATA_PROCESSING_KEY in dataset.processing_parameters)
+
+
+def columns_invalidating_processing(dataset: 'ExperimentalDataset') -> Optional[List[str]]:
+    """
+    List the columns whose change makes stored processed data obsolete.
+
+    Both declared groups count: a changed processing parameter changes what
+    the processing function computes, and a changed filename or well number
+    means the raw data behind the results is a different measurement
+    altogether.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset holding the declarations.
+
+    Returns
+    -------
+    list of str or None
+        The declared columns, or None for a dataset that declares nothing —
+        the sentinel `ExperimentalDataset.update_overview_df` reads as "treat
+        every difference as invalidating", which is how datasets behaved
+        before the declarations existed.
+    """
+
+    if not metadata_editing_available(dataset):
+        return None
+
+    return (declared_columns(dataset, METADATA_LOADING_KEY)
+            + declared_columns(dataset, METADATA_PROCESSING_KEY))
+
+
+# ---------------------------------------------------------------------------
+# Processing state
+# ---------------------------------------------------------------------------
+
+def experiments_with_stale_results(overview_df: pd.DataFrame,
+                                   experiment_column: str,
+                                   experiment_names) -> List[str]:
+    """
+    List experiments whose stored results no longer follow from their metadata.
+
+    Parameters
+    ----------
+    overview_df : pandas.DataFrame
+        Overview sheet carrying the processed flag.
+    experiment_column : str
+        Column naming the experiments.
+    experiment_names : container of str
+        Experiments the dataset actually holds.
+
+    Returns
+    -------
+    list of str
+        Experiments that are held *and* whose row is not flagged
+        `PROCESSED_TRUE`. Being held is what separates a stale result from an
+        experiment that has simply not been ingested yet: a row with no
+        experiment behind it has no stored results that could be stale, and
+        processing a sheet a few experiments at a time is a normal way to work.
+
+    Notes
+    -----
+    A sheet without a `PROCESSED_FLAG_COLUMN` makes no claim about processing —
+    nothing has been tracking it — and so reports nothing rather than declaring
+    every experiment stale. Read-only, unlike
+    `pyKES.database.data_processing.ensure_processed_column`: a save must not
+    change the dataset it is writing.
+    """
+
+    if (overview_df.empty
+            or PROCESSED_FLAG_COLUMN not in overview_df.columns
+            or experiment_column not in overview_df.columns):
+        return []
+
+    held_names = {str(experiment_name) for experiment_name in experiment_names}
+
+    stale = (overview_df[PROCESSED_FLAG_COLUMN].ne(PROCESSED_TRUE)
+             & overview_df[experiment_column].astype(str).isin(held_names))
+
+    return overview_df.loc[stale, experiment_column].astype(str).tolist()
+
+
+def describe_experiment_names(experiment_names: List[str], maximum_reported: int = 5) -> str:
+    """
+    Render experiment names as one line, summarising a long tail.
+
+    Parameters
+    ----------
+    experiment_names : list of str
+        Names to render.
+    maximum_reported : int, optional
+        How many to name before counting the rest, so a dataset-wide problem
+        does not produce a wall of text.
+
+    Returns
+    -------
+    str
+        Human-readable list, empty when there are no names.
+    """
+
+    if not experiment_names:
+        return ''
+
+    reported_names = sorted(experiment_names)[:maximum_reported]
+    remaining = len(experiment_names) - len(reported_names)
+
+    return ', '.join(reported_names) + (f", and {remaining} more" if remaining else '')
+
+
 # Columns of the overview sheet that are not metadata. The processed flag is a
 # derived, pipeline-owned value: it changes when an experiment is processed,
 # without anything about the experiment's metadata changing, so policing it as
@@ -621,13 +787,24 @@ def experiment_metadata_divergences(experiment: 'Experiment', overview_metadata:
         ``{column: (stored_value, overview_value)}`` for every disagreeing
         column, with `METADATA_KEY_ABSENT` as the stored value where the
         metadata does not carry the column at all.
+
+    Notes
+    -----
+    A column the metadata does not carry and the row has no value for is not a
+    divergence: nothing contradicts anything, and adopting the blank cell
+    replaces no value with no value. Reported, it made every merge of files
+    with different column sets warn that metadata had disagreed — a column one
+    sheet does not have is blank for its rows, and its experiments never
+    carried the key. A present key holding NaN already agreed with a blank
+    cell, so this makes the absent case agree with it.
     """
 
     divergences = {}
 
     for column, overview_value in overview_metadata.items():
         if column not in experiment.metadata:
-            divergences[column] = (METADATA_KEY_ABSENT, overview_value)
+            if not pd.isna(overview_value):
+                divergences[column] = (METADATA_KEY_ABSENT, overview_value)
         elif not values_agree(experiment.metadata[column], overview_value):
             divergences[column] = (experiment.metadata[column], overview_value)
 
@@ -701,6 +878,284 @@ def describe_metadata_divergences(divergences: dict, maximum_reported: int = 5) 
 
     return described + (f"; and {remaining} more experiment(s)" if remaining else '')
 
+# ---------------------------------------------------------------------------
+# Merging datasets
+# ---------------------------------------------------------------------------
+
+def resolve_merged_experiment_column(source_datasets: List['ExperimentalDataset'],
+                                     source_labels: List[str]) -> str:
+    """
+    Decide which column names the experiments of a merged overview sheet.
+
+    Parameters
+    ----------
+    source_datasets : list of ExperimentalDataset
+        Datasets being merged, in merge order.
+    source_labels : list of str
+        How to name each source when the sources disagree.
+
+    Returns
+    -------
+    str
+        The column every source that has a sheet addresses its rows by.
+
+    Raises
+    ------
+    ValueError
+        If two sources address their rows by different columns, or if a source
+        with a sheet does not carry the resolved column at all. A merged sheet
+        can only be addressed by one column, and rows named by any other one
+        would go unreachable from their experiments — silently, since a row
+        that cannot be found simply makes no claim about the metadata.
+
+    Notes
+    -----
+    A source whose sheet does not carry its own experiment column declares
+    nothing: a dataset started fresh holds `DEFAULT_EXPERIMENT_COLUMN` because
+    something has to be the default, not because it means it. Such a source is
+    still required to fit the column the others resolve to, since its rows are
+    dropped otherwise.
+    """
+
+    declared_columns = {label: dataset.experiment_column
+                        for dataset, label in zip(source_datasets, source_labels)
+                        if dataset.experiment_column in dataset.overview_df.columns}
+
+    if len(set(declared_columns.values())) > 1:
+        described = ', '.join(f"{label} names them in {column!r}"
+                              for label, column in declared_columns.items())
+        raise ValueError(
+            "Refusing to merge: the files name their experiments in different overview "
+            f"columns ({described}). Rename the column in one of the sheets so that both "
+            "address their rows the same way.")
+
+    if declared_columns:
+        experiment_column = next(iter(declared_columns.values()))
+    elif source_datasets:
+        experiment_column = source_datasets[0].experiment_column
+    else:
+        experiment_column = DEFAULT_EXPERIMENT_COLUMN
+
+    unaddressable_sources = [label for dataset, label in zip(source_datasets, source_labels)
+                             if not dataset.overview_df.empty
+                             and experiment_column not in dataset.overview_df.columns]
+
+    if unaddressable_sources:
+        raise ValueError(
+            f"Refusing to merge: the overview sheet of {', '.join(unaddressable_sources)} has "
+            f"no {experiment_column!r} column, so its rows name no experiment the merged "
+            "dataset could match them to and would be dropped. Name the experiments in "
+            f"{experiment_column!r} there too.")
+
+    return experiment_column
+
+
+def select_experiments_to_merge(source_datasets: List['ExperimentalDataset'],
+                                source_labels: List[str]) -> tuple:
+    """
+    Pick one experiment per name, and note the repeats that were left out.
+
+    Parameters
+    ----------
+    source_datasets : list of ExperimentalDataset
+        Datasets being merged, in merge order.
+    source_labels : list of str
+        Label of each source, carried along so a repeat can say where it came
+        from.
+
+    Returns
+    -------
+    selected : dict
+        ``{experiment_name: (Experiment, source_label)}``. The first source
+        holding a name wins, so merging files into a loaded dataset never
+        replaces what is already there.
+    skipped : dict
+        ``{experiment_name: source_label}`` for every repeat left out, so a
+        caller can tell the user rather than the merge only printing it.
+    """
+
+    selected = {}
+    skipped = {}
+
+    for dataset, label in zip(source_datasets, source_labels):
+        for experiment_name, experiment in dataset.experiments.items():
+            if experiment_name in selected:
+                skipped.setdefault(experiment_name, label)
+            else:
+                selected[experiment_name] = (experiment, label)
+
+    return selected, skipped
+
+
+def overview_row_takes_precedence(candidate_source: str,
+                                  held_source: str,
+                                  contributing_source: Optional[str]) -> bool:
+    """
+    Report whether a later source's row should replace the one already held.
+
+    Parameters
+    ----------
+    candidate_source, held_source : str
+        Labels of the source offering this row and of the source whose row is
+        currently held for the same experiment.
+    contributing_source : str or None
+        Label of the source the experiment itself came from; None when no
+        source contributed an experiment of that name.
+
+    Returns
+    -------
+    bool
+        True only when the candidate is the source that contributed the
+        experiment and the held row is not. Otherwise the first row seen
+        stands, so merge order remains the tie-break.
+    """
+
+    return candidate_source == contributing_source and held_source != contributing_source
+
+
+def merged_overview_rows(source_datasets: List['ExperimentalDataset'],
+                         source_labels: List[str],
+                         experiment_column: str,
+                         selected_experiments: Dict[str, tuple]) -> List[dict]:
+    """
+    Reduce several overview sheets to one row per experiment name.
+
+    Parameters
+    ----------
+    source_datasets : list of ExperimentalDataset
+        Datasets being merged, in merge order.
+    source_labels : list of str
+        Label of each source.
+    experiment_column : str
+        Column naming the experiments, as resolved by
+        `resolve_merged_experiment_column`.
+    selected_experiments : dict
+        ``{experiment_name: (Experiment, source_label)}`` as returned by
+        `select_experiments_to_merge`.
+
+    Returns
+    -------
+    list of dict
+        The merged rows, each a ``{column: value}`` mapping.
+
+    Notes
+    -----
+    Concatenating the sheets and dropping identical rows is not enough, and
+    left duplicated rows in real merged files: two files routinely list the
+    same experiment with a different processed flag, or with a column one of
+    the sheets does not have, and every such pair survived as two rows
+    describing one experiment. Rows are therefore matched by experiment name.
+
+    Where two sources describe the same experiment, the row from the source
+    that contributed the stored experiment wins — otherwise the merged dataset
+    would hold one file's measurements described by another file's sheet, and
+    the sheet is what every page reads the metadata from.
+
+    Returned as dictionaries rather than as a DataFrame so the caller builds
+    the frame in one go: a column only some of the sheets carry then has its
+    dtype inferred from the values that are actually there.
+    """
+
+    contributing_source = {experiment_name: label
+                           for experiment_name, (_, label) in selected_experiments.items()}
+
+    rows_by_experiment = {}
+    row_source = {}
+    unnamed_rows = []
+
+    for dataset, label in zip(source_datasets, source_labels):
+        if dataset.overview_df.empty or experiment_column not in dataset.overview_df.columns:
+            continue
+
+        for row in dataset.overview_df.to_dict(orient='records'):
+            # A row naming no experiment cannot be a duplicate of one, so it is
+            # carried over as it is rather than collapsed with the others.
+            if pd.isna(row[experiment_column]):
+                unnamed_rows.append(row)
+                continue
+
+            experiment_name = str(row[experiment_column])
+            held_source = row_source.get(experiment_name)
+
+            if held_source is None or overview_row_takes_precedence(
+                    label, held_source, contributing_source.get(experiment_name)):
+                rows_by_experiment[experiment_name] = row
+                row_source[experiment_name] = label
+
+    return list(rows_by_experiment.values()) + unnamed_rows
+
+
+def complete_overview_rows(overview_rows: List[dict],
+                           selected_experiments: Dict[str, tuple],
+                           experiment_column: str) -> List[dict]:
+    """
+    Fill cells the merged sheet has no value for from the stored metadata.
+
+    Parameters
+    ----------
+    overview_rows : list of dict
+        Merged rows, as returned by `merged_overview_rows`.
+    selected_experiments : dict
+        ``{experiment_name: (Experiment, source_label)}``.
+    experiment_column : str
+        Column naming the experiments.
+
+    Returns
+    -------
+    list of dict
+        The same rows, with every gap the experiment itself can answer filled
+        in.
+
+    Notes
+    -----
+    A column only some of the sheets carry leaves the other sources' rows with
+    nothing in it. Since `ExperimentalDataset` re-derives stored metadata from
+    the sheet, such an empty cell overwrote a real measured value with NaN:
+    merging a file written before the sheet gained a column silently emptied
+    that column for its experiments. The experiment still holds the value, so
+    the merged sheet is completed from it instead.
+    """
+
+    merged_columns = {column for row in overview_rows for column in row}
+
+    for row in overview_rows:
+        experiment_name = str(row.get(experiment_column, ''))
+
+        if experiment_name not in selected_experiments:
+            continue
+
+        stored_metadata = selected_experiments[experiment_name][0].metadata
+
+        for column in merged_columns:
+            if column in stored_metadata and pd.isna(row.get(column, np.nan)):
+                row[column] = stored_metadata[column]
+
+    return overview_rows
+
+
+def describe_skipped_experiments(skipped_experiments: Dict[str, str]) -> str:
+    """
+    Render skipped duplicate experiments as one line of prose.
+
+    Parameters
+    ----------
+    skipped_experiments : dict
+        ``{experiment_name: source_label}`` as returned by
+        `select_experiments_to_merge`.
+
+    Returns
+    -------
+    str
+        Human-readable summary, empty when nothing was skipped.
+    """
+
+    if not skipped_experiments:
+        return ''
+
+    return ', '.join(f"'{experiment_name}' in {label}"
+                     for experiment_name, label in sorted(skipped_experiments.items()))
+
+
 @dataclass
 class ExperimentalDataset:
     """
@@ -732,6 +1187,12 @@ class ExperimentalDataset:
         ``{experiment_name: {column: (stale_value, overview_value)}}``. Filled
         in by `load_from_hdf5` so a caller can tell the user that a file it
         just opened had diverged. Not persisted.
+    merge_report : dict
+        What the merge that produced this dataset decided: the ``'sources'``
+        it came from, the ``'skipped_experiments'`` it left out as duplicates
+        and the ``'metadata_corrected'`` it re-derived from the merged sheet.
+        Filled in by `merge_hdf5_files`, empty for a dataset that is not a
+        merge, and not persisted.
 
     Notes
     -----
@@ -754,6 +1215,7 @@ class ExperimentalDataset:
     schema_version: Optional[str] = None
     experiment_column: str = DEFAULT_EXPERIMENT_COLUMN
     metadata_repair_report: Dict[str, Any] = field(default_factory=dict)
+    merge_report: Dict[str, Any] = field(default_factory=dict)
 
     def add_experiment(self, experimental_data: 'Experiment') -> Dict[str, Any]:
         """
@@ -856,6 +1318,68 @@ class ExperimentalDataset:
                                                  experiment_name))
 
         return divergences
+
+    def flag_repaired_results_unprocessed(self, repairs: Dict[str, Any]) -> List[str]:
+        """
+        Clear the processed flag where a repair changed metadata results rest on.
+
+        Parameters
+        ----------
+        repairs : dict
+            What was re-derived from the sheet, in the shape
+            `metadata_divergences` returns.
+
+        Returns
+        -------
+        list of str
+            Experiments whose flag was cleared, empty when no repair touched a
+            column the pipeline depends on.
+
+        Notes
+        -----
+        A repair rewrites stored metadata to match the sheet, which leaves the
+        experiment's ``processed_data`` derived from the value that was
+        replaced — stale results, arrived at without anything editing
+        anything. The processed flag has to say so, or the file saves as
+        though its results still followed from its metadata.
+
+        Only the declared columns count, so a corrected comment does not cost
+        a reprocessing run; a dataset that declares nothing has every
+        difference count, as it did before the declarations existed.
+        """
+
+        invalidating_columns = columns_invalidating_processing(self)
+
+        repaired_experiments = [
+            experiment_name for experiment_name, repaired_columns in repairs.items()
+            if invalidating_columns is None
+            or set(repaired_columns) & set(invalidating_columns)]
+
+        if (not repaired_experiments
+                or PROCESSED_FLAG_COLUMN not in self.overview_df.columns
+                or self.experiment_column not in self.overview_df.columns):
+            return []
+
+        self.overview_df.loc[
+            self.overview_df[self.experiment_column].astype(str).isin(repaired_experiments),
+            PROCESSED_FLAG_COLUMN] = PROCESSED_FALSE
+
+        return repaired_experiments
+
+    def stale_processed_experiments(self) -> List[str]:
+        """
+        Experiments whose stored results no longer follow from their metadata.
+
+        Returns
+        -------
+        list of str
+            Names of the experiments the dataset holds whose overview row is
+            not flagged as processed. Empty for a dataset whose results are
+            all current, and for one whose sheet does not track the flag.
+        """
+
+        return experiments_with_stale_results(self.overview_df, self.experiment_column,
+                                              self.experiments)
 
     # -----------------------------------------------------------------
     # Version / provenance handling
@@ -977,6 +1501,12 @@ class ExperimentalDataset:
         existing_only = existing_df.drop(index=overlapping_keys)
         incoming_only = incoming_df.drop(index=overlapping_keys)
 
+        # A row the sheet adds names an experiment nothing has processed yet.
+        # Left to the concat below, its flag came back as NaN — which the
+        # selectors read as unprocessed only by accident, and which a save now
+        # has to interpret. The overlapping rows already decide it explicitly.
+        incoming_only[PROCESSED_FLAG_COLUMN] = PROCESSED_FALSE
+
         merged_rows = []
         for key in overlapping_keys:
             merged_row = merge_overview_row(existing_df.loc[key],
@@ -997,7 +1527,7 @@ class ExperimentalDataset:
         self.synchronize_experiment_metadata()
 
     def save_to_hdf5(self, filename: str, compression: Optional[str] = None,
-                     verbose: bool = True):
+                     verbose: bool = True, allow_stale_processed_data: bool = False):
         """
         Write the whole dataset to an HDF5 file.
 
@@ -1020,6 +1550,11 @@ class ExperimentalDataset:
             Print one line per experiment written. Set ``False`` when writing
             one file per experiment in a loop, where the per-experiment print
             is noise rather than progress.
+        allow_stale_processed_data : bool, optional
+            Write the file even though some experiments await reprocessing.
+            For a file that is not a deliverable — the Streamlit page stages
+            the loaded dataset in a temporary file to merge it, and refusing
+            that would make a pending reprocessing run block merging.
 
         Returns
         -------
@@ -1035,6 +1570,15 @@ class ExperimentalDataset:
             contradiction on disk, where it has already cost users their
             edits. `synchronize_experiment_metadata` resolves it in favour of
             the sheet.
+        ValueError
+            If any experiment the dataset holds awaits reprocessing, unless
+            `allow_stale_processed_data`. Its metadata changed after it was
+            processed, so its stored ``processed_data`` was derived from values
+            the file no longer contains — a contradiction nothing downstream
+            can detect, since the results look like every other result. A row
+            for an experiment that has not been ingested is not affected:
+            there are no stored results behind it to be stale, and processing
+            a sheet a few experiments at a time is a normal way to work.
         """
         divergences = self.metadata_divergences()
 
@@ -1045,6 +1589,18 @@ class ExperimentalDataset:
                 f"{describe_metadata_divergences(divergences)} "
                 "Call synchronize_experiment_metadata() to adopt the overview "
                 "values, or correct overview_df.")
+
+        stale_experiments = [] if allow_stale_processed_data else self.stale_processed_experiments()
+
+        if stale_experiments:
+            raise ValueError(
+                f"Refusing to save: {len(stale_experiments)} experiment(s) hold results that no "
+                "longer follow from their metadata "
+                f"({describe_experiment_names(stale_experiments)}). Their metadata changed after "
+                "they were processed, so the file would store results derived from values it "
+                "does not contain. Reprocess them with "
+                "pyKES.database.data_processing.reprocess_experiments(), or pass "
+                "allow_stale_processed_data=True to write the file as it is.")
 
         with h5py.File(filename, 'w') as f:
             if not self.overview_df.empty:
@@ -1202,6 +1758,16 @@ class ExperimentalDataset:
             print("Stored metadata disagreed with overview_df and was re-derived from it. "
                   + describe_metadata_divergences(dataset.metadata_repair_report))
 
+            # The repaired values are not the ones the stored results were
+            # computed from, so those results need recomputing — nothing edited
+            # anything here, which is exactly why the flag has to be told.
+            reprocessing_needed = dataset.flag_repaired_results_unprocessed(
+                dataset.metadata_repair_report)
+
+            if reprocessing_needed:
+                print("Their stored results were derived from the replaced values and are "
+                      f"flagged for reprocessing: {describe_experiment_names(reprocessing_needed)}")
+
         return dataset
     
     def list_experiments(self) -> List[str]:
@@ -1232,27 +1798,45 @@ class ExperimentalDataset:
             print(f"{i}. {name}")
 
     @classmethod
-    def merge_hdf5_files(cls, filenames: List[str], output_filename: str = None):
+    def merge_hdf5_files(cls, filenames: List[str], output_filename: str = None,
+                         source_labels: Optional[List[str]] = None):
         """
         Merge multiple HDF5 files into a single ExperimentalDataset.
-        
+
         Parameters
         ----------
         filenames : List[str]
-            List of HDF5 file paths to merge
+            HDF5 files to merge, in precedence order: where two of them hold an
+            experiment of the same name, the earlier one is kept and the later
+            one is reported as skipped.
         output_filename : str, optional
             Path to save the merged dataset. If None, doesn't save.
-            
+        source_labels : list of str, optional
+            Names to report the sources by, one per file. Defaults to the
+            filenames. The Streamlit page passes the names the user uploaded,
+            since it merges through a temporary directory whose paths would
+            mean nothing to them.
+
         Returns
         -------
         ExperimentalDataset
-            Merged dataset containing experiments from all files
-            
+            Merged dataset containing experiments from all files. Its
+            `merge_report` records what the merge decided — the sources, the
+            duplicates it skipped, the stored metadata it corrected — so a
+            caller can show the user rather than the merge only printing it.
+
         Raises
         ------
         ValueError
-            If duplicate experiment names are found across files
-            
+            If the files name their experiments in different overview columns,
+            which no single merged sheet can express.
+
+        Notes
+        -----
+        The merged sheet is built before the experiments are added, so each
+        experiment is aligned with the row that describes it as it enters, and
+        the merged dataset satisfies the metadata invariant by construction.
+
         Examples
         --------
         >>> merged = ExperimentalDataset.merge_hdf5_files(
@@ -1260,74 +1844,77 @@ class ExperimentalDataset:
         ...     output_filename='merged_experiments.h5'
         ... )
         """
-        merged_dataset = cls()
-        overview_dfs = []
-        duplicate_experiments = []
-        
+        source_labels = [str(label) for label in (source_labels or filenames)]
+        source_datasets = []
+
         for filename in filenames:
             print(f"Loading {filename}...")
-            temp_dataset = cls.load_from_hdf5(filename)
+            source_datasets.append(cls.load_from_hdf5(filename))
 
-            # Every source file addresses its rows the same way in practice;
-            # adopting the last one read keeps the merged sheet addressable
-            # rather than falling back to the default when it does not apply.
-            merged_dataset.experiment_column = temp_dataset.experiment_column
+        experiment_column = resolve_merged_experiment_column(source_datasets, source_labels)
+        selected_experiments, skipped_experiments = select_experiments_to_merge(
+            source_datasets, source_labels)
 
-            # Check for duplicate experiment names
-            for exp_name in temp_dataset.experiments.keys():
-                if exp_name in merged_dataset.experiments:
-                    duplicate_experiments.append((exp_name, filename))
-                else:
-                    merged_dataset.add_experiment(temp_dataset.experiments[exp_name])
-            
-            # Collect overview DataFrames
-            if not temp_dataset.overview_df.empty:
-                overview_dfs.append(temp_dataset.overview_df)
+        merged_dataset = cls(experiment_column=experiment_column)
 
-            # Merge plotting_instruction dictionaries
-            if temp_dataset.plotting_instruction:
-                merged_dataset.plotting_instruction.update(temp_dataset.plotting_instruction)
+        overview_rows = merged_overview_rows(source_datasets, source_labels,
+                                             experiment_column, selected_experiments)
+        merged_dataset.overview_df = pd.DataFrame(
+            complete_overview_rows(overview_rows, selected_experiments, experiment_column))
 
-            # Merge group_mapping dictionaries
-            if temp_dataset.group_mapping:
-                merged_dataset.group_mapping.update(temp_dataset.group_mapping)
+        # A source file written before the metadata invariant existed was
+        # repaired as it loaded. Its report would otherwise be discarded with
+        # the source dataset, and the user would never hear about a file they
+        # never opened on its own.
+        metadata_corrected = {experiment_name: columns
+                              for dataset in source_datasets
+                              for experiment_name, columns in dataset.metadata_repair_report.items()
+                              if experiment_name in selected_experiments}
 
-            # Merge processing_parameters dictionaries
-            if temp_dataset.processing_parameters:
-                merged_dataset.processing_parameters.update(temp_dataset.processing_parameters)
+        for experiment_name, (experiment, _) in selected_experiments.items():
+            corrections = merged_dataset.add_experiment(experiment)
+
+            if corrections:
+                metadata_corrected[experiment_name] = corrections
+
+        for dataset in source_datasets:
+            merged_dataset.plotting_instruction.update(dataset.plotting_instruction)
+            merged_dataset.group_mapping.update(dataset.group_mapping)
+            merged_dataset.processing_parameters.update(dataset.processing_parameters)
 
             # Carry over the external provenance of every source file; the
             # merged dataset itself is stamped as newly created on save.
-            source_external_version = (temp_dataset.version or {}).get('external_version') or {}
+            source_external_version = (dataset.version or {}).get('external_version') or {}
             if source_external_version:
                 merged_dataset.stamp_version(external_version=source_external_version)
-        
-        # Report duplicates
-        if duplicate_experiments:
-            print("\nWarning: Found duplicate experiments (skipped):")
-            for exp_name, filename in duplicate_experiments:
-                print(f"  - '{exp_name}' in {filename}")
-        
-        # Merge overview DataFrames
-        if overview_dfs:
-            merged_dataset.overview_df = pd.concat(overview_dfs, ignore_index=True)
-            # Remove duplicate rows if any
-            merged_dataset.overview_df = merged_dataset.overview_df.drop_duplicates()
 
-        # The experiments were added before their rows arrived, so nothing had
-        # a sheet to be aligned with at the time.
-        merged_dataset.synchronize_experiment_metadata()
+        merged_dataset.flag_repaired_results_unprocessed(metadata_corrected)
+
+        merged_dataset.merge_report = {
+            'sources': source_labels,
+            'skipped_experiments': skipped_experiments,
+            'metadata_corrected': metadata_corrected,
+        }
 
         merged_dataset.stamp_version()
-        merged_dataset.version['merged_from'] = [str(filename) for filename in filenames]
+        merged_dataset.version['merged_from'] = source_labels
 
-        print(f"\nMerged dataset contains {len(merged_dataset.experiments)} experiments")
-        
+        if skipped_experiments:
+            print("\nWarning: Found duplicate experiments (skipped): "
+                  + describe_skipped_experiments(skipped_experiments))
+
+        if metadata_corrected:
+            print("\nStored metadata disagreed with the merged overview_df and was "
+                  "re-derived from it. " + describe_metadata_divergences(metadata_corrected))
+
+        print(f"\nMerged dataset contains {len(merged_dataset.experiments)} experiments "
+              f"in {len(merged_dataset.overview_df)} overview row(s)")
+
         # Save if output filename provided
         if output_filename:
             print(f"Saving merged dataset to {output_filename}...")
             merged_dataset.save_to_hdf5(output_filename)
-        
+
         return merged_dataset
 
 def usage_example():

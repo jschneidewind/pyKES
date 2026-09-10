@@ -170,6 +170,12 @@ the experiments. Single cells can also be corrected in the app itself — see
 [metadata_editing.md](metadata_editing.md), which is the other thing that marks
 experiments as needing a reprocessing run.
 
+Until that run happens, the dataset cannot be written: `save_to_hdf5` refuses a
+dataset holding results that no longer follow from their metadata, and the Data
+Upload page withholds the download. Reprocessing is therefore not optional
+housekeeping after a metadata change — it is what makes the dataset saveable
+again. See [metadata_editing.md](metadata_editing.md) §4b.
+
 ### Selecting experiments and handling failures
 
 `experiment_names` restricts the run to a subset; the default is every

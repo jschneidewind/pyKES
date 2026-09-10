@@ -182,6 +182,11 @@ The sheet is merged **once per uploaded file**, tracked by the uploader's
 sheet wins" into "the sheet wins again one rerun after every edit". Clearing
 the widget lets the same workbook be uploaded again.
 
+Merging **HDF5 files** re-seeds the grid for the same reason and a sharper one:
+the merged sheet is a different table, with rows for experiments the dataset
+did not have before, and the grid addresses its rows by position — a delta
+still held client-side would land on another experiment's row.
+
 ---
 
 ## 4. The `Processed` flag, at every transition
@@ -202,6 +207,9 @@ sitting next to it?*
 | Reprocessing fails | unchanged — the previous `processed_data` is kept |
 | Sheet re-upload changing a declared column | `'False'` |
 | Sheet re-upload changing only other columns | unchanged |
+| Sheet re-upload adding a row | `'False'` |
+| Load repairing a declared column | `'False'` |
+| Load repairing only other columns | unchanged |
 
 Two of these are new, and both were wrong before:
 
@@ -216,11 +224,84 @@ Two of these are new, and both were wrong before:
   *declared* column differs, so re-uploading a sheet with a corrected comment
   no longer invalidates a processing run.
 
+A **re-uploaded sheet invalidates the same columns the editor does, and more**
+— which is worth stating, because the two behave differently everywhere else.
+The editor refuses to let a raw-data-loading column be edited at all: changing
+a filename or a well number means the results describe a different measurement,
+and the raw files would have to be uploaded again. A *workbook* is free to carry
+a corrected filename, and when it does, the flag is cleared exactly as it is for
+a changed processing parameter. Both declared groups count as invalidating
+(`columns_invalidating_processing`), so:
+
+| Uploaded sheet changes… | Editable in the grid? | Flag |
+| --- | --- | --- |
+| a declared processing column (`Irradiance [mW/cm2]`) | yes | `'False'` |
+| a declared loading column (`File name O2`) | **no**, read-only | `'False'` |
+| an undeclared column (`Comment`) | yes | unchanged |
+| nothing | — | unchanged |
+
+A dataset declaring neither list has *every* difference clear the flag, which
+is how datasets behaved before the declarations existed: without them, the
+dataset cannot say which columns its results rest on, so it assumes all of them
+do.
+
 ```{note}
 `read_in_experiments_multiprocessing` neither reads nor writes the flag: it
 processes every file its keywords match, regardless. That predates this work
 and is unchanged by it. The Streamlit page does not use that entry point.
 ```
+
+---
+
+## 4b. A file is not written while its results are stale
+
+Editing metadata is only half a change: until the experiment is reprocessed,
+its stored `processed_data` was derived from the value that was replaced. A
+file written in that state is a quiet trap — the results look like every other
+result, and nothing reading it later can tell that the irradiance beside them
+is not the irradiance they were computed from.
+
+So `save_to_hdf5` **refuses**, naming the experiments, and the Data Upload page
+withholds the download rather than offering a file it would refuse to write:
+
+> ⚠️ Download withheld: 1 experiment(s) hold results that no longer follow from
+> their metadata, because the metadata changed after they were processed —
+> NB-316. […] Reprocess them in section 4 above; its **Only experiments needing
+> reprocessing** shortcut selects exactly these.
+
+The check is `ExperimentalDataset.stale_processed_experiments()`, and what it
+counts is deliberately narrow:
+
+* **Only experiments the dataset holds.** A row whose experiment has not been
+  ingested is flagged `'False'` too, but it has no stored results that could be
+  stale. Processing a sheet a few experiments at a time and downloading in
+  between is a normal way to work, and stays possible.
+* **Only sheets that track the flag.** A dataset with no `Processed` column —
+  one built in a notebook, or by `usage_example` — has never had its processing
+  state tracked, and reports nothing rather than declaring everything stale.
+* **The download comes back by itself.** Reprocessing raises the flag, so the
+  button reappears on the same run that finishes the job.
+
+`save_to_hdf5(..., allow_stale_processed_data=True)` writes it anyway. There is
+one caller: the page stages the loaded dataset in a temporary file in order to
+merge HDF5 files into it, and refusing that would make a pending reprocessing
+run block merging altogether.
+
+### What this does and does not catch
+
+It catches every path that changes metadata under stored results, because each
+of them clears the flag — the grid, an uploaded workbook, and the repair of a
+file written before the overview sheet owned the metadata. That last one is the
+subtle case: nothing edited anything, but the load rewrote stored metadata to
+match the sheet, leaving the results derived from the value it replaced. The
+repair now lowers the flag as well, so the file cannot be re-downloaded with
+results that no longer belong to it.
+
+What it cannot catch is a change the *processing function itself* is sensitive
+to but the dataset does not declare — an undeclared column the function reads
+anyway, or a change in the function's own code. The declarations are the only
+statement of what the results depend on, which is why the invalidating set is
+both declared lists rather than a guess.
 
 ---
 

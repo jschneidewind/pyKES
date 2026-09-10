@@ -33,7 +33,10 @@ from typing import Optional
 import pandas as pd
 import streamlit as st
 
-from pyKES.database.database_experiments import ExperimentalDataset
+from pyKES.database.database_experiments import (ExperimentalDataset,
+                                                 describe_experiment_names,
+                                                 describe_metadata_divergences,
+                                                 describe_skipped_experiments)
 from pyKES.database.data_processing import (ingest_experiment,
                                             reprocess_experiment_by_name,
                                             resolve_external_version,
@@ -65,6 +68,11 @@ REPROCESS_SELECTION_KEY = "reprocess_selected_experiments"
 # Session-state key of the checkbox restricting reprocessing to the
 # experiments whose metadata has changed since they were processed
 REPROCESS_STALE_ONLY_KEY = "reprocess_only_stale_experiments"
+
+# How the dataset already loaded is named in a merge report. The merge itself
+# runs on temporary files, so without a label of its own the report would name
+# the dataset after a path the user never saw.
+CURRENT_DATASET_MERGE_LABEL = "the dataset already loaded"
 
 # Session-state keys of the two chunked processing jobs. The ingestion key is
 # suffixed with the handler's storage key, since a page can carry several
@@ -647,11 +655,26 @@ def _render_reprocessing_section(config: DataUploadConfig, dataset: Experimental
 
 
 def _render_HDF5_merging(config: DataUploadConfig, dataset: ExperimentalDataset) -> None:
-    '''
-    Render the HDF5 merging uploader and merge files into the dataset.
-    '''
+    """
+    Render the HDF5 merging uploader and merge submitted files into the dataset.
 
-    with st.form(key = "uploading_HDF5_files_to_merge", clear_on_submit = False):
+    Parameters
+    ----------
+    config : DataUploadConfig
+        Page configuration. Unused here, kept for the uniform section signature.
+    dataset : ExperimentalDataset
+        Dataset the uploaded files are merged into.
+
+    Returns
+    -------
+    None : None
+        Widgets are written to the current Streamlit container.
+    """
+
+    # Cleared on submit: the files have been absorbed into the dataset, and
+    # pressing the button again with them still listed would merge them a
+    # second time, only to report every experiment as a skipped duplicate.
+    with st.form(key = "uploading_HDF5_files_to_merge", clear_on_submit = True):
         uploaded_files = st.file_uploader(
             label = "📦 Upload HDF5 Files to Merge",
             type = ['h5', 'hdf5'],
@@ -660,28 +683,129 @@ def _render_HDF5_merging(config: DataUploadConfig, dataset: ExperimentalDataset)
             accept_multiple_files = True,
         )
         submitted = st.form_submit_button("🚀 Merge HDF5 Files", width="stretch")
-    
-    if not submitted or not uploaded_files:
-        return
-    
+
+    if submitted and uploaded_files:
+        _merge_uploaded_hdf5_files(dataset, uploaded_files)
+
+    _render_merge_report(dataset)
+
+
+def _merge_uploaded_hdf5_files(dataset: ExperimentalDataset, uploaded_files: list) -> None:
+    """
+    Merge the uploaded HDF5 files into the loaded dataset, and restart the page.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset already loaded. It goes into the merge as the first file, which
+        is what gives it precedence: an experiment it already holds is kept,
+        and the uploaded file's copy is reported as skipped.
+    uploaded_files : list
+        Files submitted through the merge uploader.
+
+    Returns
+    -------
+    None : None
+        Replaces ``st.session_state.experimental_dataset`` and reruns the page.
+
+    Notes
+    -----
+    Merging produces a *new* dataset object, so every section rendered after
+    this one would still be describing the dataset this run started with — the
+    download button included, which is how a merge could be followed by
+    downloading the unmerged file. The rerun is what makes the whole page
+    describe the merged dataset instead.
+    """
+
     with tempfile.TemporaryDirectory() as tmp_dir:
-
-        # Save the CURRENT dataset as the first file in the merge
+        # Staged for the merge, not delivered: refusing this file because an
+        # experiment awaits reprocessing would block merging altogether, and
+        # it is read back and discarded within this run.
         current_dataset_path = str(Path(tmp_dir) / "_current_dataset.h5")
-        dataset.save_to_hdf5(current_dataset_path)
+        dataset.save_to_hdf5(current_dataset_path, verbose=False,
+                             allow_stale_processed_data=True)
 
-        all_files = [current_dataset_path]
+        merge_paths = [current_dataset_path]
 
-        for uploaded_file in uploaded_files:
-            file_path = Path(tmp_dir) / uploaded_file.name
+        # Staged under numbered names: two files can arrive with the same one,
+        # and writing both to that name merged one of them twice and dropped
+        # the other, reporting the difference only as skipped duplicates.
+        for index, uploaded_file in enumerate(uploaded_files):
+            file_path = Path(tmp_dir) / f"{index}_{uploaded_file.name}"
             file_path.write_bytes(uploaded_file.getbuffer())
-            all_files.append(str(file_path))
+            merge_paths.append(str(file_path))
 
-        merged_dataset = ExperimentalDataset.merge_hdf5_files(all_files)
+        # Labelled by what the user recognises: the merge runs on temporary
+        # paths, and those are what the provenance would otherwise record.
+        merged_dataset = ExperimentalDataset.merge_hdf5_files(
+            merge_paths,
+            source_labels = [CURRENT_DATASET_MERGE_LABEL]
+                            + [uploaded_file.name for uploaded_file in uploaded_files])
 
     st.session_state.experimental_dataset = merged_dataset
-    st.success(f"✅ Merged {len(uploaded_files)} file(s) into current dataset successfully")
-            
+
+    # The merged sheet is a different table with different rows in different
+    # places, and the grid addresses its rows by position — a delta it still
+    # holds client-side would land on another experiment's row.
+    discard_metadata_editor_state()
+
+    st.rerun()
+
+
+def _render_merge_report(dataset: ExperimentalDataset) -> None:
+    """
+    Report what the merge that produced this dataset decided.
+
+    Parameters
+    ----------
+    dataset : ExperimentalDataset
+        Dataset carrying a ``merge_report``; nothing is rendered for a dataset
+        that is not a merge.
+
+    Returns
+    -------
+    None : None
+        Widgets are written to the current Streamlit container.
+
+    Notes
+    -----
+    Read from the dataset rather than parked in session state, so that it
+    survives the rerun the merge ends with — and keeps describing the dataset
+    in memory for as long as it is the merged one. The skipped duplicates in
+    particular were only ever printed to a console the user of a deployed app
+    never sees, so a merge silently dropped the experiments it could not take.
+    """
+
+    report = dataset.merge_report
+
+    if not report:
+        return
+
+    st.success(f"✅ Merged: {', '.join(report['sources'])} → "
+               f"{len(dataset.experiments)} experiment(s), "
+               f"{len(dataset.overview_df)} overview row(s)")
+
+    skipped_experiments = report['skipped_experiments']
+
+    if skipped_experiments:
+        st.warning(
+            f"⚠️ {len(skipped_experiments)} experiment(s) were skipped, because the dataset "
+            "already held an experiment of the same name and nothing already loaded is "
+            "overwritten: "
+            + describe_skipped_experiments(skipped_experiments))
+
+    metadata_corrected = report['metadata_corrected']
+
+    if metadata_corrected:
+        st.warning(
+            f"⚠️ {len(metadata_corrected)} experiment(s) held metadata that disagreed with "
+            "the merged overview table. The overview values have been adopted, and are what "
+            "the analysis pages now use.")
+
+        with st.expander("What was corrected"):
+            st.code(describe_metadata_divergences(metadata_corrected,
+                                                  maximum_reported=len(metadata_corrected)))
+
 # ---------------------------------------------------------------------------
 # Results / dataset views
 # ---------------------------------------------------------------------------
@@ -696,11 +820,29 @@ def _render_download_section(
     ----------
     config : DataUploadConfig
     dataset : ExperimentalDataset
+
+    Returns
+    -------
+    None : None
+        Widgets are written to the current Streamlit container.
+
+    Notes
+    -----
+    The stale-results check has to happen here rather than being left to
+    `ExperimentalDataset.save_to_hdf5`: the file is serialized while the page
+    renders, because `st.download_button` needs the bytes up front, so the
+    refusal would reach the user as a traceback covering the rest of the page.
     """
     st.subheader("💾 Download Dataset")
 
     if not dataset.experiments:
         st.info("No experiments in dataset. Upload data first to enable downloads.")
+        return
+
+    stale_experiments = dataset.stale_processed_experiments()
+
+    if stale_experiments:
+        _render_stale_results_refusal(stale_experiments)
         return
 
     col1, col2 = st.columns([2, 1])
@@ -731,6 +873,39 @@ def _render_download_section(
             "storing large numerical datasets and metadata together. Files written "
             "by pyKES can be loaded back with ``ExperimentalDataset.load_from_hdf5``."
         )
+
+
+def _render_stale_results_refusal(stale_experiments: list) -> None:
+    """
+    Say why the dataset cannot be downloaded, and what clears the way.
+
+    Parameters
+    ----------
+    stale_experiments : list of str
+        Experiments whose stored results no longer follow from their metadata.
+
+    Returns
+    -------
+    None : None
+        Widgets are written to the current Streamlit container.
+
+    Notes
+    -----
+    The download is withheld rather than offered with a warning next to it,
+    because the file would look exactly like a correct one: nothing downstream
+    can tell results computed from metadata the file no longer contains from
+    results that follow from it.
+    """
+
+    st.warning(
+        f"⚠️ Download withheld: {len(stale_experiments)} experiment(s) hold results that no "
+        "longer follow from their metadata, because the metadata changed after they were "
+        f"processed — {describe_experiment_names(stale_experiments)}. The file would store "
+        "results derived from values it does not contain, and nothing reading it later could "
+        "tell. Reprocess them in section 4 above; its **Only experiments needing reprocessing** "
+        "shortcut selects exactly these."
+    )
+
 
 def _render_version_information(dataset: ExperimentalDataset) -> None:
     """

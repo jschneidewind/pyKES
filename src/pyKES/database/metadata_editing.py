@@ -39,59 +39,20 @@ import pandas as pd
 
 from pyKES.database.data_processing import mark_experiments_unprocessed
 from pyKES.database.database_experiments import (ExperimentalDataset,
-                                                 NON_METADATA_OVERVIEW_COLUMNS)
+                                                 METADATA_LOADING_KEY,
+                                                 METADATA_PROCESSING_KEY,
+                                                 NON_METADATA_OVERVIEW_COLUMNS,
+                                                 columns_invalidating_processing,
+                                                 declared_columns,
+                                                 metadata_editing_available)
 
 
-# Keys of the two declaration lists inside ``dataset.processing_parameters``.
-# Both must be present for the editor to be offered.
-METADATA_LOADING_KEY = 'metadata_used_for_raw_data_loading'
-METADATA_PROCESSING_KEY = 'metadata_used_for_processing'
-
-
-def declared_columns(dataset: ExperimentalDataset, declaration_key: str) -> List[str]:
-    """
-    Read one of the two declaration lists off a dataset.
-
-    Parameters
-    ----------
-    dataset : ExperimentalDataset
-        Dataset whose ``processing_parameters`` hold the declarations.
-    declaration_key : str
-        `METADATA_LOADING_KEY` or `METADATA_PROCESSING_KEY`.
-
-    Returns
-    -------
-    list of str
-        Declared column names, empty when the key is absent.
-    """
-
-    return list(dataset.processing_parameters.get(declaration_key, []))
-
-
-def metadata_editing_available(dataset: ExperimentalDataset) -> bool:
-    """
-    Report whether a dataset declares enough for its metadata to be edited.
-
-    This is the backward-compatibility gate. ``processing_parameters`` reaches
-    a dataset from the file it was loaded from, so a file written before the
-    embedding app declared these lists simply carries neither, and its
-    metadata stays read-only. Requiring *both* keys means a dataset that
-    declares nothing locked can never expose a raw-data-loading column as
-    editable by omission.
-
-    Parameters
-    ----------
-    dataset : ExperimentalDataset
-        Dataset to inspect.
-
-    Returns
-    -------
-    bool
-        True when both declaration lists are present.
-    """
-
-    return (METADATA_LOADING_KEY in dataset.processing_parameters
-            and METADATA_PROCESSING_KEY in dataset.processing_parameters)
+# The declaration lists themselves live with the dataset that carries them, in
+# `pyKES.database.database_experiments`, and are re-exported here: they say
+# what a dataset's pipeline depends on, which the loader and the merge need to
+# know as much as the editor does. Imported by name above, so that
+# `from pyKES.database.metadata_editing import METADATA_LOADING_KEY` and the
+# rest keep working.
 
 
 def locked_metadata_columns(dataset: ExperimentalDataset,
@@ -136,36 +97,6 @@ def processing_relevant_metadata_columns(dataset: ExperimentalDataset) -> List[s
     return [column for column in declared_columns(dataset, METADATA_PROCESSING_KEY)
             if column in dataset.overview_df.columns
             and column not in NON_METADATA_OVERVIEW_COLUMNS]
-
-
-def columns_invalidating_processing(dataset: ExperimentalDataset) -> Optional[List[str]]:
-    """
-    List the columns whose change makes stored processed data obsolete.
-
-    Both declared groups count: a changed processing parameter changes what
-    the processing function computes, and a changed filename or well number
-    means the raw data behind the results is a different measurement
-    altogether.
-
-    Parameters
-    ----------
-    dataset : ExperimentalDataset
-        Dataset holding the declarations.
-
-    Returns
-    -------
-    list of str or None
-        The declared columns, or None for a dataset that declares nothing —
-        the sentinel `ExperimentalDataset.update_overview_df` reads as "treat
-        every difference as invalidating", which is how datasets behaved
-        before the declarations existed.
-    """
-
-    if not metadata_editing_available(dataset):
-        return None
-
-    return (declared_columns(dataset, METADATA_LOADING_KEY)
-            + declared_columns(dataset, METADATA_PROCESSING_KEY))
 
 
 def missing_declared_columns(dataset: ExperimentalDataset) -> List[str]:
