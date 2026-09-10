@@ -47,7 +47,11 @@ from pyKES.utilities.version_information import (
 # a bump.
 # 1.1 adds the dataset-level 'version' attribute and the per-experiment
 # 'version' attribute (both JSON, both optional for readers).
-SCHEMA_VERSION = "1.1"
+# 1.2 adds the dataset-level 'experiment_column' attribute and the guarantee
+# that per-experiment metadata mirrors the overview row (see
+# `ExperimentalDataset`). Both are additive: a 1.1 reader ignores the
+# attribute, and a 1.2 file loads in a 1.1 reader unchanged.
+SCHEMA_VERSION = "1.2"
 
 # Compression is applied only to arrays of at least this many elements. HDF5
 # refuses to compress scalar datasets outright, and on very small arrays the
@@ -65,6 +69,11 @@ DEFAULT_COMPRESSION_LEVEL = 4
 PROCESSED_FLAG_COLUMN = 'Processed'
 PROCESSED_TRUE = 'True'
 PROCESSED_FALSE = 'False'
+
+# Overview column naming the experiments, unless a dataset says otherwise. The
+# ingestion entry points and the Streamlit configuration default to the same
+# name, so a dataset built either way lines up with the sheet.
+DEFAULT_EXPERIMENT_COLUMN = 'Experiment'
 
 
 def import_overview_excel(file_name, 
@@ -489,6 +498,209 @@ def merge_overview_row(existing_row: pd.Series,
     return merged_row
 
 
+def decode_hdf5_text(attribute_value) -> str:
+    """
+    Read an HDF5 string attribute as text.
+
+    Parameters
+    ----------
+    attribute_value : bytes or str
+        Value as h5py hands it over, which depends on how it was written.
+
+    Returns
+    -------
+    str
+        The attribute as text.
+    """
+
+    if isinstance(attribute_value, bytes):
+        return attribute_value.decode('utf-8')
+
+    return str(attribute_value)
+
+
+# =============================================================================
+# The overview sheet as the single source of experiment metadata
+# =============================================================================
+
+# Columns of the overview sheet that are not metadata. The processed flag is a
+# derived, pipeline-owned value: it changes when an experiment is processed,
+# without anything about the experiment's metadata changing, so policing it as
+# metadata would report a divergence after every ingestion run.
+NON_METADATA_OVERVIEW_COLUMNS = (PROCESSED_FLAG_COLUMN,)
+
+# Stands in for a column the stored metadata does not carry at all, so a
+# divergence report can tell 'absent' from 'present and None'.
+METADATA_KEY_ABSENT = '<absent>'
+
+
+def values_agree(stored_value, overview_value) -> bool:
+    """
+    Report whether a stored metadata value still matches its overview cell.
+
+    Parameters
+    ----------
+    stored_value, overview_value : Any
+        The value held in ``Experiment.metadata`` and the one in the overview
+        row.
+
+    Returns
+    -------
+    bool
+        True when the two describe the same value.
+
+    Notes
+    -----
+    Compared by value rather than by identity or type, because the same cell
+    comes back as a NumPy scalar from a DataFrame, as a plain Python scalar
+    from JSON and as either from HDF5. Two missing values agree: a blank cell
+    that round-trips as NaN has not diverged from one stored as NaN.
+    """
+
+    if pd.isna(stored_value) and pd.isna(overview_value):
+        return True
+
+    return bool(stored_value == overview_value)
+
+
+def overview_metadata_for_experiment(overview_df: pd.DataFrame,
+                                     experiment_column: str,
+                                     experiment_name: str) -> dict:
+    """
+    Read the metadata one experiment's overview row defines.
+
+    Parameters
+    ----------
+    overview_df : pandas.DataFrame
+        Overview sheet of the dataset.
+    experiment_column : str
+        Column naming the experiments.
+    experiment_name : str
+        Experiment to look up.
+
+    Returns
+    -------
+    dict
+        ``{column: value}`` for every overview column the sheet owns, empty
+        when the sheet has no row for this experiment — which is the normal
+        state of an experiment merged in from another file, and means the
+        sheet makes no claim about its metadata.
+    """
+
+    if overview_df.empty or experiment_column not in overview_df.columns:
+        return {}
+
+    # Compared as text because an overview sheet may name its experiments with
+    # numbers, which pandas then holds as ints while the experiments dict is
+    # keyed by the string they were added under.
+    matching_rows = overview_df.loc[
+        overview_df[experiment_column].astype(str).eq(str(experiment_name))]
+
+    if matching_rows.empty:
+        return {}
+
+    return {column: value for column, value in matching_rows.iloc[0].to_dict().items()
+            if column not in NON_METADATA_OVERVIEW_COLUMNS}
+
+
+def experiment_metadata_divergences(experiment: 'Experiment', overview_metadata: dict) -> dict:
+    """
+    Find where one experiment's stored metadata contradicts its overview row.
+
+    Parameters
+    ----------
+    experiment : Experiment
+        Experiment whose ``metadata`` is checked.
+    overview_metadata : dict
+        What the overview row says, as returned by
+        `overview_metadata_for_experiment`.
+
+    Returns
+    -------
+    dict
+        ``{column: (stored_value, overview_value)}`` for every disagreeing
+        column, with `METADATA_KEY_ABSENT` as the stored value where the
+        metadata does not carry the column at all.
+    """
+
+    divergences = {}
+
+    for column, overview_value in overview_metadata.items():
+        if column not in experiment.metadata:
+            divergences[column] = (METADATA_KEY_ABSENT, overview_value)
+        elif not values_agree(experiment.metadata[column], overview_value):
+            divergences[column] = (experiment.metadata[column], overview_value)
+
+    return divergences
+
+
+def apply_overview_metadata(experiment: 'Experiment', overview_metadata: dict) -> None:
+    """
+    Overwrite one experiment's overview-owned metadata with the sheet's values.
+
+    Parameters
+    ----------
+    experiment : Experiment
+        Experiment mutated in place.
+    overview_metadata : dict
+        What the overview row says.
+
+    Returns
+    -------
+    None : None
+
+    Notes
+    -----
+    Only the overview columns are written, so keys a
+    ``metadata_retrival_function`` adds of its own — the reference one adds
+    ``'experiment_name'`` — survive. ``color`` and ``group`` are re-derived
+    from the refreshed metadata, but only from a value the sheet actually
+    supplies: a blank colour cell arrives as NaN, and assigning that would
+    replace a usable colour with one no plotting library accepts.
+    """
+
+    experiment.metadata.update(overview_metadata)
+
+    for attribute in ('color', 'group'):
+        value = experiment.metadata.get(attribute, None)
+
+        if value is not None and not pd.isna(value):
+            setattr(experiment, attribute, value)
+
+
+def describe_metadata_divergences(divergences: dict, maximum_reported: int = 5) -> str:
+    """
+    Render a divergence report as one line of prose.
+
+    Parameters
+    ----------
+    divergences : dict
+        ``{experiment_name: {column: (stored_value, overview_value)}}``.
+    maximum_reported : int, optional
+        How many experiments to name before summarising the rest, so a
+        dataset-wide mismatch does not produce a wall of text.
+
+    Returns
+    -------
+    str
+        Human-readable summary, empty when there is nothing to report.
+    """
+
+    if not divergences:
+        return ''
+
+    reported_names = sorted(divergences)[:maximum_reported]
+
+    described = '; '.join(
+        f"{experiment_name}: "
+        + ', '.join(f"{column} {stored!r} -> {expected!r}"
+                    for column, (stored, expected) in sorted(divergences[experiment_name].items()))
+        for experiment_name in reported_names)
+
+    remaining = len(divergences) - len(reported_names)
+
+    return described + (f"; and {remaining} more experiment(s)" if remaining else '')
+
 @dataclass
 class ExperimentalDataset:
     """
@@ -511,6 +723,26 @@ class ExperimentalDataset:
         On-disk layout version the dataset was loaded from. None for datasets
         that have not been written yet or that come from files predating
         versioning.
+    experiment_column : str, optional
+        Column of ``overview_df`` naming the experiments. The dataset needs it
+        to know which row belongs to which experiment, which is what makes the
+        metadata invariant below enforceable.
+    metadata_repair_report : dict
+        What the last `synchronize_experiment_metadata` corrected, as
+        ``{experiment_name: {column: (stale_value, overview_value)}}``. Filled
+        in by `load_from_hdf5` so a caller can tell the user that a file it
+        just opened had diverged. Not persisted.
+
+    Notes
+    -----
+    ``overview_df`` is the single source of every experiment's metadata: for
+    every column of the sheet, ``Experiment.metadata`` holds exactly what the
+    experiment's row holds. Every mutation path re-establishes that
+    (`add_experiment`, `update_overview_df`, the editing and reprocessing
+    pipelines), `load_from_hdf5` repairs files that predate the guarantee, and
+    `save_to_hdf5` refuses to write a dataset that breaks it. Keys a
+    ``metadata_retrival_function`` adds that are not overview columns are the
+    app's own and are left alone.
     """
 
     experiments: Dict[str, 'Experiment'] = field(default_factory=dict)
@@ -520,23 +752,110 @@ class ExperimentalDataset:
     processing_parameters: Dict[str, Any] = field(default_factory=dict)
     version: Dict[str, Any] = field(default_factory=dict)
     schema_version: Optional[str] = None
+    experiment_column: str = DEFAULT_EXPERIMENT_COLUMN
+    metadata_repair_report: Dict[str, Any] = field(default_factory=dict)
 
-    def add_experiment(self, experimental_data: 'Experiment'):
+    def add_experiment(self, experimental_data: 'Experiment') -> Dict[str, Any]:
         """
         Add an experiment to the dataset, keyed by its name.
 
         An experiment whose name is already present is replaced.
 
+        Every experiment enters a dataset through here, so this is where the
+        overview sheet is imposed on the metadata the caller brought: a
+        processing pipeline that transformed an overview column on its way in
+        gets that column put back, rather than the two versions drifting apart
+        unnoticed.
+
         Parameters
         ----------
         experimental_data : Experiment
-            Experiment to add.
+            Experiment to add; its ``metadata`` is aligned with its overview
+            row in place.
 
         Returns
         -------
-        None
+        dict
+            What had to be corrected to satisfy the invariant, in the shape
+            `metadata_divergences` returns. Empty for the usual case of an
+            experiment whose metadata already matches its row.
         """
         self.experiments[experimental_data.experiment_name] = experimental_data
+
+        overview_metadata = overview_metadata_for_experiment(
+            self.overview_df, self.experiment_column, experimental_data.experiment_name)
+
+        divergences = experiment_metadata_divergences(experimental_data, overview_metadata)
+
+        apply_overview_metadata(experimental_data, overview_metadata)
+
+        return divergences
+
+    # -----------------------------------------------------------------
+    # Metadata / overview consistency
+    # -----------------------------------------------------------------
+
+    def metadata_divergences(self, experiment_names: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Find experiments whose stored metadata contradicts the overview sheet.
+
+        Parameters
+        ----------
+        experiment_names : list of str, optional
+            Experiments to check. Defaults to every experiment in the dataset.
+
+        Returns
+        -------
+        dict
+            ``{experiment_name: {column: (stored_value, overview_value)}}``,
+            empty when the dataset is consistent.
+        """
+
+        if experiment_names is None:
+            experiment_names = list(self.experiments)
+
+        divergences = {}
+
+        for experiment_name in experiment_names:
+            experiment = self.experiments[experiment_name]
+            experiment_divergences = experiment_metadata_divergences(
+                experiment,
+                overview_metadata_for_experiment(self.overview_df,
+                                                 self.experiment_column,
+                                                 experiment_name))
+
+            if experiment_divergences:
+                divergences[experiment_name] = experiment_divergences
+
+        return divergences
+
+    def synchronize_experiment_metadata(self,
+                                        experiment_names: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Re-derive stored metadata from the overview sheet, and report the fixes.
+
+        Parameters
+        ----------
+        experiment_names : list of str, optional
+            Experiments to synchronize. Defaults to every experiment in the
+            dataset. Names without an overview row are left untouched.
+
+        Returns
+        -------
+        dict
+            What was corrected, in the shape `metadata_divergences` returns.
+        """
+
+        divergences = self.metadata_divergences(experiment_names)
+
+        for experiment_name in divergences:
+            apply_overview_metadata(
+                self.experiments[experiment_name],
+                overview_metadata_for_experiment(self.overview_df,
+                                                 self.experiment_column,
+                                                 experiment_name))
+
+        return divergences
 
     # -----------------------------------------------------------------
     # Version / provenance handling
@@ -616,12 +935,21 @@ class ExperimentalDataset:
         """
         Merge an incoming overview DataFrame into the existing overview_df.
 
+        The incoming sheet takes precedence: for every row both sides hold,
+        the sheet's values win over whatever is stored, including edits made
+        in the app. That is what makes re-uploading a corrected workbook the
+        way to undo an editing session. The stored metadata of the affected
+        experiments is re-derived at the end, so the sheet reaches the
+        experiments and not just the overview table.
+
         Parameters
         ----------
         incoming_df : pd.DataFrame
             New overview data to merge in.
         key_column : str
-            Column used to match experiments between the two DataFrames.
+            Column used to match experiments between the two DataFrames. Also
+            adopted as the dataset's ``experiment_column``, since the sheet
+            being merged is what defines how rows are addressed.
         processing_relevant_columns : list of str, optional
             Columns whose change invalidates the processed data. When given,
             a row that differs only in other columns keeps its processed
@@ -633,9 +961,12 @@ class ExperimentalDataset:
         -------
         None
         """
+        self.experiment_column = key_column
+
         if self.overview_df.empty:
             self.overview_df = incoming_df.copy()
             self.overview_df[PROCESSED_FLAG_COLUMN] = PROCESSED_FALSE
+            self.synchronize_experiment_metadata()
             return
 
         existing_df = self.overview_df.copy().set_index(key_column)
@@ -662,6 +993,8 @@ class ExperimentalDataset:
             axis=0,
             sort=False
         ).reset_index()
+
+        self.synchronize_experiment_metadata()
 
     def save_to_hdf5(self, filename: str, compression: Optional[str] = None,
                      verbose: bool = True):
@@ -691,7 +1024,28 @@ class ExperimentalDataset:
         Returns
         -------
         None
+
+        Raises
+        ------
+        ValueError
+            If any experiment's metadata contradicts its overview row. Every
+            mutation path re-establishes that invariant, so reaching a save
+            with it broken means something wrote to ``Experiment.metadata``
+            behind the dataset's back — and writing the file would put the
+            contradiction on disk, where it has already cost users their
+            edits. `synchronize_experiment_metadata` resolves it in favour of
+            the sheet.
         """
+        divergences = self.metadata_divergences()
+
+        if divergences:
+            raise ValueError(
+                "Refusing to save: the stored metadata of "
+                f"{len(divergences)} experiment(s) contradicts overview_df. "
+                f"{describe_metadata_divergences(divergences)} "
+                "Call synchronize_experiment_metadata() to adopt the overview "
+                "values, or correct overview_df.")
+
         with h5py.File(filename, 'w') as f:
             if not self.overview_df.empty:
                 write_df_to_hdf(f, self.overview_df, key='overview_df')
@@ -700,6 +1054,11 @@ class ExperimentalDataset:
             # can detect format drift.
             f.attrs['schema_version'] = SCHEMA_VERSION
             self.schema_version = SCHEMA_VERSION
+
+            # Which overview column names the experiments. Stored so a reader
+            # can line the sheet up with the experiment groups without being
+            # told, which is what the metadata invariant rests on.
+            f.attrs['experiment_column'] = self.experiment_column
 
             # Provenance of the file: which pyKES (and which external app)
             # wrote it, and when it was created / last touched.
@@ -784,6 +1143,12 @@ class ExperimentalDataset:
             elif schema_version_attr is not None:
                 dataset.schema_version = str(schema_version_attr)
 
+            # Absent before schema 1.2, where every dataset used the default.
+            # Read before the experiments, since aligning their metadata with
+            # the sheet depends on knowing which column addresses the rows.
+            if 'experiment_column' in f.attrs:
+                dataset.experiment_column = decode_hdf5_text(f.attrs['experiment_column'])
+
             # Load dataset-level dictionaries from attributes
             if 'plotting_instruction' in f.attrs:
                 dataset.plotting_instruction = json.loads(f.attrs['plotting_instruction'])
@@ -825,7 +1190,17 @@ class ExperimentalDataset:
                     version=version
                 )
 
-                dataset.add_experiment(single_experiment)
+                repaired_columns = dataset.add_experiment(single_experiment)
+
+                # Files written before the invariant existed can hold metadata
+                # the overview sheet contradicts; adding the experiment fixes
+                # it, and the report lets a caller say so.
+                if repaired_columns:
+                    dataset.metadata_repair_report[experiment_name] = repaired_columns
+
+        if dataset.metadata_repair_report:
+            print("Stored metadata disagreed with overview_df and was re-derived from it. "
+                  + describe_metadata_divergences(dataset.metadata_repair_report))
 
         return dataset
     
@@ -892,7 +1267,12 @@ class ExperimentalDataset:
         for filename in filenames:
             print(f"Loading {filename}...")
             temp_dataset = cls.load_from_hdf5(filename)
-            
+
+            # Every source file addresses its rows the same way in practice;
+            # adopting the last one read keeps the merged sheet addressable
+            # rather than falling back to the default when it does not apply.
+            merged_dataset.experiment_column = temp_dataset.experiment_column
+
             # Check for duplicate experiment names
             for exp_name in temp_dataset.experiments.keys():
                 if exp_name in merged_dataset.experiments:
@@ -933,7 +1313,11 @@ class ExperimentalDataset:
             merged_dataset.overview_df = pd.concat(overview_dfs, ignore_index=True)
             # Remove duplicate rows if any
             merged_dataset.overview_df = merged_dataset.overview_df.drop_duplicates()
-        
+
+        # The experiments were added before their rows arrived, so nothing had
+        # a sheet to be aligned with at the time.
+        merged_dataset.synchronize_experiment_metadata()
+
         merged_dataset.stamp_version()
         merged_dataset.version['merged_from'] = [str(filename) for filename in filenames]
 

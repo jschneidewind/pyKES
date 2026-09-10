@@ -4,6 +4,12 @@ Tests for reprocessing experiments that are already held by a dataset.
 The processing callables are synthetic: `process_raw_data` multiplies the raw
 signal by a factor taken from the metadata, so a changed overview sheet and a
 changed processing function are both visible in the results.
+
+``scale`` is an overview column, so the dataset owns it and the stored
+metadata always mirrors the sheet — which is why reprocessing without a
+metadata refresh still sees the sheet's value. ``boost`` is a key the
+retrieval function invents, and the invariant leaves those alone; the two
+together pin both halves of the contract.
 """
 
 import numpy as np
@@ -23,12 +29,15 @@ FAILING_EXPERIMENT = 'Exp_002'
 def retrieve_metadata(experiment_name, overview_df):
     row = overview_df.loc[overview_df['Experiment'] == experiment_name].iloc[0].to_dict()
     row['experiment_name'] = experiment_name
+    row['boost'] = 2.0
 
     return row
 
 
 def process_raw_data(raw_data_dict, metadata_dict):
-    return {'maximum': float(np.max(raw_data_dict['signal'])) * metadata_dict['scale']}
+    scaled = float(np.max(raw_data_dict['signal'])) * metadata_dict['scale']
+
+    return {'maximum': scaled * metadata_dict.get('boost', 1.0)}
 
 
 def failing_processing(raw_data_dict, metadata_dict):
@@ -69,21 +78,29 @@ def dataset():
     return experimental_dataset
 
 
-def test_stored_metadata_is_reused_when_not_refreshed(dataset):
+def test_stored_metadata_already_matches_the_overview_sheet(dataset):
+    # The fixture asks for scale = 1.0, which contradicts the sheet's 10.0.
+    # Adding the experiment resolves that in favour of the sheet, so even a
+    # run without a metadata refresh works from the sheet's value.
     results = reprocess_experiments(dataset, process_raw_data)
 
     assert all(result['success'] for result in results)
-    # scale = 1.0 from the stored metadata, not the 10.0 of the overview sheet
-    assert dataset.experiments['Exp_001'].processed_data == {'maximum': 3.0}
+    assert dataset.experiments['Exp_001'].metadata['scale'] == 10.0
+    assert dataset.experiments['Exp_001'].processed_data == {'maximum': 30.0}
+    assert dataset.metadata_divergences() == {}
 
 
-def test_refreshed_metadata_takes_effect(dataset):
+def test_refreshed_metadata_keeps_the_retrieval_functions_own_keys(dataset):
     reprocess_experiments(dataset, process_raw_data,
                           metadata_retrival_function=retrieve_metadata)
 
-    assert dataset.experiments['Exp_001'].processed_data == {'maximum': 30.0}
-    assert dataset.experiments['Exp_002'].processed_data == {'maximum': 300.0}
+    # scale comes from the sheet; boost is the retrieval function's own key
+    # and is not an overview column, so the invariant does not touch it.
+    assert dataset.experiments['Exp_001'].processed_data == {'maximum': 60.0}
+    assert dataset.experiments['Exp_002'].processed_data == {'maximum': 600.0}
     assert dataset.experiments['Exp_001'].metadata['scale'] == 10.0
+    assert dataset.experiments['Exp_001'].metadata['boost'] == 2.0
+    assert dataset.metadata_divergences() == {}
 
 
 def test_a_subset_can_be_reprocessed(dataset):
@@ -91,7 +108,7 @@ def test_a_subset_can_be_reprocessed(dataset):
                           metadata_retrival_function=retrieve_metadata,
                           experiment_names=['Exp_001'])
 
-    assert dataset.experiments['Exp_001'].processed_data == {'maximum': 30.0}
+    assert dataset.experiments['Exp_001'].processed_data == {'maximum': 60.0}
     assert dataset.experiments['Exp_002'].processed_data == {'maximum': -1.0}
 
 
@@ -108,7 +125,7 @@ def test_a_failure_keeps_the_previous_results(dataset):
 
     assert [failure['file'] for failure in failures] == [FAILING_EXPERIMENT]
     assert dataset.experiments[FAILING_EXPERIMENT].processed_data == {'maximum': -1.0}
-    assert dataset.experiments['Exp_001'].processed_data == {'maximum': 3.0}
+    assert dataset.experiments['Exp_001'].processed_data == {'maximum': 30.0}
 
 
 def test_progress_is_reported_for_every_experiment(dataset):

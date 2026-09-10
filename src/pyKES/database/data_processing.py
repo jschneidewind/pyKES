@@ -711,6 +711,10 @@ def reprocess_experiment_by_name(experiment_name: str,
     # name-addressed entry point is where the dataset learns the processed
     # data follows from the current metadata again.
     if result['success']:
+        # A metadata_retrival_function is free to transform what it read, so
+        # the overview sheet is imposed again before the flag says the two
+        # agree.
+        database.synchronize_experiment_metadata([experiment_name])
         mark_experiment_processed(database, experiment_name, overview_df_experiment_column)
 
     return result
