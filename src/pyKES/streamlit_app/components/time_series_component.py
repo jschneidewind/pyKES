@@ -40,6 +40,8 @@ Date: 31 August 2026
 import streamlit as st
 import plotly.graph_objects as go
 
+from pyKES.plotting.plot_colors import resolve_plot_color
+from pyKES.streamlit_app.components.color_warning import render_unrecognized_color_warning
 from pyKES.utilities.resolve_attributes import resolve_experiment_attributes, resolve_path_slash
 
 
@@ -241,7 +243,7 @@ def build_trace_specifications(selected_experiments: list,
             trace_specifications.append({
                 'experiment_name': exp_name,
                 'plot_type': plot_type,
-                'color': experiment.color,
+                'color': resolve_plot_color(experiment.color),
                 'data': resolved_plots[plot_type],
                 'unit_x': resolve_unit_label(experiment, plot_config.get(X_UNIT_KEY)),
                 'unit_y': resolve_unit_label(experiment, plot_config.get(Y_UNIT_KEY)),
@@ -784,6 +786,8 @@ def render_time_series() -> None:
 
     with col2:
         st.header("Visualization Panel")
+
+        render_unrecognized_color_warning(experimental_dataset.experiments)
 
         ctrl_col1, ctrl_col2 = st.columns(2)
 

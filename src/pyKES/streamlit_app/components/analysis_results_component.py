@@ -18,6 +18,8 @@ from collections import defaultdict
 from itertools import groupby
 from typing import Dict, List, Tuple, Optional, Any
 
+from pyKES.plotting.plot_colors import resolve_plot_color
+from pyKES.streamlit_app.components.color_warning import render_unrecognized_color_warning
 from pyKES.utilities.resolve_attributes import resolve_experiment_attributes
 
 
@@ -790,7 +792,7 @@ def create_plotly_figure(
         
         # Get subset info
         _, subset_value, _, first_exp_data, _, _, _ = group_data[0]
-        exp_color = first_exp_data.color
+        exp_color = resolve_plot_color(first_exp_data.color)
         
         # Extract data for plotting
         x_values = []
@@ -1209,7 +1211,9 @@ def render_analysis_results() -> None:
     # Render visualization panel
     with col2:
         st.header("Visualization Panel")
-        
+
+        render_unrecognized_color_warning(active_experiments)
+
         # Render control panel
         x_axis_mode, x_axis_group_mapping = render_control_panel(
             group_mapping, 
