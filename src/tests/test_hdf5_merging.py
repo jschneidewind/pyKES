@@ -18,8 +18,12 @@ import pytest
 
 from pyKES.database.database_experiments import Experiment, ExperimentalDataset
 from pyKES.streamlit_app.components.metadata_editor import METADATA_EDITOR_REVISION_KEY
-from src.tests.test_metadata_consistency import corrupt_stored_metadata
-from src.tests.test_metadata_editor_page import run_page
+# Imported relative to the tests package: pytest inserts ``src`` on the path
+# and imports these as ``tests.test_...``, so an absolute ``src.tests...``
+# import only resolves when the working directory happens to be on the path
+# too — true of ``python -m pytest``, not of the ``pytest`` CI runs.
+from .test_metadata_consistency import corrupt_stored_metadata
+from .test_metadata_editor_page import run_page
 
 HDF5_MIME = 'application/x-hdf'
 
