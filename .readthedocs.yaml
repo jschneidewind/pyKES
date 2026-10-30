@@ -19,9 +19,8 @@ formats:
 
 python:
   install:
-    # Installs pyKES itself plus the docs extra, so autodoc imports the real
-    # package rather than mocks.
-    - method: pip
-      path: .
-      extra_requirements:
+    # Uses pyproject.toml and uv.lock, installing pyKES plus its docs extra.
+    - method: uv
+      command: sync
+      extras:
         - docs
