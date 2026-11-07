@@ -136,7 +136,7 @@ Not both at once — bracketed labels and a ``reference`` argument together rais
 Where quantities are required
 -----------------------------
 
-Two parts of pyKES take and return ``Quantity`` objects rather than floats:
+Three parts of pyKES take and return ``Quantity`` objects rather than floats:
 
 .. list-table::
    :header-rows: 1
@@ -153,6 +153,11 @@ Two parts of pyKES take and return ``Quantity`` objects rather than floats:
      - Every argument and the result. Efficiency formulas mix wavelengths,
        irradiances, areas and rates, each habitually reported in a different
        unit.
+   * - :mod:`pyKES.utilities.solar_to_hydrogen_efficiency`
+     - Energies, absorption edges, temperature, spectra and every result.
+       Energies may be given per event (``eV``) or per mole
+       (``kcal / mol``), the two ways reaction and loss energies are quoted;
+       see :doc:`/solar_to_hydrogen_efficiency`.
 
 Everything else — the ODE modules, the absorption functions, the fitting code —
 works on plain floats in units the caller keeps track of. See

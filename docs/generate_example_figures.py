@@ -22,6 +22,9 @@ from pyKES.reaction_model import Reaction_Model
 from pyKES.utilities.calculate_absorption import (
     calculate_excitations_per_second_multi_competing_fast)
 from pyKES.utilities.max_rate import extract_max_rate, plot_max_rate
+from pyKES.utilities.solar_to_hydrogen_efficiency import (
+    SolarToHydrogenModel, maximize_solar_to_hydrogen_efficiency, plot_efficiency_map,
+    plot_spectrum_partition)
 from pyKES.utilities.unit_handler import Quantity
 
 # --- Output ------------------------------------------------------------------
@@ -62,6 +65,23 @@ TRUE_RATE_CONSTANTS = {'k1': 0.045, 'k2': 0.011}
 FIT_BOUNDS = {'k1': (1e-3, 5e-1), 'k2': (1e-3, 5e-1)}
 FIT_NOISE_FRACTION = 0.02   # relative to the initial concentration
 FIT_SEED = 3
+
+# --- Solar-to-hydrogen efficiency limits ----------------------------------------
+# Energetics of the original analysis: every absorbed photon loses 17.5 kcal/mol,
+# overall water splitting stores 4 x 1.229 eV per O2 and the H2O2 pathway
+# 2 x 1.78 eV per H2O2.
+
+STH_EXCESS_ENERGY = Quantity(17.5, 'kcal / mol')
+STH_WATER_SPLITTING_GIBBS_ENERGY = Quantity(4 * 1.229, 'eV')
+STH_HYDROGEN_PEROXIDE_GIBBS_ENERGY = Quantity(2 * 1.78, 'eV')
+STH_SEED = 0
+STH_MAP_FIRST_RANGE = (300.0, 500.0)    # nm
+STH_MAP_SECOND_RANGE = (300.0, 1000.0)  # nm
+STH_MAP_POINTS = 100
+# Wider than matplotlib's default, and the outer band labels moved apart, so the
+# labels of three bands each under 100 nm wide fit side by side.
+STH_PARTITION_FIGURE_SIZE = (9.0, 5.0)
+STH_PARTITION_LABEL_OFFSETS = Quantity(np.array([-30.0, 0.0, 40.0]), 'nm')
 
 
 def save(figure, name):
@@ -303,6 +323,63 @@ def figure_max_rate():
           f"(true 0.0200), flags: {result.flags}")
 
 
+def figure_spectrum_partition():
+    """
+    Plot how the optimal three-absorber water-splitting cycle divides AM 1.5 G.
+
+    The first two absorbers take up one photon per O2 and the third two, so
+    the third band has to hold twice the flux of the others.
+
+    Returns
+    -------
+    None
+    """
+
+    model = SolarToHydrogenModel(gibbs_energy=STH_WATER_SPLITTING_GIBBS_ENERGY,
+                                 excess_energy=STH_EXCESS_ENERGY)
+    optimum = maximize_solar_to_hydrogen_efficiency(model, [1, 1, 2], seed=STH_SEED)
+
+    figure, ax = plt.subplots(figsize=STH_PARTITION_FIGURE_SIZE)
+    plot_spectrum_partition(model, optimum, label_offsets=STH_PARTITION_LABEL_OFFSETS, ax=ax)
+
+    save(figure, 'solar_to_hydrogen_partition')
+
+    print(f"  edges {optimum.wavelengths.unit['nm'].round(1)} nm, "
+          f"STH {optimum.efficiency.unit['%']:.2f} %")
+
+
+def figure_efficiency_map():
+    """
+    Plot the efficiency of the two-photon H2O2 pathway against both absorption edges.
+
+    The optimum found by differential evolution is marked on the map.
+
+    Returns
+    -------
+    None
+    """
+
+    model = SolarToHydrogenModel(gibbs_energy=STH_HYDROGEN_PEROXIDE_GIBBS_ENERGY,
+                                 excess_energy=STH_EXCESS_ENERGY)
+    optimum = maximize_solar_to_hydrogen_efficiency(model, [1, 1], seed=STH_SEED)
+    first_edge, second_edge = optimum.wavelengths.unit['nm']
+
+    figure, ax = plt.subplots()
+    plot_efficiency_map(model,
+                        Quantity(np.linspace(*STH_MAP_FIRST_RANGE, STH_MAP_POINTS), 'nm'),
+                        Quantity(np.linspace(*STH_MAP_SECOND_RANGE, STH_MAP_POINTS), 'nm'),
+                        [1, 1], ax=ax)
+    ax.plot(first_edge, second_edge, marker='+', markersize=12, color='white')
+    ax.annotate(f"Maximum STH: {optimum.efficiency.unit['%']:.2f} %\n"
+                f'{first_edge:.0f} nm, {second_edge:.0f} nm',
+                (0.6, 0.8), color='white', ha='center', xycoords='axes fraction')
+
+    save(figure, 'solar_to_hydrogen_map')
+
+    print(f'  edges {first_edge:.1f}, {second_edge:.1f} nm, '
+          f"STH {optimum.efficiency.unit['%']:.2f} %")
+
+
 def simulate_consecutive_reaction(rate_constants, initial_concentration, times):
     """
     Analytic solution of [A] → [B] → [C] for the fitting example.
@@ -423,6 +500,8 @@ def main():
     figure_pathway_diagram(build_photochemical_model())
     figure_max_rate()
     figure_fitting()
+    figure_spectrum_partition()
+    figure_efficiency_map()
 
 
 if __name__ == '__main__':
