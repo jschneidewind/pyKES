@@ -181,6 +181,7 @@ the light stays visible next to one carrying a third.
 | **Streamlit pages** | Five reusable pages an external repository *configures rather than forks*: dataset loading, upload and processing, analysis results, time series and a results table. Deployable to a server or, via stlite, straight into the browser as a static site. |
 | **Units** | A lightweight `Quantity` type so a rate in `mol/h` can be read as `umol/s` without a hand-written conversion factor — and so reading an O₂ rate as if it were H₂ raises instead of silently succeeding. |
 | **Efficiencies** | Apparent quantum yield and light-to-hydrogen efficiency, computed in explicit units from measured rates. |
+| **Efficiency limits** | The maximum theoretical solar-to-hydrogen efficiency of a multi-photon water-splitting cycle under AM 1.5 G, and the absorption edges that reach it, found by global optimization. |
 
 ---
 
@@ -198,6 +199,7 @@ Full documentation lives at **[pykes.readthedocs.io](https://pykes.readthedocs.i
 | [Fitting](https://pykes.readthedocs.io/en/latest/guide/fitting.html) | Loss functions, weighting, bounds, diagnosing a bad fit |
 | [Pathways](https://pykes.readthedocs.io/en/latest/guide/pathways.html) | Photon budgets, cycles, reconvergence, reading the diagram |
 | [Maximum rates](https://pykes.readthedocs.io/en/latest/max_rate.html) | The algorithm stage by stage, with parameter guidance |
+| [Efficiency limits](https://pykes.readthedocs.io/en/latest/solar_to_hydrogen_efficiency.html) | The solar-to-hydrogen efficiency model, its optimization and its validation |
 | [Datasets](https://pykes.readthedocs.io/en/latest/guide/dataset.html) | Ingestion, storage, reprocessing, provenance |
 | [Streamlit app](https://pykes.readthedocs.io/en/latest/guide/streamlit_app.html) | Embedding and configuring the pages |
 | [API reference](https://pykes.readthedocs.io/en/latest/api/index.html) | Generated from the docstrings |

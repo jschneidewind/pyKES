@@ -29,6 +29,17 @@ Apparent quantum yield and light-to-hydrogen efficiency.
 .. automodule:: pyKES.utilities.calculate_efficiency
    :members:
 
+Solar-to-hydrogen efficiency limits
+-----------------------------------
+
+The maximum theoretical solar-to-hydrogen efficiency of multi-photon
+water-splitting cycles, and the absorption edges that reach it. The model, its
+optimization and its validation are described in
+:doc:`/solar_to_hydrogen_efficiency`.
+
+.. automodule:: pyKES.utilities.solar_to_hydrogen_efficiency
+   :members:
+
 Units
 -----
 

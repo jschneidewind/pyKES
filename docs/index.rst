@@ -112,6 +112,7 @@ Where to start
    guide/fitting
    guide/pathways
    max_rate
+   solar_to_hydrogen_efficiency
    guide/dataset
    versioning_and_reprocessing
    guide/units
